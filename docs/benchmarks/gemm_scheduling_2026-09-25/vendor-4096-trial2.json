@@ -1,0 +1,222 @@
+{
+  "schema": "y-gemm-vendor-v1",
+  "started_utc": "2026-09-24T21:50:00.032308+00:00",
+  "manifest": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before/4096_4096_4096.manifest",
+  "export": {
+    "version": "1",
+    "m": "4096",
+    "n": "4096",
+    "k": "4096",
+    "entry": "y_autotune_probe",
+    "grid_x": "32",
+    "grid_y": "32",
+    "threads": "128",
+    "dyn_smem_bytes": "37888",
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "sm_version": "sm_89",
+    "ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "source_sha256:src/ptx_emitter.rs": "bb219378c40c2ef25141b9091835d3d224bc69ebc70d3733b24ad7286f3b145e",
+    "source_sha256:src/autotuner.rs": "94daf4cdeae4f2aefcae4ad297b373d87c4d10110558646b61677bea78024e0b",
+    "source_sha256:src/empirical_autotune.rs": "45fbb627060fdd13015e07698a4e5b324e8302855a720017fc6a36fcb213d0a4",
+    "source_sha256:src/cuda_runtime.rs": "1c3cf4a6381a2c76936f5170d7302d48bd071618edd3622a3bbdca243eb3c13b",
+    "source_sha256:src/adaptive_jit.rs": "0b98a05c28abd3bb1baf7db0e08f327eb05de677e122f8ee7da337bfb72f6df4"
+  },
+  "selected": {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "kernel_name": "y_autotune_probe",
+    "grid": [
+      32,
+      32,
+      1
+    ],
+    "block": [
+      128,
+      1,
+      1
+    ],
+    "shared_mem_bytes": 37888,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "sm_version": "sm_89",
+    "ptx_path": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before/4096_4096_4096.ptx"
+  },
+  "ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+  "input_generator": "cuda_runtime::random_f16_bits",
+  "seeds": {
+    "a": 123,
+    "b": 987
+  },
+  "python": "3.14.7 (main, Aug 13 2026, 07:40:04) [GCC 16.2.1 20260810]",
+  "numpy_version": "2.5.3",
+  "gpu_before": {
+    "returncode": 0,
+    "stdout": "name, uuid, driver_version, clocks.current.sm [MHz], clocks.current.memory [MHz], pstate, temperature.gpu, power.draw [W], utilization.gpu [%]\nNVIDIA GeForce RTX 4070 Ti SUPER, GPU-9384484c-35de-96f0-53e2-c3d9f2dfa644, 615.71.09, 2775 MHz, 10501 MHz, P2, 53, 218.13 W, 100 %",
+    "stderr": ""
+  },
+  "environment": {},
+  "device_ordinal": 0,
+  "device_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+  "driver_api_version": 13040,
+  "compute_capability": [
+    8,
+    9
+  ],
+  "reference": {
+    "api": "cublasGemmEx",
+    "library": "/opt/cuda/targets/x86_64-linux/lib/libcublas.so",
+    "version": 130800,
+    "algorithm": "CUBLAS_GEMM_DEFAULT",
+    "compute_type": "CUBLAS_COMPUTE_32F",
+    "input_dtype": "float16",
+    "output_dtype": "float32",
+    "layout": "row_major",
+    "math_mode": "CUBLAS_DEFAULT_MATH | CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION",
+    "alpha": 1,
+    "beta": 0,
+    "same_input_and_output_buffers": true,
+    "stream": "CUDA default stream",
+    "explicit_workspace_bytes": null
+  },
+  "correctness": {
+    "full_y_vs_cublas_relative_l2": 0.0,
+    "cpu_fp64_samples": 128,
+    "sample_y_vs_cpu_fp64_relative_l2": 7.003279055637922e-06,
+    "sample_cublas_vs_cpu_fp64_relative_l2": 7.003279055637922e-06
+  },
+  "warmup_seconds": 3.0199908280010277,
+  "warmup_cycles": 108,
+  "pairs": [
+    {
+      "round": 0,
+      "order": [
+        "y",
+        "cublas"
+      ],
+      "y_us": 1822.5151062011719,
+      "cublas_us": 1663.5391235351562,
+      "y_over_cublas": 1.0955649196444377
+    },
+    {
+      "round": 1,
+      "order": [
+        "cublas",
+        "y"
+      ],
+      "cublas_us": 1686.1711502075195,
+      "y_us": 1797.6512908935547,
+      "y_over_cublas": 1.0661143684449323
+    },
+    {
+      "round": 2,
+      "order": [
+        "y",
+        "cublas"
+      ],
+      "y_us": 1804.1343688964844,
+      "cublas_us": 1683.558464050293,
+      "y_over_cublas": 1.0716196719157056
+    },
+    {
+      "round": 3,
+      "order": [
+        "cublas",
+        "y"
+      ],
+      "cublas_us": 1666.3551330566406,
+      "y_us": 1834.752082824707,
+      "y_over_cublas": 1.1010570594631717
+    },
+    {
+      "round": 4,
+      "order": [
+        "y",
+        "cublas"
+      ],
+      "y_us": 1772.2496032714844,
+      "cublas_us": 1696.2047576904297,
+      "y_over_cublas": 1.0448323501253458
+    },
+    {
+      "round": 5,
+      "order": [
+        "cublas",
+        "y"
+      ],
+      "cublas_us": 1685.5375289916992,
+      "y_us": 1804.7855377197266,
+      "y_over_cublas": 1.0707477624656405
+    },
+    {
+      "round": 6,
+      "order": [
+        "y",
+        "cublas"
+      ],
+      "y_us": 1798.6560821533203,
+      "cublas_us": 1656.3711166381836,
+      "y_over_cublas": 1.0859016219770374
+    },
+    {
+      "round": 7,
+      "order": [
+        "cublas",
+        "y"
+      ],
+      "cublas_us": 1703.5776138305664,
+      "y_us": 1789.6223068237305,
+      "y_over_cublas": 1.0505082317909127
+    },
+    {
+      "round": 8,
+      "order": [
+        "y",
+        "cublas"
+      ],
+      "y_us": 1811.3311767578125,
+      "cublas_us": 1692.0143127441406,
+      "y_over_cublas": 1.0705176446292357
+    },
+    {
+      "round": 9,
+      "order": [
+        "cublas",
+        "y"
+      ],
+      "cublas_us": 1674.5471954345703,
+      "y_us": 1818.9311981201172,
+      "y_over_cublas": 1.0862227132679154
+    }
+  ],
+  "gpu_after": {
+    "returncode": 0,
+    "stdout": "name, uuid, driver_version, clocks.current.sm [MHz], clocks.current.memory [MHz], pstate, temperature.gpu, power.draw [W], utilization.gpu [%]\nNVIDIA GeForce RTX 4070 Ti SUPER, GPU-9384484c-35de-96f0-53e2-c3d9f2dfa644, 615.71.09, 2685 MHz, 10251 MHz, P2, 71, 285.11 W, 100 %",
+    "stderr": ""
+  },
+  "iterations_per_measurement": 20,
+  "summary": {
+    "y": {
+      "median_us": 1804.4599533081055,
+      "p10_us": 1787.8850364685059,
+      "p90_us": 1823.7388038635254,
+      "tflops": 76.16625307756705
+    },
+    "cublas": {
+      "median_us": 1684.547996520996,
+      "p10_us": 1662.822322845459,
+      "p90_us": 1696.9420433044434,
+      "tflops": 81.58803059090336
+    },
+    "median_paired_y_over_cublas": 1.071183717190673
+  },
+  "limitations": [
+    "cuBLAS default heuristic reference; no exhaustive cuBLASLt algorithm/workspace search",
+    "One process and GPU; repeat independent processes before generalizing",
+    "GPU clocks are warmed but not locked; external load and clock drift remain possible",
+    "CUDA-event batched timings include any GPU idle gaps caused by Python/ctypes dispatch",
+    "Repeated same-buffer workload keeps data hot; no weight rotation or cold-cache measurement",
+    "Full Y/cuBLAS agreement plus 128 FP64 CPU samples, not exhaustive FP64 verification"
+  ]
+}

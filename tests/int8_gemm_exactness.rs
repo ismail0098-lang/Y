@@ -9,11 +9,13 @@
 //! int32 too. So the whole contraction must fit:
 //!
 //! ```text
-//!   | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+//!   | sum over k < K of A[r][k] * B[c][k] |  <=  K * 128^2  <=  i32::MAX
 //! ```
 //!
-//! `floor(i32::MAX / 127^2)` is 133_144, and `K % 32 == 0` is already the
-//! kernel's shape precondition, so the largest admissible K is **133_120**.
+//! `I8` includes -128, so `floor(i32::MAX / 128^2)` is 131_071. With the
+//! kernel's `K % 32 == 0` precondition, the largest admissible K is **131_040**.
+//! The earlier 127-based bound admitted K=131_072 with A=B=-128, which the GPU
+//! returned as -2_147_483_648 instead of the exact 2_147_483_648.
 //!
 //! **Nothing checked it.** Not `emit_int8_gemm_kernel`, whose only refusal was
 //! on M % 16 / N % 8 / K % 32; not `proofs/Int8GemmSchedule.v`, which proves
@@ -150,7 +152,7 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
 /// The boundary is ONE K STEP wide, in both directions.
 ///
 /// A one-sided assertion is satisfied by a compiler that refuses everything,
-/// and a bound that is merely "somewhere around 133k" would hide an off-by-one
+/// and a bound that is merely "somewhere around 131k" would hide an off-by-one
 /// that costs a whole K step of exactness — or, in the other direction, admits
 /// a K whose product does not fit.
 #[test]
@@ -163,14 +165,15 @@ fn the_licence_boundary_is_one_k_step_wide() {
          already requires K % 32 == 0, so a bound that is not one can never be \
          the largest admissible K."
     );
-    // The arithmetic the bound comes from, re-derived rather than copied.
+    // Derive the range from I8 itself, including its asymmetric signed minimum.
+    let max_magnitude = u64::from(i8::MIN.unsigned_abs());
     assert!(
-        (bound as u64) * 127 * 127 <= i32::MAX as u64,
+        (bound as u64) * max_magnitude * max_magnitude <= i32::MAX as u64,
         "K = {bound} does not fit: {} > i32::MAX",
-        (bound as u64) * 127 * 127
+        (bound as u64) * max_magnitude * max_magnitude
     );
     assert!(
-        ((bound + 32) as u64) * 127 * 127 > i32::MAX as u64,
+        ((bound + 32) as u64) * max_magnitude * max_magnitude > i32::MAX as u64,
         "K = {} would also fit, so the bound is not the largest one",
         bound + 32
     );
@@ -188,7 +191,7 @@ fn the_licence_boundary_is_one_k_step_wide() {
         bound + 32
     );
     assert!(
-        over.contains("127^2") && over.contains("i32::MAX"),
+        over.contains("128^2") && over.contains("i32::MAX"),
         "the refusal must state the derivation, so it can be acted on rather \
          than merely obeyed:\n{over}"
     );
@@ -207,18 +210,18 @@ fn the_emitter_and_the_proof_agree_on_the_bound() {
     .expect("read proofs/Int8GemmExact.v");
 
     assert!(
-        v.contains("Definition MAX_EXACT_K : Z := MC.I32MAX / (127 * 127)."),
+        v.contains("Definition MAX_EXACT_K : Z := MC.I32MAX / (128 * 128)."),
         "the proof must DERIVE the bound rather than state a numeral, or the \
          two sides can drift while both looking right"
     );
     assert!(
-        v.contains("MAX_EXACT_K = 133144") && v.contains("MAX_EXACT_K_STEPS = 133120"),
+        v.contains("MAX_EXACT_K = 131071") && v.contains("MAX_EXACT_K_STEPS = 131040"),
         "`the_bound_is_one_k_step_wide` must pin both the raw quotient and the \
          step-granular bound; only the second is what the emitter uses"
     );
     assert_eq!(
         emitter_bound(),
-        133_120,
+        131_040,
         "the emitter's INT8_MAX_EXACT_K must be the proof's MAX_EXACT_K_STEPS"
     );
 
@@ -268,11 +271,10 @@ fn the_largest_admitted_k_is_exact_on_the_device() {
     let d_a = ctx.alloc(m * k).unwrap();
     let d_b = ctx.alloc(n * k).unwrap();
     let d_c = ctx.alloc(m * n * 4).unwrap();
-    // 127 is the WORST case, not a convenient one: the bound is a worst case
-    // over the declared operand type, so anything smaller would pass with a
-    // bound that is too large.
-    ctx.memset_u8(&d_a, 127).unwrap();
-    ctx.memset_u8(&d_b, 127).unwrap();
+    // The 0x80 byte is -128 in I8: it exercises the signed minimum that the
+    // previous 127-only test omitted, even at the supposedly safe endpoint.
+    ctx.memset_u8(&d_a, 128).unwrap();
+    ctx.memset_u8(&d_b, 128).unwrap();
     ctx.memset_u8(&d_c, 0).unwrap();
     let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
     ctx.launch(&module, (1, 1, 1), (32, 1, 1), 0, &args).unwrap();
@@ -280,7 +282,7 @@ fn the_largest_admitted_k_is_exact_on_the_device() {
 
     let mut raw = vec![0u8; m * n * 4];
     ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
-    let want = (k as i64) * 127 * 127;
+    let want = (k as i64) * 128 * 128;
     assert!(
         want <= i32::MAX as i64,
         "the fixture is not a test of exactness if it exceeds the bound"
@@ -290,7 +292,7 @@ fn the_largest_admitted_k_is_exact_on_the_device() {
         assert_eq!(
             v as i64, want,
             "C[{i}] = {v} at K = {k}, want {want}. At one K step further the \
-             device returns -2147358688 (measured); the licence exists to make \
+             device returns -2147483648 (measured); the licence exists to make \
              that unreachable, and this asserts it does not refuse a K that is \
              still exact."
         );
@@ -324,10 +326,10 @@ fn the_split_k_accumulation_is_exact_at_the_licensed_maximum() {
     let d_a = ctx.alloc(m * k).unwrap();
     let d_b = ctx.alloc(n * k).unwrap();
     let d_c = ctx.alloc(m * n * 4).unwrap();
-    ctx.memset_u8(&d_a, 127).unwrap();
-    ctx.memset_u8(&d_b, 127).unwrap();
+    ctx.memset_u8(&d_a, 128).unwrap();
+    ctx.memset_u8(&d_b, 128).unwrap();
     let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
-    let want = (k as i64) * 127 * 127;
+    let want = (k as i64) * 128 * 128;
 
     // 17 is deliberately not a divisor of the K step count: the theorem has no
     // divisibility precondition and a sweep of powers of two would not say so.
@@ -370,10 +372,10 @@ fn accumulating_across_launches_wraps_although_each_launch_is_licensed() {
         eprintln!("SKIP: no CUDA driver — the zeroed-C precondition was not demonstrated.");
         return;
     };
-    let k = (emitter_bound() / 2) as usize;
-    assert_eq!(k % 32, 0, "half the bound must still be a legal K");
+    let k = (emitter_bound() / 64 * 32) as usize;
+    assert_eq!(k % 32, 0, "half the bound rounded down must be a legal K");
     let (m, n) = (16usize, 8usize);
-    let per = (k as i64) * 127 * 127;
+    let per = (k as i64) * 128 * 128;
     assert!(
         per <= i32::MAX as i64,
         "each launch must be inside the licence, or this tests nothing"
@@ -386,8 +388,8 @@ fn accumulating_across_launches_wraps_although_each_launch_is_licensed() {
     let d_a = ctx.alloc(m * k).unwrap();
     let d_b = ctx.alloc(n * k).unwrap();
     let d_c = ctx.alloc(m * n * 4).unwrap();
-    ctx.memset_u8(&d_a, 127).unwrap();
-    ctx.memset_u8(&d_b, 127).unwrap();
+    ctx.memset_u8(&d_a, 128).unwrap();
+    ctx.memset_u8(&d_b, 128).unwrap();
     ctx.memset_u8(&d_c, 0).unwrap();
     let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
     let read = |ctx: &CudaContext| -> i64 {
@@ -474,12 +476,12 @@ fn the_zeroed_destination_precondition_is_stated_in_both_places() {
     // The fixture magnitude is DERIVED from the emitter's bound in the proof
     // too, so a change to the bound cannot leave a stale numeral behind.
     assert!(
-        v.contains("Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 2) * (127 * 127)."),
+        v.contains("Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 64 * 32) * (128 * 128)."),
         "the proof's launch magnitude is no longer derived from the licensed maximum"
     );
     assert_eq!(
-        (emitter_bound() as i64 / 2) * 127 * 127,
-        1_073_546_240,
-        "the proof pins LICENSED_HALF = 1073546240; the emitter's bound no longer gives it"
+        (emitter_bound() as i64 / 64 * 32) * 128 * 128,
+        1_073_217_536,
+        "the proof pins LICENSED_HALF = 1073217536; the emitter's bound no longer gives it"
     );
 }

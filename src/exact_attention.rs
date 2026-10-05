@@ -15,10 +15,11 @@ use crate::fixed_exp::ptx_device_function;
 
 /// The largest `seq_len` this kernel is exact for.
 ///
-/// A softmax weight is Q0.28, so `p < 2^28`; `V` is int8, so `|v| <= 127`; and
+/// A softmax weight is Q0.28, with `p <= 2^28` (equality at score delta zero).
+/// The attention input contract is `|v| <= 127`, and
 /// `sum p_i * v_i` accumulates in a 64-bit two's-complement register (the
 /// `red.shared.add.u64` / `red.global.add.u64` chain is signed arithmetic under
-/// another name). Exactness therefore needs `S * (2^28 - 1) * 127 < 2^63`.
+/// another name). Exactness therefore needs `S * 2^28 * 127 < 2^63`.
 ///
 /// This bound was written down in a comment in
 /// `tests/gpu_attention_invariance.rs` ("the i64 accumulator holds sequences to
@@ -30,7 +31,7 @@ use crate::fixed_exp::ptx_device_function;
 /// Note this is a much higher ceiling than the prototype's 264,208 tokens: that
 /// one comes from recombining in float64 (`2^53`), and this kernel recombines
 /// in integers.
-pub const MAX_EXACT_SEQ_LEN: usize = (1usize << 63) / (((1usize << 28) - 1) * 127);
+pub const MAX_EXACT_SEQ_LEN: usize = ((1usize << 63) - 1) / ((1usize << 28) * 127);
 
 /// The smallest multiplier the kernel's `mul.wide.s32` reads as positive.
 ///

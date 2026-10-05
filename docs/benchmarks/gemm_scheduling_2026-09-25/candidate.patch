@@ -1,0 +1,68 @@
+--- a/src/ptx_emitter.rs
++++ b/src/ptx_emitter.rs
+@@ -7806,33 +7806,12 @@
+         for kk_step in 0..k_substeps {
+             let kk = kk_step * 16;
+ 
+-            // ---- B: ldmatrix.x2.trans, two 8-wide N-halves per j (native
+-            // mma.m16n8k16 granularity), reused across every i below (same
+-            // reuse-across-i optimization the prior wmma.load.b loop used) ----
++            // Load A before beginning this row's B/MMA stream. Each B
++            // fragment is loaded exactly once, immediately before its first
++            // use, and then retained for the remaining i rows. The fragment
++            // counts and each accumulator's K-substep order stay unchanged.
+             let mut b_frags: Vec<[Vec<String>; 2]> = Vec::with_capacity(num_j as usize);
+-            for j in 0..num_j {
+-                let mut halves: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+-                for (half_idx, n_half) in [0u32, 8u32].into_iter().enumerate() {
+-                    let col_reg = self.alloc_reg32();
+-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col_reg, warp_col0_local, j * 16 + n_half).unwrap();
+-                    let global_k = self.alloc_reg32();
+-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", global_k, row_off, kk).unwrap();
+-                    let lin = self.alloc_reg32();
+-                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, global_k, smem_b_stride, col_reg).unwrap();
+-                    let byte = self.alloc_reg32();
+-                    writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", byte, lin).unwrap();
+-                    let addr = self.alloc_reg32();
+-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_b_base, byte).unwrap();
+-                    let frag: Vec<String> = (0..2).map(|_| self.alloc_reg32()).collect();
+-                    writeln!(
+-                        &mut self.ptx_buffer,
+-                        "    ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {{{}}}, [{}];",
+-                        frag.join(","), addr
+-                    ).unwrap();
+-                    halves[half_idx] = frag;
+-                }
+-                b_frags.push(halves);
+-            }
++            b_frags.resize_with(num_j as usize, || [Vec::new(), Vec::new()]);
+ 
+             // ---- A: ldmatrix.x4, reused across every j below (same
+             // reuse-across-j optimization the prior wmma.load.a loop used) ----
+@@ -7858,6 +7837,26 @@
+ 
+                 for j in 0..num_j {
+                     for half in 0..2usize {
++                        if i == 0 {
++                            let n_half = half as u32 * 8;
++                            let col_reg = self.alloc_reg32();
++                            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col_reg, warp_col0_local, j * 16 + n_half).unwrap();
++                            let global_k = self.alloc_reg32();
++                            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", global_k, row_off, kk).unwrap();
++                            let lin = self.alloc_reg32();
++                            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, global_k, smem_b_stride, col_reg).unwrap();
++                            let byte = self.alloc_reg32();
++                            writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", byte, lin).unwrap();
++                            let addr = self.alloc_reg32();
++                            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_b_base, byte).unwrap();
++                            let frag: Vec<String> = (0..2).map(|_| self.alloc_reg32()).collect();
++                            writeln!(
++                                &mut self.ptx_buffer,
++                                "    ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {{{}}}, [{}];",
++                                frag.join(","), addr
++                            ).unwrap();
++                            b_frags[j as usize][half] = frag;
++                        }
+                         let lo = 4 * half;
+                         let d = acc[i as usize][j as usize][lo..lo + 4].join(",");
+                         writeln!(

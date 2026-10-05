@@ -448,23 +448,24 @@ Qed.
 (* ------------------------------------------------------------------ *)
 
 (** The largest contraction an int32 accumulator holds exactly, for full-range
-    int8 operands: [|sum| <= K * 127^2] must fit [i32::MAX].
+    int8 operands: [|sum| <= K * 128^2] must fit [i32::MAX].
+    Signed int8 includes -128; using 127 misses the largest positive product.
 
     The emitter refuses at K-STEP granularity, because [K mod 32 = 0] is
     already its shape precondition and a bound that is not a multiple of 32 is
     not expressible as a refusal it can state. *)
-Definition MAX_EXACT_K : Z := MC.I32MAX / (127 * 127).
+Definition MAX_EXACT_K : Z := MC.I32MAX / (128 * 128).
 Definition MAX_EXACT_K_STEPS : Z := MAX_EXACT_K / 32 * 32.
 
 Theorem the_bound_is_one_k_step_wide :
-  MAX_EXACT_K = 133144 /\ MAX_EXACT_K_STEPS = 133120.
+  MAX_EXACT_K = 131071 /\ MAX_EXACT_K_STEPS = 131040.
 Proof. split; vm_compute; reflexivity. Qed.
 
 (** The two sides of it.  [MAX_EXACT_K_STEPS] is admissible and the next K step
     is not - one step wide, which is what makes an off-by-one in the emitter's
     constant visible rather than absorbed. *)
-Theorem the_licence_admits_133120_and_refuses_133152 :
-  133120 * (127 * 127) <= MC.I32MAX /\ MC.I32MAX < 133152 * (127 * 127).
+Theorem the_licence_admits_131040_and_refuses_131072 :
+  131040 * (128 * 128) <= MC.I32MAX /\ MC.I32MAX < 131072 * (128 * 128).
 Proof. unfold MC.I32MAX. split; lia. Qed.
 
 (** **The refutation, refereed against the silicon.**  The device returned
@@ -474,6 +475,13 @@ Proof. unfold MC.I32MAX. split; lia. Qed.
 Theorem the_measured_overflow_is_two_s_complement :
   133152 * (127 * 127) = 2147608608
   /\ MC.wrap32 2147608608 = -2147358688.
+Proof. split; vm_compute; reflexivity. Qed.
+
+(** The old 127-based licence admitted this full-I8 input. The device
+    returned -2147483648 for A = B = -128 at K = 131072, even with C zeroed. *)
+Theorem the_signed_minimum_exposes_the_old_licence :
+  131072 * ((-128) * (-128)) = 2147483648
+  /\ MC.wrap32 2147483648 = -2147483648.
 Proof. split; vm_compute; reflexivity. Qed.
 
 (** Every partial sum of a bounded sequence is bounded by its length times the
@@ -711,7 +719,7 @@ Qed.
 (* ------------------------------------------------------------------ *)
 
 (** Writing [wcombine 0] above forced a hypothesis to be stated that exists
-    nowhere in the compiler: the licence [K * 127^2 <= i32::MAX] is sufficient
+    nowhere in the compiler: the licence [K * 128^2 <= i32::MAX] is sufficient
     only when [C] starts at zero.  The emitter's own comment says a caller must
     zero it, every test does, and NOTHING says the licence depends on it.
 
@@ -721,23 +729,23 @@ Qed.
     obvious thing.  Every launch is individually licensed and the accumulation
     is not.
 
-    Measured on the device, M=16 N=8, every operand 127, K = 66,560 per launch
-    (half the licensed maximum, so each launch is accepted by the compiler),
+    Measured on the device, M=16 N=8, every operand -128, K = 65,504 per launch
+    (half the licensed maximum, rounded down to a whole K step),
     C zeroed once before the first:
 
-      launch 1:  C[0] =  1,073,546,240   exact
-      launch 2:  C[0] =  2,147,092,480   exact
-      launch 3:  C[0] = -1,074,328,576   WRAPPED   (exact: 3,220,638,720)
+      launch 1:  C[0] =  1,073,217,536   exact
+      launch 2:  C[0] =  2,146,435,072   exact
+      launch 3:  C[0] = -1,075,314,688   WRAPPED   (exact: 3,219,652,608)
 
     The three theorems below reproduce that from [MC.wrap32] alone - the CPU
     chain's int32 model, written months earlier for a different instruction on
     a different architecture - which is what makes them a refutation rather
     than a transcription of what the card said. *)
 
-Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 2) * (127 * 127).
+Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 64 * 32) * (128 * 128).
 
 Theorem each_launch_is_licensed_and_three_of_them_wrap :
-  LICENSED_HALF = 1073546240
+  LICENSED_HALF = 1073217536
   /\ LICENSED_HALF <= MC.I32MAX
   /\ 2 * LICENSED_HALF <= MC.I32MAX
   /\ MC.I32MAX < 3 * LICENSED_HALF.
@@ -748,7 +756,7 @@ Qed.
 
 (** The wrapped value the device returned, from the model. *)
 Theorem the_third_launch_wraps_to_the_measured_value :
-  MC.wrap32 (3 * LICENSED_HALF) = -1074328576.
+  MC.wrap32 (3 * LICENSED_HALF) = -1075314688.
 Proof. vm_compute. reflexivity. Qed.
 
 (** And the statement of the hypothesis: with a destination that is not zero,
@@ -840,8 +848,9 @@ Print Assumptions the_emitted_b_address_is_its_fragment_element.
 Print Assumptions the_k_loop_is_the_contraction.
 Print Assumptions every_split_factor_gives_the_contraction.
 Print Assumptions the_bound_is_one_k_step_wide.
-Print Assumptions the_licence_admits_133120_and_refuses_133152.
+Print Assumptions the_licence_admits_131040_and_refuses_131072.
 Print Assumptions the_measured_overflow_is_two_s_complement.
+Print Assumptions the_signed_minimum_exposes_the_old_licence.
 Print Assumptions acc_range_abs_bound.
 Print Assumptions bounded_products_accumulate_exactly.
 Print Assumptions the_addressed_row_is_the_schedules_row.

@@ -1207,12 +1207,23 @@ def gen_msm_bucket():
     L += load("aX", "PX", "first", "NPts")
     L += load("aY", "PY", "first", "NPts")
     L += load("aZ", "PZ", "first", "NPts")
-    for v in temps + ["nX", "nY", "nZ", "bX", "bY", "bZ"]:
+    # `bX`/`bY`/`bZ` are NOT pre-declared: the loop body binds them from the
+    # point it loads, and a kernel-scope zero of the same name was dead and
+    # SHADOWED by that binding, which the invariant verifier refuses (its SSA
+    # model is keyed by name).
+    for v in temps + ["nX", "nY", "nZ"]:
         L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
     L += scratch_decls()
-    L += ["    let ks: U32 = s + 1;",
+    # The loop runs over SIGNED bounds. The invariant verifier refuses an
+    # unsigned proof (the LLVM backend still orders `U32` signed, so a proof
+    # about unsigned `>=` would not hold for it), and `s`/`e` are offsets into
+    # `Idx`, whose length `NIdx` is an `I32`, so every valid offset is exact
+    # in `I32`.
+    L += ["    let si: I32 = s;",
+          "    let ei: I32 = e;",
+          "    let ks: I32 = si + 1;",
           "    @invariant(k >= ks)",
-          "    for k in ks..e {",
+          "    for k in ks..ei {",
           "        let pi: U32 = block_ptr2d_load(Idx, 0, k, NIdx, 1, NIdx);"]
     L += load("bX", "PX", "pi", "NPts", ind="        ")
     L += load("bY", "PY", "pi", "NPts", ind="        ")

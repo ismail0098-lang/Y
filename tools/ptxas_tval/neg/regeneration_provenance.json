@@ -1,0 +1,91 @@
+{
+  "format": 1,
+  "purpose": "Regenerated complete negative-control disassembly; hashes record this local generation, not compiler authenticity or a correctness certificate.",
+  "generated_utc": "2026-10-03T17:51:28.307355+00:00",
+  "target": "sm_89",
+  "ptxas_optimization": 3,
+  "tool_versions": {
+    "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:45:21_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0",
+    "nvdisasm": "nvdisasm: NVIDIA (R) CUDA disassembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:46:02_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0"
+  },
+  "artifacts": [
+    {
+      "name": "folded",
+      "source": "tools/ptxas_tval/neg/folded.ptx",
+      "source_sha256": "e395399932b83f9322564ce9de2bdd81e5e8c9e0ed64a346892dfaab72d86b32",
+      "cubin": "/tmp/y-neg-fixture-regeneration-xp36e1dg/folded.cubin",
+      "cubin_sha256": "39335a98886528e3deb2641b377fb1ad2a1610ef531cb6d3ddeecba5e678b865",
+      "sass": "tools/ptxas_tval/neg/folded.sass",
+      "sass_sha256": "4f97b4034290491ae0b263c602504c231d6d028cfcccb8a11e5829cc090ebe1b",
+      "ptxas_command": [
+        "/opt/cuda/bin/ptxas",
+        "-O3",
+        "-arch=sm_89",
+        "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/tools/ptxas_tval/neg/folded.ptx",
+        "-o",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/folded.cubin"
+      ],
+      "nvdisasm_command": [
+        "/opt/cuda/bin/nvdisasm",
+        "-c",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/folded.cubin"
+      ],
+      "expected_validation": {
+        "verdict": "VALIDATED",
+        "obligations": 9
+      }
+    },
+    {
+      "name": "sub",
+      "source": "tools/ptxas_tval/neg/sub.ptx",
+      "source_sha256": "c28d530b0edafe7827d56edc9608b0f30c47ac3da201e227a26cbbc727f6b723",
+      "cubin": "/tmp/y-neg-fixture-regeneration-xp36e1dg/sub.cubin",
+      "cubin_sha256": "e7aa7af2bd045c78b410e490b4c54fed2c4eb6c274432e3f1f34f88f39ab9ef2",
+      "sass": "tools/ptxas_tval/neg/sub.sass",
+      "sass_sha256": "f72db9d13363369e8be7a6768fa3d8cba9cc19f1abd490c0ec62f0066043416b",
+      "ptxas_command": [
+        "/opt/cuda/bin/ptxas",
+        "-O3",
+        "-arch=sm_89",
+        "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/tools/ptxas_tval/neg/sub.ptx",
+        "-o",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/sub.cubin"
+      ],
+      "nvdisasm_command": [
+        "/opt/cuda/bin/nvdisasm",
+        "-c",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/sub.cubin"
+      ],
+      "expected_validation": {
+        "verdict": "VALIDATED",
+        "obligations": 7
+      }
+    },
+    {
+      "name": "unfoldable",
+      "source": "tools/ptxas_tval/neg/unfoldable.ptx",
+      "source_sha256": "7c4321f8cab08725c8817c4539139d2f514701a811943ddb59918fadc87ab984",
+      "cubin": "/tmp/y-neg-fixture-regeneration-xp36e1dg/unfoldable.cubin",
+      "cubin_sha256": "cceae70b2ff9dc7838607d3889ed76b61f991d3c18c499811991f181c1082ed3",
+      "sass": "tools/ptxas_tval/neg/unfoldable.sass",
+      "sass_sha256": "a727b76422d2a7c7e83921a5abd2cf8f0391654fff9fc3ec134d56aaa295e056",
+      "ptxas_command": [
+        "/opt/cuda/bin/ptxas",
+        "-O3",
+        "-arch=sm_89",
+        "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/tools/ptxas_tval/neg/unfoldable.ptx",
+        "-o",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/unfoldable.cubin"
+      ],
+      "nvdisasm_command": [
+        "/opt/cuda/bin/nvdisasm",
+        "-c",
+        "/tmp/y-neg-fixture-regeneration-xp36e1dg/unfoldable.cubin"
+      ],
+      "expected_validation": {
+        "verdict": "UNPROVED",
+        "obligations": 9
+      }
+    }
+  ]
+}

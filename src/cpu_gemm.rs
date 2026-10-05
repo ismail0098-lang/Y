@@ -803,6 +803,9 @@ fn emit_vnni_pack_b() -> String {
 /// associative, so every such split yields the identical result. Overwriting
 /// would force one call to own the whole reduction and throw the property away.
 ///
+/// Signed extents with `M <= 0`, `N <= 0`, or `K <= 0` are empty ranges:
+/// this entry returns without accessing any matrix or scratch buffer.
+///
 /// Scratch is passed in rather than allocated:
 ///
 /// - `Apanel`: `ceil(M/MR) * ceil(K/2) * MR * 2` int16 — **the whole of A**,
@@ -819,6 +822,17 @@ fn emit_vnni_gemm_driver() -> String {
     let (m, n, k) = ("%M", "%N", "%K");
     let (lda, ldb, ldc) = ("%lda", "%ldb", "%ldc");
     let (ap, bp, ct) = ("%Apanel", "%Bpanel", "%Ctile");
+
+    // This entry accumulates into C. An empty signed source range therefore
+    // adds nothing, including when K is negative. Check before deriving a
+    // panel size or packing A: N <= 0 must not make us read A unnecessarily.
+    b.w("%vg.m.positive = icmp sgt i64 %M, 0");
+    b.w("%vg.n.positive = icmp sgt i64 %N, 0");
+    b.w("%vg.k.positive = icmp sgt i64 %K, 0");
+    b.w("%vg.mn.positive = and i1 %vg.m.positive, %vg.n.positive");
+    b.w("%vg.nonempty = and i1 %vg.mn.positive, %vg.k.positive");
+    b.w("br i1 %vg.nonempty, label %vg.compute, label %vg.empty");
+    b.out.push_str("vg.empty:\n  ret void\nvg.compute:\n");
 
     let kpairs = kpairs_ix().emit(&mut b, &|n: &'static str| match n {
         "kc" => k.to_string(),
@@ -953,6 +967,10 @@ pub const VNNI_THREADED_NAME: &str = "__y_gemm_exact_vnni_threaded";
 /// against; forking per call costs tens of microseconds, which is noise at any
 /// size where threading pays at all. Correctness first - the property under
 /// test here is bit-identity, not peak throughput.
+///
+/// The assigning entry preserves signed source-loop ranges: `M <= 0` or
+/// `N <= 0` accesses no buffer; otherwise `K <= 0` zeros only the live C
+/// rectangle at `ldc`, without accessing A/B or allocating worker buffers.
 ///
 /// `need_libc_decls` is false when the f32 module is also being emitted, since
 /// it declares the same libc entry points and **a duplicate `declare` is an
@@ -1383,7 +1401,17 @@ define void @{threaded}(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda
 entry:
   ; `C` is ASSIGNED by the nest this replaces, while the kernel accumulates
   ; INTO it - which is exactly what lets the K-bands be summed.
-{private_c_ir}
+  ; The original signed loops do not access any buffer for M <= 0 or N <= 0.
+  ; Test these before making a byte count: a negative N is not a memset size.
+  %mpositive = icmp sgt i64 %M, 0
+  %npositive = icmp sgt i64 %N, 0
+  %output.nonempty = and i1 %mpositive, %npositive
+  br i1 %output.nonempty, label %zero.pre, label %empty.return
+
+empty.return:
+  ret void
+
+zero.pre:
   %rowb = mul i64 %N, 8
   br label %zero.head
 
@@ -1395,7 +1423,7 @@ entry:
 ; rows and left the last rows' live cells UNZEROED, and since this kernel
 ; ACCUMULATES into C that is a wrong answer, not a cosmetic one.
 zero.head:
-  %zi = phi i64 [ 0, %entry ], [ %zinext, %zero.body ]
+  %zi = phi i64 [ 0, %zero.pre ], [ %zinext, %zero.body ]
   %zmore = icmp slt i64 %zi, %M
   br i1 %zmore, label %zero.body, label %zero.done
 
@@ -1407,6 +1435,13 @@ zero.body:
   br label %zero.head
 
 zero.done:
+  ; For K <= 0 the source assigns zero to every live C cell, without reading
+  ; A or B. Its natural-number schedule starts only in the positive domain.
+  %kpositive = icmp sgt i64 %K, 0
+  br i1 %kpositive, label %compute.pre, label %empty.return
+
+compute.pre:
+{private_c_ir}
 {tile_count_ir}
   ; WHICH AXIS TO CUT. Both are proved, and they are not the same kind of thing:
   ;

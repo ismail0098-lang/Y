@@ -5361,8 +5361,10 @@ not exercised.
   block.
 - **A data-carrying enum cannot be constructed on the LLVM backend yet**: the
   constructor call is refused by name, so there is no such value to show.
-- A kernel the LLVM backend replaces with the packed GEMM keeps its parameters
-  but has no body variables: the code that runs is the GEMM, not the loop nest.
+- A kernel the LLVM backend substitutes with the packed GEMM runs that GEMM
+  when its buffers do not overlap, and its body as written otherwise - decided
+  when the program runs. Its body's lines and variables belong to the second
+  path only, so a breakpoint on them is not hit when the GEMM runs.
 - A `fn main` with no return type leaves the process's exit status undefined,
   in any build: the runtime exits with whatever the return register holds.
   Declare `fn main() -> I32` when the status matters.

@@ -1,5 +1,9 @@
 """Symbolic executor for a straight-line, predicated SASS basic block.
 
+The ISA/ABI interpretation is conditional on the licensed sm_89 model. Raw
+executor helpers return symbolic states, not target-independent correctness
+verdicts; public validators enforce the architecture license in domain.py.
+
 Every opcode form implemented here is one whose semantics was validated
 against silicon in Phase A, EXCEPT the forms named in ASSUMED below.  An
 opcode or operand form that is not implemented is a hard error -- never a
@@ -22,8 +26,37 @@ CBANK = {0x160:'A_lo', 0x164:'A_hi', 0x168:'B_lo', 0x16c:'B_hi',
 
 ASSUMED = set()   # forms whose semantics is not device-validated
 
-INSN = re.compile(r'^\s*/\*([0-9a-f]+)\*/\s+(.*?);\s*$')
+INSN = re.compile(r'^\s*/\*([0-9a-fA-F]+)\*/\s+(.*?);\s*$')
 LABEL = re.compile(r'^(\.L_\w+):')
+
+# Numbered registers are supported only in this finite regular register file.
+# A vector reaching beyond it is refused, rather than inventing an R255/R256
+# value or assuming how an encoded zero register would wrap a vector access.
+REGULAR_REGISTERS = 255
+
+def source_token(o):
+    """Remove one register reuse hint; unsupported modifier spellings refuse."""
+    o = o.strip()
+    if '.reuse' not in o:
+        return o
+    m = re.fullmatch(r'([-~]?(?:R\d+|UR\d+|RZ|URZ))\.reuse', o)
+    if m is None:
+        raise Exception(f'UNMODELLED SASS source modifier in {o!r}  '
+                        '(refusing, not guessing)')
+    return m.group(1)
+
+# Supported fixed forms must consume their entire operand list. Checking only
+# indexed operands lets an unmodelled trailing modifier/predicate disappear.
+OPERAND_COUNTS = {
+    'NOP': (0,), 'EXIT': (0,), 'BSSY': (2,), 'BSYNC': (1,),
+    **{op: (2,) for op in ('UMOV', 'MOV', 'MOV32I', 'S2R', 'ULDC', 'ULDC.64',
+                           'I2F.U32.RP', 'MUFU.RCP', 'F2I.FTZ.U32.TRUNC.NTZ')},
+    **{op: (3,) for op in ('FMUL', 'FADD', 'FSUB')}, 'FFMA': (4,),
+    **{op: (4,) for op in ('IMAD', 'IMAD.MOV.U32', 'IMAD.MOV', 'IMAD.SHL.U32',
+                           'IMAD.U32', 'IMAD.IADD', 'IMAD.WIDE.U32', 'IMAD.WIDE',
+                           'SEL', 'FSEL', 'FMNMX')},
+    'LEA': (4, 5), 'LEA.HI.X': (6,),
+}
 
 def u64(hi, lo): return Concat(hi, lo)
 
@@ -68,13 +101,13 @@ class Sass:
 
     # ---- operand readers -------------------------------------------------
     def rd(self, o):
-        o = o.strip().replace('.reuse','')
+        o = source_token(o)
         if o.startswith('-') and not o.startswith('-0x'): return -self.rd(o[1:])
         if o.startswith('~'): return ~self.rd(o[1:])
         if o in ('RZ','URZ'): return ZERO
-        m = re.fullmatch(r'R(\d+)(\.64)?', o)
+        m = re.fullmatch(r'R(\d+)', o)
         if m:
-            i = int(m.group(1))
+            i = self.register_span(o, 1, 'scalar operand')[0]
             if i not in self.R:
                 self.undef += 1
                 self.R[i] = BitVec(f'sass_undef_R{i}', W)
@@ -87,16 +120,23 @@ class Sass:
         if m:
             a = int(m.group(1), 16)
             cb = self.sym.get('cbank', CBANK)
-            if a not in cb: raise Exception(f'unmodelled const bank slot 0x{a:x}')
+            if a not in cb:
+                raise Exception(f'UNMODELLED SASS const bank slot 0x{a:x}  '
+                                '(refusing, not guessing)')
             v = cb[a]
             return self.sym[v if isinstance(v,str) else f'{v[0]}_{v[1]}']
         m = re.fullmatch(r'UR(\d+)', o)
-        if m: return self.UR[int(m.group(1))]
+        if m:
+            i = int(m.group(1))
+            if i not in self.UR:
+                self.undef += 1
+                self.UR[i] = BitVec(f'sass_undef_UR{i}', W)
+            return self.UR[i]
         m = re.fullmatch(r'(-?)0x([0-9a-f]+)', o)
         if m:
             v = int(m.group(2), 16)
             return bv(-v if m.group(1) else v)
-        raise Exception(f'unmodelled operand {o!r}')
+        raise Exception(f'UNMODELLED SASS scalar operand {o!r}  (refusing, not guessing)')
 
 
     def frd(self, o):
@@ -191,6 +231,9 @@ class Sass:
         if neg: o = o[1:]
         if o == 'PT': v = BoolVal(True)
         else:
+            if re.fullmatch(r'P\d+', o) is None:
+                raise Exception(f'UNMODELLED SASS predicate operand {o!r}  '
+                                '(refusing, not guessing)')
             i = int(o[1:])
             if i not in self.P:
                 self.undef += 1
@@ -199,16 +242,50 @@ class Sass:
         return Not(v) if neg else v
 
     # ---- writers (predicated) -------------------------------------------
+    def register_span(self, o, count, role):
+        """Validate the entire numbered regular-register span before using it."""
+        m = re.fullmatch(r'R(\d+)', o.strip())
+        if m is None:
+            raise Exception(f'UNMODELLED SASS {role} {o!r}  (refusing, not guessing)')
+        base = int(m.group(1))
+        if count not in (1, 2, 4) or base + count > REGULAR_REGISTERS:
+            raise Exception(f'UNMODELLED SASS {role} span {o!r} ({count} words): '
+                            'outside supported R0..R254  (refusing, not guessing)')
+        return list(range(base, base + count))
+
+    def load_destinations(self, o, count):
+        o = o.strip()
+        if o == 'RZ' and count == 1:
+            return ['RZ']
+        return [f'R{i}' for i in self.register_span(o, count, 'load destination')]
+
     def wr(self, o, val, g):
         o = o.strip()
         if o == 'RZ': return
-        i = int(o[1:])
+        i = self.register_span(o, 1, 'register destination')[0]
+        if not is_bv(val) or val.size() != W:
+            raise Exception(f'UNMODELLED SASS register destination width for {o!r}: '
+                            'expected 32 bits  (refusing, not guessing)')
         old = self.R.get(i)
         if old is None:
             self.undef += 1
             old = BitVec(f'sass_undef_R{i}', W)
         self.R[i] = simplify(val if is_true(g) else If(g, val, old))
         self.defs.append((self.pc, o, self.R[i]))
+
+    def wur(self, o, val, g):
+        """Uniform writes must preserve their old value on a skipped path."""
+        if o.strip() == 'URZ': return
+        m = re.fullmatch(r'UR(\d+)', o.strip())
+        if m is None:
+            raise Exception(f'UNMODELLED SASS uniform destination {o!r}  '
+                            '(refusing, not guessing)')
+        i = int(m.group(1))
+        if is_true(g):
+            self.UR[i] = val
+        else:
+            old = self.rd(o)
+            self.UR[i] = simplify(If(g, val, old))
 
     def est_link(self, opc, ops, g):
         """One link of the u32 division estimate (divest.py), or False.
@@ -217,8 +294,9 @@ class Sass:
         each consuming the previous link's tagged result.  The last link yields a
         FRESH estimate and records the measured facts about it."""
         def src(o):
-            m = re.fullmatch(r'R(\d+)', o.replace('.reuse', ''))
-            return self.R.get(int(m.group(1))) if m else None
+            m = re.fullmatch(r'R(\d+)', source_token(o))
+            return self.R.get(self.register_span(f'R{m.group(1)}', 1,
+                                                'estimate operand')[0]) if m else None
         chain = {'MUFU.RCP': 'i2f', 'IADD3': 'rcp', 'F2I.FTZ.U32.TRUNC.NTZ': 'bias'}
         if opc == 'I2F.U32.RP':
             v = divest.Tagged('i2f', self.rd(ops[1]))
@@ -249,7 +327,7 @@ class Sass:
             return False
         if not is_true(g):
             raise Exception('a predicated division estimate link  (refusing, not guessing)')
-        self.R[int(ops[0][1:])] = v
+        self.R[self.register_span(ops[0], 1, 'estimate destination')[0]] = v
         return True
 
     def est_transfer(self, a, dst, g):
@@ -260,7 +338,7 @@ class Sass:
         the obligation and the fact share one term and, over Int, one variable.
         With the fact stated only on its own spelling the division store was
         `unknown` at 120 s over Int."""
-        if a.get_id() not in self.ests or not is_true(g):
+        if dst.strip() == 'RZ' or a.get_id() not in self.ests or not is_true(g):
             return
         e, d = self.ests[a.get_id()]
         v = self.R[int(dst[1:])]
@@ -276,6 +354,9 @@ class Sass:
     def wp(self, o, val, g):
         o = o.strip()
         if o in ('PT','!PT'): return
+        if re.fullmatch(r'P\d+', o) is None:
+            raise Exception(f'UNMODELLED SASS predicate destination {o!r}  '
+                            '(refusing, not guessing)')
         i = int(o[1:])
         old = self.P.get(i)
         if old is None:
@@ -298,7 +379,7 @@ class Sass:
 
     def src3(self, o):
         """an adder source: returns (value, extra ones for the carry chain)"""
-        o = o.strip().replace('.reuse','')
+        o = source_token(o)
         if o.startswith('-') and not o.startswith('-0x'): return ~self.rd(o[1:]), 1
         return self.rd(o), 0
 
@@ -311,12 +392,20 @@ class Sass:
 
     def pair(self, o):
         """a 64-bit operand held in the register pair starting at o (RZ is 0)"""
-        o = o.strip().replace('.reuse','')
+        o = source_token(o)
         if o == 'RZ': return BitVecVal(0, 64)
-        m = re.fullmatch(r'R(\d+)', o)
-        if not m: raise Exception(f'unmodelled wide operand {o!r}')
-        i = int(m.group(1))
+        i = self.register_span(o, 2, 'wide operand')[0]
         return Concat(self.rd(f'R{i+1}'), self.rd(f'R{i}'))
+
+    def store_words(self, o, count):
+        """Read a vector store source, including PTXAS's all-zero RZ form."""
+        o = source_token(o)
+        if count not in (1, 2, 4):
+            raise Exception(f'UNMODELLED SASS vector store width {count} words  '
+                            '(refusing, not guessing)')
+        if o == 'RZ':
+            return [ZERO] * count
+        return [self.rd(f'R{i}') for i in self.register_span(o, count, 'vector store source')]
 
     def mul_hi_wide(self, a, b, caddr):
         """high word of a*b + {Rc,Rc+1}, and the carry out of that 64-bit add"""
@@ -372,10 +461,20 @@ class Sass:
         m = re.match(r'^(@!?U?P\w+)\s+(.*)$', body)
         if m:
             pred, body = m.group(1), m.group(2)
+            if pred.lstrip('@!').startswith('UP'):
+                raise Exception(f'UNMODELLED SASS uniform predicate {pred!r}  '
+                                '(refusing, not guessing)')
         self.pc += 1
         parts = body.split(None, 1)
         opc = parts[0]
         ops = [o.strip() for o in parts[1].split(',')] if len(parts) > 1 else []
+        counts = OPERAND_COUNTS.get(opc)
+        if opc.startswith(('SHF.', 'USHF.')): counts = (4,)
+        if opc.startswith(('LDG.', 'STG.', 'LDS', 'STS')): counts = (2,)
+        if counts is not None and len(ops) not in counts:
+            expected = '/'.join(str(count) for count in counts)
+            raise Exception(f'UNMODELLED SASS OPERAND COUNT {opc!r}: expected '
+                            f'{expected}, got {len(ops)}  (refusing, not guessing)')
         g = self.alive if pred is None else And(self.alive, self.pr(pred[1:]))
         self.count += 1
         self.forms.add(opc)
@@ -386,7 +485,7 @@ class Sass:
         if opc in ('NOP',):
             pass
         elif opc == 'UMOV':
-            self.UR[int(ops[0][2:])] = rd(ops[1])
+            self.wur(ops[0], rd(ops[1]), g)
         elif opc in ('MOV', 'MOV32I'):
             self.wr(ops[0], rd(ops[1]), g)
         elif opc == 'EXIT':
@@ -458,7 +557,7 @@ class Sass:
         elif opc == 'ULDC':
             m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', ops[1])
             if not m: raise Exception(f'unmodelled ULDC source {ops[1]!r}  (refusing, not guessing)')
-            self.UR[int(ops[0][2:])] = rd(ops[1])
+            self.wur(ops[0], rd(ops[1]), g)
         elif opc.startswith('USHF.'):
             # the uniform-datapath funnel shift; identical semantics to SHF,
             # different register file.  Shares the SHF code rather than copying
@@ -470,28 +569,28 @@ class Sass:
             n64  = ZeroExt(32, rd(ops[2]))
             v = (wide << n64) if f[1] == 'L' else (
                  LShR(wide, n64) if f[2] == 'U32' else (wide >> n64))
-            self.UR[int(ops[0][2:])] = simplify(Extract(31, 0, v))
+            self.wur(ops[0], simplify(Extract(31, 0, v)), g)
         elif opc.startswith('STS'):
             n = {'STS': 1, 'STS.64': 2, 'STS.128': 4}.get(opc)
             if n is None: smem.refuse_subword(opc)
             addr = self.saddr(ops[0])
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 4*n, g))
             self.smem_ops.append(('st', addr, g))
-            vb = int(ops[1][1:])
-            for k in range(n):
+            values = [rd(ops[1])] if n == 1 else self.store_words(ops[1], n)
+            for k, value in enumerate(values):
                 idx = smem.word(addr + bv(4*k))
-                nxt = Store(self.smem, idx, rd(f'R{vb+k}'))
+                nxt = Store(self.smem, idx, value)
                 self.smem = simplify(If(g, nxt, self.smem) if not is_true(g) else nxt)
         elif opc.startswith('LDS'):
             n = {'LDS': 1, 'LDS.64': 2, 'LDS.128': 4}.get(opc)
             if n is None: smem.refuse_subword(opc)
             addr = self.saddr(ops[1])
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 4*n, g))
             self.smem_ops.append(('ld', addr, g))
-            db = int(ops[0][1:])
-            for k in range(n):
-                self.wr(f'R{db+k}', Select(self.smem, smem.word(addr + bv(4*k))), g)
+            for k, destination in enumerate(self.load_destinations(ops[0], n)):
+                self.wr(destination, Select(self.smem, smem.word(addr + bv(4*k))), g)
         elif opc.startswith('BAR.SYNC'):
+            smem.require_full_barrier(opc, ops, 'sass')
             # NOT a no-op -- see smem.py.  A predicated barrier is a program the
             # hardware does not admit either (a partial arrival hangs).
             if not is_true(g):
@@ -502,17 +601,24 @@ class Sass:
             m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', ops[1])
             if not m: raise Exception(f'unmodelled ULDC.64 source {ops[1]!r}  (refusing, not guessing)')
             a = int(m.group(1), 16)
-            i = int(ops[0][2:])
-            cb = self.sym.get('cbank', CBANK)
-            def g2(x):
-                v = cb.get(x)
-                return self.sym[v if isinstance(v,str) else f'{v[0]}_{v[1]}'] if v is not None else BitVecVal(0,W)
-            self.UR[i] = g2(a); self.UR[i+1] = g2(a+4)
+            dst = re.fullmatch(r'UR(\d+)', ops[0])
+            if dst is None:
+                raise Exception(f'UNMODELLED ULDC.64 destination {ops[0]!r}  '
+                                '(refusing, not guessing)')
+            i = int(dst.group(1))
+            # Both halves are real reads. An unmapped bank slot is unknown;
+            # inventing zero for it can prove a translation with the wrong ABI.
+            lo = rd(f'c[0x0][0x{a:x}]')
+            hi = rd(f'c[0x0][0x{a+4:x}]')
+            self.wur(f'UR{i}', lo, g); self.wur(f'UR{i+1}', hi, g)
         elif opc in ('IMAD', 'IMAD.MOV.U32', 'IMAD.MOV', 'IMAD.SHL.U32', 'IMAD.U32', 'IMAD.IADD'):
             if opc == 'IMAD.SHL.U32': ASSUMED.add('IMAD.SHL.U32 = IMAD (multiply pipe shift)')
             self.wr(ops[0], self.mul_lo(rd(ops[1]), rd(ops[2])) + rd(ops[3]), g)
         elif opc == 'IMAD.X':
             # d = lo(a*b) + c + P
+            if len(ops) != 5:
+                raise Exception(f'UNMODELLED SASS OPERAND COUNT in {opc!r}: expected 5, '
+                                f'got {len(ops)}  (refusing, not guessing)')
             s, _ = self.add3(self.mul_lo(rd(ops[1]), rd(ops[2])), rd(ops[3]), ZERO, self.pr(ops[4]))
             self.wr(ops[0], s, g)
         elif opc == 'IMAD.HI.U32':
@@ -530,7 +636,9 @@ class Sass:
             elif len(ops) == 5:    # d, Pout, a, b, c
                 s, co = self.mul_hi_wide(rd(ops[2]), rd(ops[3]), ops[4])
                 self.wr(ops[0], s, g); self.wp(ops[1], co, g); self.widen(s, co)
-            else: raise Exception(f'unmodelled IMAD.HI.U32 arity {len(ops)}')
+            else:
+                raise Exception(f'UNMODELLED SASS OPERAND COUNT in {opc!r}: expected 4 or 5, '
+                                f'got {len(ops)}  (refusing, not guessing)')
         elif opc in ('IMAD.WIDE.U32','IMAD.WIDE'):
             # {Rd+1,Rd} = a*b + {Rc+1,Rc}.  The full-width sibling of
             # IMAD.HI.U32, and the addend is a 64-bit REGISTER PAIR for the same
@@ -541,9 +649,14 @@ class Sass:
             sgn = '.U32' not in opc
             if sgn: ASSUMED.add('IMAD.WIDE (signed) = 64-bit signed product + pair')
             a, b = rd(ops[1]), rd(ops[2])
-            prod = Concat(self.mul_hi(a, b), self.mul_lo(a, b))
+            # Sign extension affects the upper word of a wide product. The
+            # shared multiplier models an UNSIGNED 32x32 product, so using its
+            # high half here identifies IMAD.WIDE with IMAD.WIDE.U32 and can
+            # validate a translation that changed the instruction's signedness.
+            prod = (SignExt(W, a) * SignExt(W, b) if sgn else
+                    Concat(self.mul_hi(a, b), self.mul_lo(a, b)))
             res = simplify(prod + self.pair(ops[3]))
-            d = int(ops[0][1:])
+            d = self.register_span(ops[0], 2, 'wide destination')[0]
             self.wr(f'R{d}',   Extract(W-1, 0, res), g)
             self.wr(f'R{d+1}', Extract(2*W-1, W, res), g)
         elif opc == 'IADD3':
@@ -555,7 +668,9 @@ class Sass:
                 (x,n1),(y,n2),(z,n3) = (self.src3(ops[1]), self.src3(ops[2]), self.src3(ops[3]))
                 s, _ = self.add3(x, y, z, ones=n1+n2+n3)
                 self.wr(ops[0], s, g)
-            else: raise Exception(f'unmodelled IADD3 arity {len(ops)}')
+            else:
+                raise Exception(f'UNMODELLED SASS OPERAND COUNT in {opc!r}: expected 4 or 5, '
+                                f'got {len(ops)}  (refusing, not guessing)')
         elif opc == 'IADD3.X':
             if len(ops) == 7:      # d, Pout, a, b, c, Pin1, Pin2
                 (x,n1),(y,n2),(z,n3) = (self.src3(ops[2]), self.src3(ops[3]), self.src3(ops[4]))
@@ -565,7 +680,9 @@ class Sass:
                 (x,n1),(y,n2),(z,n3) = (self.src3(ops[1]), self.src3(ops[2]), self.src3(ops[3]))
                 s, _ = self.add3(x, y, z, self.pr(ops[4]), self.pr(ops[5]), ones=n1+n2+n3)
                 self.wr(ops[0], s, g)
-            else: raise Exception(f'unmodelled IADD3.X arity {len(ops)}')
+            else:
+                raise Exception(f'UNMODELLED SASS OPERAND COUNT in {opc!r}: expected 6 or 7, '
+                                f'got {len(ops)}  (refusing, not guessing)')
         elif opc == 'SEL':
             self.wr(ops[0], If(self.pr(ops[3]), rd(ops[1]), rd(ops[2])), g)
         elif opc == 'FSEL':
@@ -643,51 +760,51 @@ class Sass:
             # Pd2 is a second predicate output this model does not track, so a
             # use of it is refused rather than dropped; every kernel here writes
             # PT (discard) there.
-            f = opc.split('.')
-            comb = f[-1]
-            cmp_ = f[1]
-            uns  = 'U32' in f
+            m = re.fullmatch(r'ISETP\.(LT|LE|GT|GE|EQ|NE)(\.U32)?\.(AND|OR|XOR)', opc)
+            if m is None:
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+            if len(ops) != 5:
+                raise Exception(f'UNMODELLED SASS OPERAND COUNT in {opc!r}: expected 5, '
+                                f'got {len(ops)}  (refusing, not guessing)')
+            cmp_, unsigned, comb = m.groups()
+            uns = unsigned is not None
             CMPS = {'LT': (ULT, lambda x,y: x<y), 'LE': (ULE, lambda x,y: x<=y),
                     'GT': (UGT, lambda x,y: x>y), 'GE': (UGE, lambda x,y: x>=y),
                     'EQ': (lambda x,y: x==y, lambda x,y: x==y),
                     'NE': (lambda x,y: x!=y, lambda x,y: x!=y)}
             COMBS = {'AND': And, 'OR': Or, 'XOR': Xor}
-            if cmp_ not in CMPS or comb not in COMBS:
-                raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
-            if len(f) > 4 or (len(f)==4 and not uns):
-                raise Exception(f'unmodelled ISETP qualifier in {opc!r}  (refusing, not guessing)')
             if ops[1] != 'PT':
                 raise Exception(f'ISETP writes a second predicate {ops[1]!r}, which this model '
                                 f'does not track  (refusing, not guessing)')
             rel = CMPS[cmp_][0 if uns else 1](rd(ops[2]), rd(ops[3]))
             self.wp(ops[0], COMBS[comb](rel, self.pr(ops[4])), g)
         elif opc == 'LDG.E.128':
-            base = int(ops[0][1:])
+            destinations = self.load_destinations(ops[0], 4)
             addr = self.gaddr(ops[1])
-            i = len(self.loads); self.loads.append((addr, g))
+            i = len(self.loads); self.loads.append((addr, g, 16))
             for k in range(4):
-                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
+                self.wr(destinations[k], self.gload(addr, i, k, 4*k), g)
         elif opc in ('LDG.E','LDG.E.U32','LDG.E.128.CONSTANT','LDG.E.CONSTANT'):
             addr = self.gaddr(ops[1])
-            i = len(self.loads); self.loads.append((addr, g))
             nw = 4 if '128' in opc else 1
-            base = int(ops[0][1:])
+            i = len(self.loads); self.loads.append((addr, g, 4*nw))
+            destinations = self.load_destinations(ops[0], nw)
             for k in range(nw):
-                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
+                self.wr(destinations[k], self.gload(addr, i, k, 4*k), g)
         elif opc in ('LDG.E.S8','LDG.E.U8','LDG.E.S16','LDG.E.U16'):
             # same word-per-byte-address convention as ptxexec's ld.global.s8;
             # the two must agree or nothing downstream means anything
             addr = self.gaddr(ops[1])
-            i = len(self.loads); self.loads.append((addr, g))
             nb = 8 if opc.endswith('8') else 16
+            i = len(self.loads); self.loads.append((addr, g, nb // 8))
             w = self.gload(addr, i, 0, None, nb // 8)
             byte = Extract(nb-1, 0, w)
             self.wr(ops[0], (SignExt(W-nb, byte) if '.S' in opc else ZeroExt(W-nb, byte)), g)
         elif opc == 'STG.E.64':
-            addr = self.gaddr(ops[0]); vb = int(ops[1][1:])
+            addr = self.gaddr(ops[0])
             # split exactly as ptxexec's st.global.u64 does: lo at addr, hi at +4
-            self.stores.append((addr, self.rd(f'R{vb}'), g))
-            self.stores.append((addr + BitVecVal(4, 64), self.rd(f'R{vb+1}'), g))
+            for k, value in enumerate(self.store_words(ops[1], 2)):
+                self.stores.append((addr + BitVecVal(4*k, 64), value, g))
         elif opc in ('STG.E.U8','STG.E.S8','STG.E.U16','STG.E.S16'):
             # the SASS half of ptxexec's sub-word store; `subword_abi.py` measures it
             addr = self.gaddr(ops[0])
@@ -697,9 +814,9 @@ class Sass:
             addr = self.gaddr(ops[0])
             self.stores.append((addr, self.rd(ops[1]), g))
         elif opc == 'STG.E.128':
-            addr = self.gaddr(ops[0]); vb = int(ops[1][1:])
-            for k in range(4):
-                self.stores.append((addr + BitVecVal(4*k, 64), self.rd(f'R{vb+k}'), g))
+            addr = self.gaddr(ops[0])
+            for k, value in enumerate(self.store_words(ops[1], 4)):
+                self.stores.append((addr + BitVecVal(4*k, 64), value, g))
         else:
             raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
 
@@ -792,21 +909,22 @@ def run_insns(insns, sym, name='region', seed=None):
 
 
 def run_sass(path, sym):
-    text = open(path).read()
-    st = Sass(sym); looks = 0
-    st.labels = {m.group(1): int(m.group(2), 16)
-                 for m in re.finditer(r'\.L_(\w+):\s*\n\s*/\*([0-9a-f]+)\*/', text)}
+    import loopcfg
+    with open(path) as source:
+        text = source.read()
+    if len(loopcfg.sass_sections(path)) > 1:
+        raise Exception('UNMODELLED SASS disassembly contains multiple .text sections '
+                        '(refusing, not guessing)')
+    insns, labels = loopcfg.sass_instructions(path)
+    st = Sass(sym); looks = len(insns)
+    st.labels = {name[3:]: address for name, address in labels.items()}
     st.joins = []
     if re.search(r'\bBSSY\b|\bBSYNC\b', text) and CROSS_THREAD.search(text):
         raise Exception('kernel has both warp reconvergence and a cross-thread operation; '
                         'the no-op reading of BSSY/BSYNC is not sound here  (refusing, not guessing)')
-    for line in text.splitlines():
-        if '/*' in line and '*/' in line and line.strip().endswith(';'): looks += 1
-        m = INSN.match(line)
-        if not m: continue
-        addr = int(m.group(1), 16)
+    for addr, instruction in insns:
         st.arrive(addr)
-        st.step(m.group(2).strip(), addr)
+        st.step(instruction, addr)
     if st.joins:
         raise Exception(f'{len(st.joins)} branch target(s) never reached -- the CFG is not '
                         f'what the linear scan assumed  (refusing, not guessing)')
@@ -814,7 +932,8 @@ def run_sass(path, sym):
     # still runs.  (The address field was matched at a fixed four hex digits,
     # which truncates every kernel larger than 64 KB of code.)
     if st.count != looks:
-        raise Exception(f'parsed {st.count} of {looks} instruction lines -- parser is dropping instructions')
+        raise Exception(f'parsed {st.count} of {looks} instruction lines -- parser is '
+                        'dropping instructions  (refusing, not guessing)')
     return st
 
 if __name__ == '__main__':

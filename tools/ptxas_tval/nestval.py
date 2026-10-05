@@ -11,6 +11,7 @@ WHAT IS PROVED, per loop, IN THE STATE ITS PARENT HAS REACHED:
    BASE       the relation holds when the loop is first reached
    ENTRY      both sides agree whether to enter it at all
    STEP       the relation is preserved by one iteration   (to a fixpoint)
+   LOADS      all accesses agree in address, width and execution guard
    STORES     one iteration performs the same stores on both sides
    LOOPCOND   they agree whether to iterate again
 
@@ -41,7 +42,14 @@ rather than a branch: the program ends when the outer loop would run zero
 times, which is only equivalent when nothing after the loop stores, so that is
 required.
 
-REFUSED by name, never assumed: more than one loop at the top level, a store in
+LOADS ARE EFFECTS EVEN WHEN THEIR RESULTS ARE DISCARDED. Every prologue,
+iteration segment and epilogue participates in access-trace comparison. A child
+discharges its own accesses; its parent's trace contains the parent's segments.
+Only predicate calculations are admitted before a PTX exit test, and their
+updates are executed before the body. Other header effects are refused.
+
+REFUSED by name, never assumed: shared memory, barriers and reconvergence
+whose state this induction does not carry, more than one loop at the top level, a store in
 an iteration followed by a child loop or a later load in the same iteration (the
 store trace does not cross a segment boundary), a SASS loop with no zero-trip
 guard, a predicated PTX back edge, a branch in a body that is not a child's
@@ -51,7 +59,7 @@ entered from (the two would be conflated).
 """
 import itertools, re, sys, time
 from z3 import *
-import loopcfg, ptxexec, sassexec, params, batch, mulmode, mac64, memorder
+import loopcfg, ptxexec, sassexec, params, batch, mulmode, mac64, memorder, domain
 from loopval import ptx_live_ins, sass_live_ins, p_in, p_out, s_in, s_out, \
     _region_exprs, _vars, propose
 
@@ -106,6 +114,7 @@ def ptx_tree(path):
             refuse(f'PTX exit test is guarded by %{gm.group(2)}; the predicate file is keyed by number')
         L['guard_pred'] = (gm.group(1) == '!', gp)
         L['pre_guard'] = [raw[i][1] for i in own if h < i < gi and raw[i][0] == 'i']
+        loopcfg.require_ptx_guard_only(L['pre_guard'])
         groups, cur, i = [], [], gi + 1
         kids = {C['h']: C for C in L['children']}
         while i < e:
@@ -307,7 +316,7 @@ class Nest:
         self.sym, self.budget, self.samples, self.verbose = sym, budget, samples, verbose
         self.n = 0
         self.uid = itertools.count()
-        self.pre = [ULT(sym['tid_x'], BitVecVal(1024, 32)), ULT(sym['ctaid_x'], BitVecVal(1 << 24, 32))]
+        self.pre = domain.launch_preconditions(sym)
         self.stores = 0
         self.disc = {}
         self.depth = 0
@@ -329,6 +338,11 @@ class Nest:
     # ---- one side's iteration, children summarised --------------------------
     def run_both(self, PL, SL, pseed, sseed, psym, ssym, prove_children):
         pst, sst, pX, sX = [], [], [], []
+        # The top test runs on every PTX header visit. Even the supported
+        # predicate-only test can define a predicate consumed in its body;
+        # dropping these writes would execute that body in a different state.
+        guard = ptxexec.run_lines(PL['pre_guard'], psym, pseed)
+        pseed = p_seed_of(guard)
         ng = len(PL['groups'])
         for i in range(ng):
             if PL['groups'][i]:
@@ -466,6 +480,7 @@ class Nest:
         # STORES in one iteration
         pstores = [x for s in pS for x in s.stores]
         sstores = [x for s in sS for x in s.stores]
+        self.compare_loads(pS, sS, [cont], axioms, 'iteration')
         self.compare_stores(pstores, sstores, [cont], axioms, 'iteration')
         self.stores += len(pstores)
 
@@ -513,6 +528,33 @@ class Nest:
         symE = dict(sym, mem=self.mem('exit')) if d['stores'] else sym
         return pexit, sexit, symE
 
+    def compare_loads(self, p_states, s_states, extra, axioms, where):
+        """Preserve every access, including a load whose value is discarded."""
+        p = [(a, g, width) for st in p_states
+             for (a, g), width in zip(st.loads, st.load_widths)]
+        s = [(a, g, width) for st in s_states
+             for (a, g), width in zip(st.loads, st.load_widths)]
+        for st in p_states + s_states:
+            if len(st.loads) != len(st.load_widths):
+                refuse(f'{where} load trace lacks complete access widths')
+        if len(p) != len(s):
+            raise Unproved(f'{where} load counts {len(p)} vs {len(s)}')
+        hits = []
+        for pa, pg, _ in p:
+            hits.append([j for j, (sa, _, _) in enumerate(s)
+                         if self.prove(Implies(pg, pa == sa), extra, axioms) == 'unsat'])
+        perm, reason = memorder.pair_by_address(hits)
+        if perm is None:
+            raise Unproved(f'{where} load {reason} address')
+        for i, j in enumerate(perm):
+            _, pg, wp = p[i]
+            _, sg, ws = s[j]
+            if wp != ws:
+                raise Unproved(f'{where} load {i} width: ptx {8*wp} bits, sass {8*ws} bits')
+            result = self.prove(pg == sg, extra, axioms)
+            if result != 'unsat':
+                raise Unproved(f'{where} load {i} guard: {result}')
+
     def compare_stores(self, p, s, extra, axioms, where):
         if len(p) != len(s):
             raise Unproved(f'{where} store counts {len(p)} vs {len(s)}')
@@ -538,6 +580,11 @@ class Nest:
 
 
 def validate(ptx_path, sass_path, budget=60, mode='wide', verbose=True):
+    domain.require_matching_targets(ptx_path, sass_path)
+    # A per-segment executor cannot carry shared memory, barrier epochs or
+    # reconvergence state across the induction. Screen the whole subject,
+    # including instructions outside/inside every child and its guards.
+    loopcfg.require_thread_local(ptx_path, sass_path)
     PT, ST = ptx_tree(ptx_path), sass_tree(sass_path)
     if not same_shape(PT['root'], ST['root']):
         refuse('the PTX and SASS loop nests have different shapes')
@@ -552,11 +599,14 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', verbose=True):
         if not is_true(simplify(st.alive)):
             refuse(f'{side} prologue can end the program before the nest')
     try:
+        K.compare_loads([pp], [sp], [], [], 'prologue')
         pexit, sexit, symE = K.prove_loop(PT['root'], ST['root'], p_seed_of(pp), s_seed_of(sp), sym)
         pe = ptxexec.run_lines(PT['epilogue'], symE, pexit)
         se = sassexec.run_insns(ST['epilogue'], symE, 'sass epilogue', sexit) if ST['epilogue'] else mk_s(symE, sexit)
-        if ST['root']['gkind'] == 'exit' and (pe.stores or se.stores):
-            refuse('the SASS program EXITs when the nest runs zero times, and something after it stores')
+        if ST['root']['gkind'] == 'exit' and (pe.stores or se.stores or pe.loads or se.loads):
+            refuse('the SASS program EXITs when the nest runs zero times, and something after it '
+                   'loads or stores')
+        K.compare_loads([pe], [se], [], [], 'epilogue')
         K.compare_stores(list(pe.stores), list(se.stores), [], [], 'epilogue')
         K.stores += len(pe.stores)
     except Unproved as e:
@@ -572,6 +622,11 @@ if __name__ == '__main__':
     t = time.time()
     try:
         v, msg, n = validate(ptx, sass, budget)
-    except memorder.Refusal as e:
+    except Exception as e:
+        # Parser and executor refusals historically use the explicit suffix
+        # rather than one exception class. Keep those a verdict, while letting
+        # an unexpected implementation exception retain its traceback.
+        if not isinstance(e, memorder.Refusal) and '(refusing, not guessing)' not in str(e):
+            raise
         v, msg, n = 'REFUSED', str(e).split('\n')[0], 0
     print(f'{v}  {n} obligations  {msg}, {time.time()-t:.1f}s')

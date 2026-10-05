@@ -25,14 +25,15 @@ use std::process::Command;
 
 #[path = "common/pinned.rs"]
 mod pinned;
+#[path = "common/ptxas.rs"]
+mod ptxas;
 
 /// Every co-processor workload in `tests/` must assemble for `sm_89`.
 #[test]
 fn every_coprocessor_workload_assembles() {
-    if Command::new("ptxas").arg("--version").output().is_err() {
-        eprintln!("skipping: ptxas not on PATH");
+    let Some(assembler) = ptxas::ptxas() else {
         return;
-    }
+    };
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // The profile is PINNED. The repo's names whatever card this machine has,
     // and an sm_90 one made every workload declare `.target sm_90` and fail
@@ -54,6 +55,10 @@ fn every_coprocessor_workload_assembles() {
         // are left alone.
         let local = dir.join(format!("{}.ysu", name));
         std::fs::copy(&path, &local).expect("copy source");
+        let ptx = dir.join(format!("{}.coprocessor.ptx", name));
+        if ptx.exists() {
+            std::fs::remove_file(&ptx).expect("remove prior compiler artifact");
+        }
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&local)
             .arg("--emit-coprocessor")
@@ -66,12 +71,15 @@ fn every_coprocessor_workload_assembles() {
             String::from_utf8_lossy(&out.stderr)
         );
 
-        let ptx = dir.join(format!("{}.coprocessor.ptx", name));
         if !ptx.exists() {
             // Refusing is a legitimate outcome - `coprocessor_nerf` needs more
             // shared memory than a static `.shared` array can hold, and saying
             // so is better than emitting a module no GPU can load. What is not
             // acceptable is refusing quietly, or claiming success anyway.
+            assert!(
+                !out.status.success(),
+                "{name}: missing PTX must be a compiler failure:\n{log}"
+            );
             assert!(
                 !log.contains("generated successfully"),
                 "{} emitted no PTX but still reported success:\n{}",
@@ -88,6 +96,8 @@ fn every_coprocessor_workload_assembles() {
             continue;
         }
 
+        assert!(out.status.success(), "{name}: compiler failed but wrote PTX:\n{log}");
+
         let text = std::fs::read_to_string(&ptx).expect("read ptx");
         assert!(
             text.contains(".visible .entry"),
@@ -98,7 +108,7 @@ fn every_coprocessor_workload_assembles() {
             &text[..text.len().min(400)]
         );
 
-        let res = Command::new("ptxas")
+        let res = Command::new(&assembler)
             .arg("-arch=sm_89")
             .arg(&ptx)
             .arg("-o")
@@ -116,4 +126,5 @@ fn every_coprocessor_workload_assembles() {
 
     assert!(checked > 0, "no coprocessor_*.ysu workloads were found to check");
     eprintln!("assembled {} co-processor workloads, {} refused with a diagnostic", checked, refused);
+    let _ = std::fs::remove_dir_all(dir);
 }

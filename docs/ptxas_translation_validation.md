@@ -23,6 +23,12 @@ its passes, or read its source.
 **The CPU trust item stays open.** This is `ptxas`, not `clang`; the technique
 transfers, the result does not.
 
+Current proof-mode verdicts require matching unqualified `sm_89` targets.
+`domain.require_licensed_target` refuses other architectures: the constant-bank
+ABI, ISA models and empirical float identifications have only that reviewed
+license. Assembly portability across six architectures remains a separate
+check. This restriction does not prove those trusted sm89 assumptions.
+
 ---
 
 ## What is validated today
@@ -1101,14 +1107,14 @@ that, each of those shapes VALIDATED a hand-built wrong translation; see
 *The validator's effect model had six blind spots* above.
 
 `exact_pv` — the one kernel here that also carries a Rocq proof — validates at `-O1` with
-14 obligations, 3 relation pairs and **1 multiplier identity assumed**. It does
+positive validation obligations and **1 multiplier identity assumed**. It does
 *not* validate at `-O2`/`-O3`, where `ptxas` unrolls the loop ×4. The
 optimisation-level differential is what relates the two, and it is sampled
 evidence rather than a proof; reaching `-O2` needs peel-and-remainder unroll
 matching, which is not built.
 
 **A correction, and what closed it.** This line used to read *"the kernel that
-carries three Rocq files"*. That was false: `exact_pv` carried **none**. Today `exact_pv` carries one Rocq file and the
+carries three Rocq files"*. That was false: `exact_pv` carried **none**. Today `exact_pv` carries two Rocq files and the
 prose above credited it with three. The
 three files meant — `AttentionSchedule.v`, `GridStrideSplit.v`,
 `SoftmaxErrorBound.v` — are about a *different* kernel, the one
@@ -1214,23 +1220,109 @@ they are untested guards, stated as such.
 ## The one unbroken chain
 
 For `exact_pv`, and for no other kernel in the repository, both steps are
-covered:
+covered. The verified execution path retains and loads the validated cubin:
 
 ```
 Y source (tests/exact_pv.ysu)
   |  proofs/ExactPvExact.v :: the_emitted_exact_pv_holds_the_source_dot_product
 emitted PTX (tests/exact_pv.ptx)
-  |  tools/ptxas_tval/loopval.py @ -O1 :: VALIDATED, 14 obligations
-SASS the GPU runs
+  |  ptxas -O1 -arch=sm_89 -> exact_pv.cubin -> nvdisasm -c
+  |  tools/ptxas_tval/loopval.py :: VALIDATED, positive proof obligations
+retained exact_pv.cubin + PTX + SASS + SHA-256 receipt
+  |  recheck pinned receipt, artifact hashes, ELF entry/target, current device
+  |  load the checked cubin bytes directly through the CUDA driver
+  |  checked shape, exact geometry, live buffer and device contracts
+the validated exact_pv machine image executes synchronously (no PTX JIT)
 ```
 
 Both seams are named rather than glossed. The first is a **transcription plus a
 gate** — `ptx_emitter.rs` does not go through the `Ix` extraction layer, so the
-proof is tied to the emitted text by assertions in `tests/exact_pv_proof.rs`
-rather than rendered with it from one description the way `exact_attention.rs`
-is. The second carries this document's own assumptions: one multiplier identity
+proof is tied to the complete reviewed PTX by a fixed normalized subject digest,
+checked at build and load by both artifact implementations. Fresh Y emission
+must match it in `tests/exact_pv_artifact_binding.rs`; the older opcode/domain
+assertions in `tests/exact_pv_proof.rs` remain supplementary checks. This is
+trusted transcription, rather than rendering a proof and program together from
+one description the way `exact_attention.rs` does. The second carries this
+document's own assumptions: one multiplier identity
 ASSUMED, a single thread's view, one optimisation level, one architecture. The
 chain is not a proof about `ptxas`.
+
+**The artifact handoff is explicit.** Previously the diagram ended at "SASS the
+GPU runs", but `tools/exact_pv_bridge.py` and `tests/ptx_exact_pv.rs` handed PTX
+to the driver's compiler. An offline `-O1` validation says nothing about that
+separate JIT translation. They now use `exact_pv_artifact.py::build` and the
+verified cubin loaders. Artifact-only loaders remain `ValidatedExactPv.load`
+in Python and `CudaContext::load_verified_exact_pv` in Rust. The checked
+execution API uses `CheckedExactPv.load/launch` in Python and
+`CudaContext::load_checked_exact_pv/launch_checked_exact_pv` in Rust.
+
+`ExactPvShape` checks positive signed-I32 B/Q/T/D and element counts
+`NP=B*Q*T`, `NV=B*T*D`, `NO=B*Q*D` <= I32MAX before narrowing the ABI.
+`T*(2^32-1)*128 <= I64MAX` licenses the full U32/I8 input domains, hence
+`T <= 16777216`. Grid `(Q,B,1)` and block `(D,1,1)` cover precisely the
+mathematical rectangle; rounding D up is unsafe because PTX has no d<D guard.
+The checked launcher enforces device/function limits, live byte extents,
+P/Out alignment, context ownership, and output disjointness from both inputs.
+P and V may overlap. T=0 refuses under the present positive-T theorem.
+`ExactPvLaunchContract.v::checked_shape_instantiates_the_source_dot_product`
+composes the shape conditions with the original capstone at n=T; separate
+lemmas establish output-map coverage and uniqueness. These do not prove that
+operational PTX terminates and stores every result, or that the Rust/Python
+checker implements this predicate.
+
+Both checked APIs synchronize before and after execution. The Rust module
+borrows its context and only accepts allocations from that same context
+wrapper. Python accepts actual dense CUDA tensors, checks their devices and
+allocation/context queries, and rejects lazy negative/conjugate views whose
+logical values differ from raw storage. Unsupported allocation queries
+refuse. CUDA metadata, ordinary allocations without physical remapping aliases,
+and the absence of concurrent external mutation remain trusted.
+
+The builder snapshots PTX in a private directory, assembles at `-O1`,
+disassembles that cubin, and calls the existing `loopval.validate` without
+changing its models or assumptions. Only a `VALIDATED` result with positive
+obligations publishes the bundle. `receipt.txt` binds the entry, target,
+optimization level, verdict, obligation count, and SHA-256 hashes of all three
+artifacts. An existing destination is refused; a failed build never publishes
+a replacement or returns an artifact to load.
+
+Each loader pins the receipt when opening a bundle, checks it again before
+loading, hashes the files again, and passes the checked cubin buffer itself to
+CUDA. A file is never reopened by pathname after its digest check. Missing or
+changed artifacts, malformed receipts, unrecognized ELF formats or entries,
+and incompatible or unidentified devices are errors. Format v1 deliberately
+accepts the measured CUDA ELF ABI 8 `sm_89` encoding and an `sm_89` device only;
+it does not infer compatibility with a different architecture. The verified
+path has no PTX fallback. Ordinary `load_ptx` and `ptx_bridge.Module(ptx)` remain
+available for explicitly unverified JIT execution, including the theorem's
+out-of-domain device probes in `tests/exact_pv_proof.rs`.
+
+Build and retain a bundle, then run the verified bridge (from the repository
+root, with `z3-solver`, `ptxas`, and `nvdisasm` available for the build):
+
+```sh
+python3 tools/ptxas_tval/exact_pv_artifact.py build tests/exact_pv.ptx /tmp/exact_pv_verified
+python3 tools/ptxas_tval/exact_pv_artifact.py check /tmp/exact_pv_verified
+python3 tools/exact_pv_bridge.py --verified-artifact /tmp/exact_pv_verified
+```
+
+Without `--verified-artifact`, the bridge freshly emits and validates a bundle
+in a retained temporary directory; `--build-artifact <new-directory>` chooses
+its destination. Loading an existing bundle needs no assembler or Z3. The
+receipt is a record of trusted local validation, not an authenticated proof
+certificate. Source/model transcription, the validator and solver, the
+multiplier identity, ISA/ABI semantics, faithful allocation metadata and CUDA
+loading remain trusted. Checked launches enforce the listed runtime
+preconditions; raw launch APIs do not convey that claim.
+
+`cargo test --test exact_pv_artifact_binding` exercises the loaders with a
+recording CUDA API, including a one-byte modification, missing or replaced
+receipts, wrong targets, failed validation, and the absence of a JIT fallback.
+Its real-toolchain arm builds and validates `exact_pv` when the tools and Z3
+are available; otherwise that arm reports a skip. `Y_TVAL_PYTHON` selects the
+Python interpreter for this gate and the Rust device test's builder. A failed
+validation is an error, not a dependency skip. The device execution test still
+requires an actual `sm_89` GPU.
 
 ---
 
@@ -1258,8 +1350,9 @@ chain is not a proof about `ptxas`.
   memories than the machine has — sound for equivalence, never complete.
 - **`vpdpwssd`, Rocq's kernel and the processor executing its own ISA remain in
   the trusted base**, as `src/exact_gemm_certificate.rs` says.
-- **No result here is CI-gated.** It needs the CUDA toolkit, `z3`, and minutes to
-  hours per kernel. It is a research tool, run by hand, in the same category as
+- **The full corpus is not CI-gated.** The `exact_pv` artifact-binding gate above
+  has an optional real-toolchain arm. The full corpus needs the CUDA toolkit,
+  `z3`, and minutes to hours per kernel. It is run by hand, in the same category as
   the rest of `tools/`.
 
 ---
@@ -1392,26 +1485,44 @@ other `loopval` refusal stands.
 
 ```
 48 kernels with PTX control flow; 0 validated
-   answered by: loopval 8, nestval 40
+   answered by: loopval 13, nestval 35
 
- 24  PTX: more than one loop at one level, SEQUENTIAL depth 1
-  6  PTX back edge is predicated; the recognised shape tests at the TOP
-  4  PTX loop has 3 own branches; only its exit test is allowed
+ 23  PTX loop cross-thread effect: cp.async.cg.shared.global
+  5  UNMODELLED PTX nested lexical scope: the register model does not preserve shadowed declarations
+  4  PTX loop cross-thread effect: st.shared.b32
   3  SASS branch form this CFG cannot place: '@P BRA P1, `(.L)'
-  2  SASS branch form this CFG cannot place: 'BRA.DIV ~URZ, `(.L)'
+  2  PTX loop body has more than one branch
+  2  PTX loop cross-thread effect: mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32
   2  PTX module holds more than one entry point
-  2  PTX branch outside the loop nest
-  1  PTX: more than one loop at one level, MIXED depth 2
+  1  SASS loop cross-thread/reconvergence effect: BSSY
   1  SASS back edge is unconditional
-  1  PTX loop body has more than one branch
-  1  PTX: loop finder found NO back edge
+  1  PTX loop cross-thread effect: st.shared.u32
+  1  SASS branch form this CFG cannot place: 'BRA.DIV ~URZ, `(.L)'
+  1  PTX loop cross-thread effect: st.shared.v4.f32
+  1  PTX loop cross-thread effect: bar.sync
   1  SASS: loop finder found NO back edge
 ```
 
-**25 of 48 refuse for one reason: more than one loop at one level.** That
-includes all 23 FP16 tensor-core GEMMs, which have three loops. So the recorded
-"21–27 opcodes each" understates them — they are behind an opcode gap *and*
-behind a structural one, and only the first had been measured.
+**33 of 48 refuse for one reason: a loop body holds a cross-thread operation.**
+A shared-memory store, a barrier, an asynchronous copy or a warp-wide `mma`
+inside a loop changes state that other threads read, and the loop relation
+carries none of it, so the loop validators refuse it by name instead of proving
+a relation that ignores it (the 2026-10-03 source audit,
+`docs/verification/deep_audit_2026-10-03.md`). That is all 23 FP16 tensor-core
+GEMMs (a `cp.async` in the K loop), the four `gemm_fp8` and both int8 GEMMs.
+Behind it the GEMMs also have three loops, so the recorded "21–27 opcodes each"
+understates them twice over: an opcode gap, a cross-thread refusal, and a
+multi-loop shape.
+
+> **This block led with `24  PTX: more than one loop at one level, SEQUENTIAL
+> depth 1` and read `answered by: loopval 8, nestval 40`, and its headline was
+> "25 of 48 refuse for one reason: more than one loop at one level".** The audit
+> made a cross-thread operation inside a loop, and a nested lexical scope, into
+> refusals the validators reach FIRST, so those kernels now stop there. The
+> multi-loop count beneath is not what a first-refusal census measures any
+> more; the lift census below still decomposes it. The key also folds a
+> cross-thread refusal to its opcode: with the instruction's register operands
+> in it, the 23 GEMMs - one cause - came out as three rows of 13, 6 and 4.
 
 > **This block read `38` under one bucket and THREE DIFFERENT BLOCKERS were
 > sitting behind it.** `loopval` refuses on the back-edge count before it looks
@@ -1486,7 +1597,9 @@ Two corrections came out of running that cross:
   > structural refusal does, because a lower level emits a smaller instruction
   > vocabulary. Measured, committed corpus (`-O3`) against `-O1`, same `.ptx`,
   > by running the real census at both levels: `y_cpu_matmul` **2 → 0**
-  > (`PLOP3.LUT`, `UIADD3`, both gone), `exact_pv` **2 → 0**,
+  > (`PLOP3.LUT`, `UIADD3`, both gone), `exact_pv` **3 → 0** (`CS2R` joined its
+  `-O3` gap when its loop test became signed, measured: the one changed PTX
+  line is the whole difference),
   > `naive_gemm_f32` **2 → 0**. Two more move without changing size, which is
   > the sharper form of the same point: `bn254_fr_mul` **1 → 1**
   > (`CALL.REL.NOINC` out, `CS2R` in) — **the count is not the thing that
@@ -1556,15 +1669,17 @@ never been asked. Ask them: decompose the nest, and run the remaining
 structural predicates at every level a lift would produce.
 
 ```
-38 multi-back-edge kernels, 125 PTX loop levels
- 30  SEQUENTIAL depth 1
+33 multi-back-edge kernels, 115 PTX loop levels
+ 25  SEQUENTIAL depth 1
   5  MIXED depth 2
   3  NESTED depth 3
   0  left with no named structural refusal
 ```
 
-**Zero.** Every one of the 38 is still refused by a NAMED check `loopcfg` never
-reached.
+**Zero.** Every one of the 33 is still refused by a NAMED check `loopcfg` never
+reached. (This block read 38 kernels and 125 levels, 30 of them `SEQUENTIAL`,
+until `loopcfg` began refusing a nested lexical scope before it counts back
+edges: the five coprocessor kernels left this census for that refusal.)
 
 > **SCOPE, since `nestval` exists now.** This census runs the structural
 > predicates of a HYPOTHETICAL multi-loop `loopval`; it is not a validator and
@@ -1776,7 +1891,7 @@ is checking while both are wrong:
   `unknown`. Crossed in last; the section after the unroll one is about it.
 
 **In the committed corpus exactly one blocker has a non-zero sole-count, and it is
-the solver wall.** 66 kernels, **103** distinct blockers; at `-O3` the kernels one
+the solver wall.** 66 kernels, **104** distinct blockers; at `-O3` the kernels one
 blocker away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
 `bn254_ntt4_fused` — each has no unmodelled opcode, no structural refusal and no
 unroll blocker, and each is past the wall. No opcode, no staging set and no lift
@@ -1785,6 +1900,11 @@ is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the back-edge lift.
 That is the honest state of a corpus where **6 kernels are clear, the median is 14
 blockers and 13 of 66 are 21 or more**, and it is why "reach" kept naming work
 that buys nothing.
+
+> **This read 103 distinct (106 at `-O1`) until the PTX reader began refusing a
+> nested lexical scope**: the five coprocessor kernels now refuse at setup, which
+> is one new blocker name at each level. Clear counts, median and tail did not
+> move.
 
 > **Until 2026-09-19 this read 106 distinct, 5 clear, median 15 and 31 at 21+.**
 > Modelling the u32 division estimate took `ptx_integer_ops` to clear (it
@@ -2219,7 +2339,7 @@ Measured over the whole corpus at that level, at `-O1` the kernels one blocker
 away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
 `bn254_ntt4_fused` — the same four as at `-O3`, and for the same one blocker, the
 solver wall, which is measured on the PTX and so does not move with the level. At
-`-O1` the corpus is 66 kernels, **106** distinct blockers and **9** clear
+`-O1` the corpus is 66 kernels, **107** distinct blockers and **9** clear
 (`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the six — the first two
 by the `-O` effect the corrected bullet above measures, the third because the
 census stopped reporting one member's refusal as the suite's).

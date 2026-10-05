@@ -34,7 +34,12 @@ fn resolutions(src: &str) -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
     for line in src.lines() {
         let l = line.trim();
-        for (prefix, versioned) in [("resolve_v2!(", true), ("resolve!(", false)] {
+        // `resolve_memory_v2!` is the STRICTER form: the `_v2` symbol is
+        // required, with no fallback to the legacy one, for the entry points
+        // whose arguments carry a byte count or a device pointer.
+        for (prefix, versioned) in
+            [("resolve_memory_v2!(", true), ("resolve_v2!(", true), ("resolve!(", false)]
+        {
             if let Some(rest) = l.strip_prefix(prefix) {
                 if let Some(name) = rest.split(')').next() {
                     // A `macro_rules!` definition line is `($name:ident) => {`,

@@ -1,0 +1,2234 @@
+[
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.19312,
+        "completed_us": 279.48044
+      },
+      {
+        "enqueue_us": 1.16351,
+        "completed_us": 253.20284
+      },
+      {
+        "enqueue_us": 1.16632,
+        "completed_us": 274.27598
+      },
+      {
+        "enqueue_us": 1.20421,
+        "completed_us": 268.79002
+      },
+      {
+        "enqueue_us": 1.28171,
+        "completed_us": 254.98305999999997
+      },
+      {
+        "enqueue_us": 1.14131,
+        "completed_us": 274.97498
+      },
+      {
+        "enqueue_us": 1.18131,
+        "completed_us": 253.52125
+      },
+      {
+        "enqueue_us": 1.27232,
+        "completed_us": 276.00260000000003
+      },
+      {
+        "enqueue_us": 1.16311,
+        "completed_us": 257.56779
+      },
+      {
+        "enqueue_us": 1.18451,
+        "completed_us": 268.79422
+      },
+      {
+        "enqueue_us": 1.14591,
+        "completed_us": 268.91902
+      },
+      {
+        "enqueue_us": 1.31831,
+        "completed_us": 262.04724
+      },
+      {
+        "enqueue_us": 1.2937100000000001,
+        "completed_us": 280.52654
+      },
+      {
+        "enqueue_us": 1.14611,
+        "completed_us": 271.56175
+      },
+      {
+        "enqueue_us": 1.12221,
+        "completed_us": 258.3882
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 0,
+    "pair_position": 0,
+    "process_sequence": 0,
+    "process_wall_s": 3.6316736160006258,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.18551,
+        "completed_us": 278.27642
+      },
+      {
+        "enqueue_us": 1.30281,
+        "completed_us": 267.7543
+      },
+      {
+        "enqueue_us": 1.29822,
+        "completed_us": 273.18497
+      },
+      {
+        "enqueue_us": 1.18211,
+        "completed_us": 261.82224
+      },
+      {
+        "enqueue_us": 1.4325199999999998,
+        "completed_us": 285.6237
+      },
+      {
+        "enqueue_us": 1.29691,
+        "completed_us": 283.41587000000004
+      },
+      {
+        "enqueue_us": 1.18712,
+        "completed_us": 257.4673
+      },
+      {
+        "enqueue_us": 1.2775100000000001,
+        "completed_us": 284.84168
+      },
+      {
+        "enqueue_us": 1.25682,
+        "completed_us": 283.75339
+      },
+      {
+        "enqueue_us": 1.2740099999999999,
+        "completed_us": 258.3663
+      },
+      {
+        "enqueue_us": 1.20491,
+        "completed_us": 282.67436000000004
+      },
+      {
+        "enqueue_us": 1.19262,
+        "completed_us": 254.37976000000003
+      },
+      {
+        "enqueue_us": 1.28822,
+        "completed_us": 276.4096
+      },
+      {
+        "enqueue_us": 1.17012,
+        "completed_us": 280.08564
+      },
+      {
+        "enqueue_us": 1.18681,
+        "completed_us": 255.47017000000002
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 0,
+    "pair_position": 1,
+    "process_sequence": 1,
+    "process_wall_s": 3.6666171649994794,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.42831,
+        "completed_us": 2159.4850199999996
+      },
+      {
+        "enqueue_us": 2.25963,
+        "completed_us": 2148.1418099999996
+      },
+      {
+        "enqueue_us": 1.3946100000000001,
+        "completed_us": 2136.0244700000003
+      },
+      {
+        "enqueue_us": 1.4153200000000001,
+        "completed_us": 2142.6608499999998
+      },
+      {
+        "enqueue_us": 1.3773100000000003,
+        "completed_us": 2105.03943
+      },
+      {
+        "enqueue_us": 1.40202,
+        "completed_us": 2091.30509
+      },
+      {
+        "enqueue_us": 1.32732,
+        "completed_us": 2110.4697
+      },
+      {
+        "enqueue_us": 1.37041,
+        "completed_us": 2113.73823
+      },
+      {
+        "enqueue_us": 1.44111,
+        "completed_us": 2131.3241199999998
+      },
+      {
+        "enqueue_us": 1.42831,
+        "completed_us": 2121.97912
+      },
+      {
+        "enqueue_us": 1.36361,
+        "completed_us": 2113.6840300000003
+      },
+      {
+        "enqueue_us": 1.4133200000000001,
+        "completed_us": 2145.2623700000004
+      },
+      {
+        "enqueue_us": 1.4918200000000001,
+        "completed_us": 2128.6235
+      },
+      {
+        "enqueue_us": 1.3936100000000002,
+        "completed_us": 2106.35515
+      },
+      {
+        "enqueue_us": 1.41091,
+        "completed_us": 2129.2603
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 0,
+    "pair_position": 0,
+    "process_sequence": 2,
+    "process_wall_s": 6.833421339997585,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.60412,
+        "completed_us": 2026.74849
+      },
+      {
+        "enqueue_us": 1.36982,
+        "completed_us": 2052.11656
+      },
+      {
+        "enqueue_us": 24.45966,
+        "completed_us": 2077.01393
+      },
+      {
+        "enqueue_us": 1.34071,
+        "completed_us": 2054.35579
+      },
+      {
+        "enqueue_us": 1.4089099999999999,
+        "completed_us": 2066.05201
+      },
+      {
+        "enqueue_us": 1.34082,
+        "completed_us": 2047.29721
+      },
+      {
+        "enqueue_us": 1.36702,
+        "completed_us": 2072.3390799999997
+      },
+      {
+        "enqueue_us": 20.14972,
+        "completed_us": 2098.7376600000002
+      },
+      {
+        "enqueue_us": 1.32262,
+        "completed_us": 2043.8835799999997
+      },
+      {
+        "enqueue_us": 1.3896100000000002,
+        "completed_us": 2095.08773
+      },
+      {
+        "enqueue_us": 1.35251,
+        "completed_us": 2058.4852300000002
+      },
+      {
+        "enqueue_us": 1.3771200000000001,
+        "completed_us": 2040.56014
+      },
+      {
+        "enqueue_us": 30.079030000000003,
+        "completed_us": 2030.28562
+      },
+      {
+        "enqueue_us": 1.3566199999999997,
+        "completed_us": 2014.76256
+      },
+      {
+        "enqueue_us": 1.36212,
+        "completed_us": 2006.5235699999998
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 0,
+    "pair_position": 1,
+    "process_sequence": 3,
+    "process_wall_s": 6.767490338002972,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.3540199999999998,
+        "completed_us": 2061.6986699999998
+      },
+      {
+        "enqueue_us": 12.887540000000001,
+        "completed_us": 2086.4717299999998
+      },
+      {
+        "enqueue_us": 1.3423100000000003,
+        "completed_us": 2067.95453
+      },
+      {
+        "enqueue_us": 27.664099999999998,
+        "completed_us": 2114.67754
+      },
+      {
+        "enqueue_us": 1.3662200000000002,
+        "completed_us": 2103.32642
+      },
+      {
+        "enqueue_us": 1.3388199999999997,
+        "completed_us": 2127.06978
+      },
+      {
+        "enqueue_us": 1.3703100000000001,
+        "completed_us": 2080.22337
+      },
+      {
+        "enqueue_us": 1.36601,
+        "completed_us": 2098.52907
+      },
+      {
+        "enqueue_us": 32.89166,
+        "completed_us": 2404.60999
+      },
+      {
+        "enqueue_us": 1.35012,
+        "completed_us": 3591.56776
+      },
+      {
+        "enqueue_us": 14.751959999999999,
+        "completed_us": 3193.98585
+      },
+      {
+        "enqueue_us": 1.35572,
+        "completed_us": 2596.25267
+      },
+      {
+        "enqueue_us": 1.35621,
+        "completed_us": 2335.95374
+      },
+      {
+        "enqueue_us": 1.39782,
+        "completed_us": 2180.45936
+      },
+      {
+        "enqueue_us": 10.235909999999999,
+        "completed_us": 2134.64246
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 1,
+    "pair_position": 0,
+    "process_sequence": 4,
+    "process_wall_s": 7.10341380400132,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.38891,
+        "completed_us": 2084.16991
+      },
+      {
+        "enqueue_us": 1.4258099999999998,
+        "completed_us": 2118.41348
+      },
+      {
+        "enqueue_us": 1.4361199999999998,
+        "completed_us": 2116.85567
+      },
+      {
+        "enqueue_us": 1.4028100000000001,
+        "completed_us": 2143.84366
+      },
+      {
+        "enqueue_us": 1.3873100000000003,
+        "completed_us": 2145.7664800000002
+      },
+      {
+        "enqueue_us": 1.38861,
+        "completed_us": 2087.07174
+      },
+      {
+        "enqueue_us": 15.307970000000001,
+        "completed_us": 2139.1846100000002
+      },
+      {
+        "enqueue_us": 1.3540199999999998,
+        "completed_us": 2171.24726
+      },
+      {
+        "enqueue_us": 1.41012,
+        "completed_us": 2149.79842
+      },
+      {
+        "enqueue_us": 1.41292,
+        "completed_us": 2115.00555
+      },
+      {
+        "enqueue_us": 1.36872,
+        "completed_us": 2092.3696
+      },
+      {
+        "enqueue_us": 1.44342,
+        "completed_us": 2070.0571600000003
+      },
+      {
+        "enqueue_us": 1.31752,
+        "completed_us": 2040.63764
+      },
+      {
+        "enqueue_us": 1.67472,
+        "completed_us": 2073.7501
+      },
+      {
+        "enqueue_us": 13.16194,
+        "completed_us": 2094.80182
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 1,
+    "pair_position": 1,
+    "process_sequence": 5,
+    "process_wall_s": 6.999781942999107,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.32851,
+        "completed_us": 262.81555000000003
+      },
+      {
+        "enqueue_us": 1.3296099999999997,
+        "completed_us": 267.2104
+      },
+      {
+        "enqueue_us": 1.2737100000000001,
+        "completed_us": 257.8884
+      },
+      {
+        "enqueue_us": 1.30101,
+        "completed_us": 278.06852
+      },
+      {
+        "enqueue_us": 1.29101,
+        "completed_us": 264.16416000000004
+      },
+      {
+        "enqueue_us": 11.630519999999999,
+        "completed_us": 275.25248
+      },
+      {
+        "enqueue_us": 1.44932,
+        "completed_us": 269.39662
+      },
+      {
+        "enqueue_us": 1.3370199999999999,
+        "completed_us": 261.25094
+      },
+      {
+        "enqueue_us": 15.12636,
+        "completed_us": 286.07091
+      },
+      {
+        "enqueue_us": 1.3448099999999998,
+        "completed_us": 262.13284
+      },
+      {
+        "enqueue_us": 1.3740099999999997,
+        "completed_us": 274.34208
+      },
+      {
+        "enqueue_us": 1.36491,
+        "completed_us": 277.72471
+      },
+      {
+        "enqueue_us": 1.3086099999999998,
+        "completed_us": 259.17511
+      },
+      {
+        "enqueue_us": 12.319640000000001,
+        "completed_us": 275.75140000000005
+      },
+      {
+        "enqueue_us": 2.5743199999999997,
+        "completed_us": 273.50996
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 1,
+    "pair_position": 0,
+    "process_sequence": 6,
+    "process_wall_s": 3.6622690740005055,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 16.41238,
+        "completed_us": 277.46881
+      },
+      {
+        "enqueue_us": 1.24852,
+        "completed_us": 267.57861
+      },
+      {
+        "enqueue_us": 1.2746099999999998,
+        "completed_us": 270.29553
+      },
+      {
+        "enqueue_us": 1.31471,
+        "completed_us": 283.47458
+      },
+      {
+        "enqueue_us": 1.31681,
+        "completed_us": 269.48872
+      },
+      {
+        "enqueue_us": 1.3240100000000001,
+        "completed_us": 258.1653
+      },
+      {
+        "enqueue_us": 1.35392,
+        "completed_us": 256.22918000000004
+      },
+      {
+        "enqueue_us": 18.598499999999998,
+        "completed_us": 287.47231
+      },
+      {
+        "enqueue_us": 1.30622,
+        "completed_us": 278.24752
+      },
+      {
+        "enqueue_us": 1.31542,
+        "completed_us": 284.819
+      },
+      {
+        "enqueue_us": 1.34751,
+        "completed_us": 271.48914
+      },
+      {
+        "enqueue_us": 23.458160000000003,
+        "completed_us": 283.62168
+      },
+      {
+        "enqueue_us": 1.29571,
+        "completed_us": 265.41688
+      },
+      {
+        "enqueue_us": 1.35162,
+        "completed_us": 280.09033999999997
+      },
+      {
+        "enqueue_us": 1.3668200000000001,
+        "completed_us": 292.61318000000006
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 1,
+    "pair_position": 1,
+    "process_sequence": 7,
+    "process_wall_s": 3.6874267679995683,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.31601,
+        "completed_us": 267.2169
+      },
+      {
+        "enqueue_us": 4.2038400000000005,
+        "completed_us": 283.34506999999996
+      },
+      {
+        "enqueue_us": 1.3388199999999997,
+        "completed_us": 282.33227
+      },
+      {
+        "enqueue_us": 1.27141,
+        "completed_us": 269.06892000000005
+      },
+      {
+        "enqueue_us": 23.91166,
+        "completed_us": 283.17546999999996
+      },
+      {
+        "enqueue_us": 1.18021,
+        "completed_us": 279.99604
+      },
+      {
+        "enqueue_us": 1.27211,
+        "completed_us": 264.54737
+      },
+      {
+        "enqueue_us": 1.2999100000000001,
+        "completed_us": 283.85078
+      },
+      {
+        "enqueue_us": 1.2896100000000001,
+        "completed_us": 273.60537
+      },
+      {
+        "enqueue_us": 1.2997100000000001,
+        "completed_us": 261.89524
+      },
+      {
+        "enqueue_us": 1.31111,
+        "completed_us": 269.86983
+      },
+      {
+        "enqueue_us": 1.34571,
+        "completed_us": 268.22451
+      },
+      {
+        "enqueue_us": 10.59272,
+        "completed_us": 272.69206
+      },
+      {
+        "enqueue_us": 1.27511,
+        "completed_us": 279.62193
+      },
+      {
+        "enqueue_us": 1.3231199999999999,
+        "completed_us": 254.54156
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 2,
+    "pair_position": 0,
+    "process_sequence": 8,
+    "process_wall_s": 3.683123192000494,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.29791,
+        "completed_us": 407.83582
+      },
+      {
+        "enqueue_us": 1.35232,
+        "completed_us": 335.49965000000003
+      },
+      {
+        "enqueue_us": 17.179380000000002,
+        "completed_us": 383.43316
+      },
+      {
+        "enqueue_us": 1.3036100000000002,
+        "completed_us": 319.71446
+      },
+      {
+        "enqueue_us": 11.85292,
+        "completed_us": 333.93982000000005
+      },
+      {
+        "enqueue_us": 1.26641,
+        "completed_us": 315.88733
+      },
+      {
+        "enqueue_us": 23.785659999999996,
+        "completed_us": 321.54558999999995
+      },
+      {
+        "enqueue_us": 4.14584,
+        "completed_us": 319.74217
+      },
+      {
+        "enqueue_us": 1.2170100000000001,
+        "completed_us": 310.77867
+      },
+      {
+        "enqueue_us": 1.2509199999999998,
+        "completed_us": 298.18994000000004
+      },
+      {
+        "enqueue_us": 1.2703099999999998,
+        "completed_us": 289.51293999999996
+      },
+      {
+        "enqueue_us": 1.28811,
+        "completed_us": 303.65979000000004
+      },
+      {
+        "enqueue_us": 13.183240000000001,
+        "completed_us": 311.86438000000004
+      },
+      {
+        "enqueue_us": 1.2645199999999999,
+        "completed_us": 302.68129
+      },
+      {
+        "enqueue_us": 1.27981,
+        "completed_us": 297.52732
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 2,
+    "pair_position": 1,
+    "process_sequence": 9,
+    "process_wall_s": 3.763744226998824,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.44482,
+        "completed_us": 2143.08445
+      },
+      {
+        "enqueue_us": 1.38941,
+        "completed_us": 2191.8370800000002
+      },
+      {
+        "enqueue_us": 1.39741,
+        "completed_us": 2292.85688
+      },
+      {
+        "enqueue_us": 1.53311,
+        "completed_us": 2449.32177
+      },
+      {
+        "enqueue_us": 20.83692,
+        "completed_us": 2374.98346
+      },
+      {
+        "enqueue_us": 1.41911,
+        "completed_us": 2256.73148
+      },
+      {
+        "enqueue_us": 12.12043,
+        "completed_us": 2230.4031
+      },
+      {
+        "enqueue_us": 1.42382,
+        "completed_us": 2270.60334
+      },
+      {
+        "enqueue_us": 26.287580000000002,
+        "completed_us": 2181.14357
+      },
+      {
+        "enqueue_us": 1.3992099999999998,
+        "completed_us": 2160.76134
+      },
+      {
+        "enqueue_us": 1.41452,
+        "completed_us": 2245.36807
+      },
+      {
+        "enqueue_us": 1.40561,
+        "completed_us": 2201.41858
+      },
+      {
+        "enqueue_us": 1.43811,
+        "completed_us": 2157.64661
+      },
+      {
+        "enqueue_us": 1.40591,
+        "completed_us": 2165.23129
+      },
+      {
+        "enqueue_us": 1.55642,
+        "completed_us": 2179.18275
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 2,
+    "pair_position": 0,
+    "process_sequence": 10,
+    "process_wall_s": 6.910587261998444,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.3731200000000001,
+        "completed_us": 2178.04473
+      },
+      {
+        "enqueue_us": 1.3984199999999998,
+        "completed_us": 2177.8015299999997
+      },
+      {
+        "enqueue_us": 30.78933,
+        "completed_us": 2227.48447
+      },
+      {
+        "enqueue_us": 1.3780100000000002,
+        "completed_us": 2231.56021
+      },
+      {
+        "enqueue_us": 1.35102,
+        "completed_us": 2210.64999
+      },
+      {
+        "enqueue_us": 1.38391,
+        "completed_us": 2247.79719
+      },
+      {
+        "enqueue_us": 1.3547200000000001,
+        "completed_us": 2249.58921
+      },
+      {
+        "enqueue_us": 19.547420000000002,
+        "completed_us": 2201.5975900000003
+      },
+      {
+        "enqueue_us": 1.3708200000000001,
+        "completed_us": 2181.88758
+      },
+      {
+        "enqueue_us": 1.35361,
+        "completed_us": 2173.31568
+      },
+      {
+        "enqueue_us": 1.39882,
+        "completed_us": 2205.15963
+      },
+      {
+        "enqueue_us": 1.38162,
+        "completed_us": 2186.7089300000002
+      },
+      {
+        "enqueue_us": 1.32701,
+        "completed_us": 2173.91909
+      },
+      {
+        "enqueue_us": 1.34141,
+        "completed_us": 2164.0958800000003
+      },
+      {
+        "enqueue_us": 1.36262,
+        "completed_us": 2181.54897
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 2,
+    "pair_position": 1,
+    "process_sequence": 11,
+    "process_wall_s": 7.0917247500001395,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.42371,
+        "completed_us": 2113.78613
+      },
+      {
+        "enqueue_us": 1.3836199999999999,
+        "completed_us": 2117.0583800000004
+      },
+      {
+        "enqueue_us": 15.25877,
+        "completed_us": 2136.42118
+      },
+      {
+        "enqueue_us": 4.56215,
+        "completed_us": 2155.0472800000002
+      },
+      {
+        "enqueue_us": 1.35982,
+        "completed_us": 2140.91363
+      },
+      {
+        "enqueue_us": 1.4050099999999999,
+        "completed_us": 2125.91566
+      },
+      {
+        "enqueue_us": 1.37392,
+        "completed_us": 2094.48503
+      },
+      {
+        "enqueue_us": 1.36382,
+        "completed_us": 2093.2984199999996
+      },
+      {
+        "enqueue_us": 1.3843100000000002,
+        "completed_us": 2106.5233599999997
+      },
+      {
+        "enqueue_us": 1.41531,
+        "completed_us": 2157.43471
+      },
+      {
+        "enqueue_us": 1.3484099999999999,
+        "completed_us": 2100.19549
+      },
+      {
+        "enqueue_us": 1.3958100000000002,
+        "completed_us": 2116.84307
+      },
+      {
+        "enqueue_us": 1.34571,
+        "completed_us": 2084.82062
+      },
+      {
+        "enqueue_us": 1.37272,
+        "completed_us": 2109.6309
+      },
+      {
+        "enqueue_us": 1.3403100000000001,
+        "completed_us": 2111.52621
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 3,
+    "pair_position": 0,
+    "process_sequence": 12,
+    "process_wall_s": 6.8931465779969585,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.40632,
+        "completed_us": 2092.99991
+      },
+      {
+        "enqueue_us": 1.4418199999999999,
+        "completed_us": 2091.0671899999998
+      },
+      {
+        "enqueue_us": 20.03022,
+        "completed_us": 2112.02022
+      },
+      {
+        "enqueue_us": 1.4421099999999998,
+        "completed_us": 2108.0069700000004
+      },
+      {
+        "enqueue_us": 1.4115199999999999,
+        "completed_us": 2108.24388
+      },
+      {
+        "enqueue_us": 1.5378200000000002,
+        "completed_us": 2112.7878299999998
+      },
+      {
+        "enqueue_us": 1.46181,
+        "completed_us": 2145.14297
+      },
+      {
+        "enqueue_us": 1.40112,
+        "completed_us": 2113.18504
+      },
+      {
+        "enqueue_us": 1.43411,
+        "completed_us": 2110.8979
+      },
+      {
+        "enqueue_us": 1.40052,
+        "completed_us": 2099.67879
+      },
+      {
+        "enqueue_us": 1.53022,
+        "completed_us": 2121.1488200000003
+      },
+      {
+        "enqueue_us": 1.40941,
+        "completed_us": 2107.24606
+      },
+      {
+        "enqueue_us": 1.4113200000000001,
+        "completed_us": 2114.16495
+      },
+      {
+        "enqueue_us": 1.39281,
+        "completed_us": 2102.19411
+      },
+      {
+        "enqueue_us": 28.035400000000003,
+        "completed_us": 2086.87145
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 3,
+    "pair_position": 1,
+    "process_sequence": 13,
+    "process_wall_s": 6.864278617002128,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.28112,
+        "completed_us": 277.32981
+      },
+      {
+        "enqueue_us": 1.26062,
+        "completed_us": 250.45432
+      },
+      {
+        "enqueue_us": 1.38352,
+        "completed_us": 283.62348
+      },
+      {
+        "enqueue_us": 1.28301,
+        "completed_us": 263.93716
+      },
+      {
+        "enqueue_us": 1.3334199999999998,
+        "completed_us": 269.94433000000004
+      },
+      {
+        "enqueue_us": 1.31142,
+        "completed_us": 277.45162
+      },
+      {
+        "enqueue_us": 1.31761,
+        "completed_us": 260.96653000000003
+      },
+      {
+        "enqueue_us": 11.02792,
+        "completed_us": 273.32926
+      },
+      {
+        "enqueue_us": 1.21192,
+        "completed_us": 268.96072
+      },
+      {
+        "enqueue_us": 1.43332,
+        "completed_us": 259.75052
+      },
+      {
+        "enqueue_us": 1.3168199999999999,
+        "completed_us": 275.10778999999997
+      },
+      {
+        "enqueue_us": 1.28951,
+        "completed_us": 260.86503
+      },
+      {
+        "enqueue_us": 11.757729999999999,
+        "completed_us": 277.97472
+      },
+      {
+        "enqueue_us": 1.20991,
+        "completed_us": 273.74467
+      },
+      {
+        "enqueue_us": 1.2478099999999999,
+        "completed_us": 254.69565999999998
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 3,
+    "pair_position": 0,
+    "process_sequence": 14,
+    "process_wall_s": 3.656972083997971,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.36562,
+        "completed_us": 264.59087
+      },
+      {
+        "enqueue_us": 1.39682,
+        "completed_us": 284.21109
+      },
+      {
+        "enqueue_us": 1.3289099999999998,
+        "completed_us": 264.00106
+      },
+      {
+        "enqueue_us": 1.40232,
+        "completed_us": 274.29218
+      },
+      {
+        "enqueue_us": 1.34352,
+        "completed_us": 283.98038
+      },
+      {
+        "enqueue_us": 1.38412,
+        "completed_us": 264.26077
+      },
+      {
+        "enqueue_us": 1.33452,
+        "completed_us": 274.54278
+      },
+      {
+        "enqueue_us": 1.31331,
+        "completed_us": 281.24725
+      },
+      {
+        "enqueue_us": 1.32762,
+        "completed_us": 260.99243
+      },
+      {
+        "enqueue_us": 20.742019999999997,
+        "completed_us": 287.46302
+      },
+      {
+        "enqueue_us": 1.2292100000000001,
+        "completed_us": 278.55522
+      },
+      {
+        "enqueue_us": 1.33972,
+        "completed_us": 264.15707
+      },
+      {
+        "enqueue_us": 21.45103,
+        "completed_us": 281.70666
+      },
+      {
+        "enqueue_us": 1.23011,
+        "completed_us": 271.49014999999997
+      },
+      {
+        "enqueue_us": 1.26511,
+        "completed_us": 261.07753
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 3,
+    "pair_position": 1,
+    "process_sequence": 15,
+    "process_wall_s": 3.663865970000188,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.40512,
+        "completed_us": 289.25554
+      },
+      {
+        "enqueue_us": 1.49662,
+        "completed_us": 286.49271
+      },
+      {
+        "enqueue_us": 15.657760000000001,
+        "completed_us": 296.84522
+      },
+      {
+        "enqueue_us": 9.1728,
+        "completed_us": 298.99114000000003
+      },
+      {
+        "enqueue_us": 1.41602,
+        "completed_us": 285.6284
+      },
+      {
+        "enqueue_us": 1.38832,
+        "completed_us": 255.16097000000002
+      },
+      {
+        "enqueue_us": 13.547450000000001,
+        "completed_us": 285.83941000000004
+      },
+      {
+        "enqueue_us": 1.25721,
+        "completed_us": 278.61172
+      },
+      {
+        "enqueue_us": 1.3023099999999999,
+        "completed_us": 262.28925
+      },
+      {
+        "enqueue_us": 13.650640000000001,
+        "completed_us": 297.51492
+      },
+      {
+        "enqueue_us": 1.31132,
+        "completed_us": 278.54013
+      },
+      {
+        "enqueue_us": 1.3821100000000002,
+        "completed_us": 257.97450000000003
+      },
+      {
+        "enqueue_us": 1.9727199999999998,
+        "completed_us": 285.9672
+      },
+      {
+        "enqueue_us": 1.4428200000000002,
+        "completed_us": 269.98323
+      },
+      {
+        "enqueue_us": 1.49212,
+        "completed_us": 269.81623
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 4,
+    "pair_position": 0,
+    "process_sequence": 16,
+    "process_wall_s": 3.7004745169979287,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.3468099999999998,
+        "completed_us": 260.18912
+      },
+      {
+        "enqueue_us": 1.3488199999999997,
+        "completed_us": 268.67312000000004
+      },
+      {
+        "enqueue_us": 1.29901,
+        "completed_us": 277.0641
+      },
+      {
+        "enqueue_us": 1.3483200000000002,
+        "completed_us": 259.34692
+      },
+      {
+        "enqueue_us": 18.0214,
+        "completed_us": 292.47227
+      },
+      {
+        "enqueue_us": 1.3036100000000002,
+        "completed_us": 271.17864
+      },
+      {
+        "enqueue_us": 1.35471,
+        "completed_us": 264.82997
+      },
+      {
+        "enqueue_us": 1.3189099999999998,
+        "completed_us": 281.80505
+      },
+      {
+        "enqueue_us": 1.3434199999999998,
+        "completed_us": 256.40388
+      },
+      {
+        "enqueue_us": 1.3490099999999998,
+        "completed_us": 269.35462
+      },
+      {
+        "enqueue_us": 1.2825099999999998,
+        "completed_us": 278.41982
+      },
+      {
+        "enqueue_us": 1.30941,
+        "completed_us": 256.87639
+      },
+      {
+        "enqueue_us": 7.7918899999999995,
+        "completed_us": 281.33684999999997
+      },
+      {
+        "enqueue_us": 1.3180200000000002,
+        "completed_us": 271.60884999999996
+      },
+      {
+        "enqueue_us": 1.3847200000000002,
+        "completed_us": 266.98920000000004
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 4,
+    "pair_position": 1,
+    "process_sequence": 17,
+    "process_wall_s": 3.6912059580026835,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 28.2902,
+        "completed_us": 2115.2703500000002
+      },
+      {
+        "enqueue_us": 1.43051,
+        "completed_us": 2132.70134
+      },
+      {
+        "enqueue_us": 1.4425199999999998,
+        "completed_us": 2083.79902
+      },
+      {
+        "enqueue_us": 18.772100000000002,
+        "completed_us": 2110.7897
+      },
+      {
+        "enqueue_us": 1.38821,
+        "completed_us": 2102.71921
+      },
+      {
+        "enqueue_us": 1.47142,
+        "completed_us": 2084.75813
+      },
+      {
+        "enqueue_us": 1.39832,
+        "completed_us": 2144.18607
+      },
+      {
+        "enqueue_us": 1.4174099999999998,
+        "completed_us": 2182.08288
+      },
+      {
+        "enqueue_us": 1.36732,
+        "completed_us": 2142.45766
+      },
+      {
+        "enqueue_us": 1.35501,
+        "completed_us": 2153.75877
+      },
+      {
+        "enqueue_us": 1.3833099999999998,
+        "completed_us": 2124.42405
+      },
+      {
+        "enqueue_us": 1.40562,
+        "completed_us": 2146.5285
+      },
+      {
+        "enqueue_us": 1.47012,
+        "completed_us": 2153.16687
+      },
+      {
+        "enqueue_us": 12.77884,
+        "completed_us": 2123.23695
+      },
+      {
+        "enqueue_us": 1.42171,
+        "completed_us": 2151.1466400000004
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 4,
+    "pair_position": 0,
+    "process_sequence": 18,
+    "process_wall_s": 6.9258953429998655,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.3415100000000002,
+        "completed_us": 2089.07077
+      },
+      {
+        "enqueue_us": 26.775890000000004,
+        "completed_us": 2126.32128
+      },
+      {
+        "enqueue_us": 1.3680100000000002,
+        "completed_us": 2143.89207
+      },
+      {
+        "enqueue_us": 1.4351099999999999,
+        "completed_us": 2130.31512
+      },
+      {
+        "enqueue_us": 1.33091,
+        "completed_us": 2120.17681
+      },
+      {
+        "enqueue_us": 1.34361,
+        "completed_us": 2135.4194700000003
+      },
+      {
+        "enqueue_us": 10.58492,
+        "completed_us": 2155.38649
+      },
+      {
+        "enqueue_us": 1.3731099999999998,
+        "completed_us": 2157.13471
+      },
+      {
+        "enqueue_us": 1.37351,
+        "completed_us": 2147.5821
+      },
+      {
+        "enqueue_us": 1.34572,
+        "completed_us": 2127.3262000000004
+      },
+      {
+        "enqueue_us": 1.37351,
+        "completed_us": 2114.23324
+      },
+      {
+        "enqueue_us": 1.3822199999999998,
+        "completed_us": 2116.14007
+      },
+      {
+        "enqueue_us": 1.3633100000000002,
+        "completed_us": 2220.4286
+      },
+      {
+        "enqueue_us": 1.32541,
+        "completed_us": 2227.33767
+      },
+      {
+        "enqueue_us": 1.3433100000000002,
+        "completed_us": 2158.04212
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 4,
+    "pair_position": 1,
+    "process_sequence": 19,
+    "process_wall_s": 6.962580423001782,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 16.97738,
+        "completed_us": 2121.77093
+      },
+      {
+        "enqueue_us": 1.35991,
+        "completed_us": 2092.71451
+      },
+      {
+        "enqueue_us": 1.32691,
+        "completed_us": 2130.44612
+      },
+      {
+        "enqueue_us": 8.5161,
+        "completed_us": 2149.30373
+      },
+      {
+        "enqueue_us": 11.40852,
+        "completed_us": 2129.95632
+      },
+      {
+        "enqueue_us": 1.34411,
+        "completed_us": 2141.66294
+      },
+      {
+        "enqueue_us": 1.32012,
+        "completed_us": 2099.68489
+      },
+      {
+        "enqueue_us": 1.36722,
+        "completed_us": 2119.81821
+      },
+      {
+        "enqueue_us": 1.3721100000000002,
+        "completed_us": 2158.36582
+      },
+      {
+        "enqueue_us": 1.3545099999999999,
+        "completed_us": 2144.85137
+      },
+      {
+        "enqueue_us": 1.3396199999999998,
+        "completed_us": 2130.70483
+      },
+      {
+        "enqueue_us": 1.35611,
+        "completed_us": 2139.07691
+      },
+      {
+        "enqueue_us": 1.3258200000000002,
+        "completed_us": 2121.77783
+      },
+      {
+        "enqueue_us": 24.63607,
+        "completed_us": 2129.04891
+      },
+      {
+        "enqueue_us": 1.34482,
+        "completed_us": 2102.69292
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 5,
+    "pair_position": 0,
+    "process_sequence": 20,
+    "process_wall_s": 6.944376467999973,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 1.42672,
+        "completed_us": 2143.89807
+      },
+      {
+        "enqueue_us": 1.40612,
+        "completed_us": 2148.90983
+      },
+      {
+        "enqueue_us": 1.3803100000000001,
+        "completed_us": 2137.9747
+      },
+      {
+        "enqueue_us": 1.40512,
+        "completed_us": 2178.8245500000003
+      },
+      {
+        "enqueue_us": 1.43271,
+        "completed_us": 2125.9416699999997
+      },
+      {
+        "enqueue_us": 23.87536,
+        "completed_us": 2136.02488
+      },
+      {
+        "enqueue_us": 11.61582,
+        "completed_us": 2245.10276
+      },
+      {
+        "enqueue_us": 1.4134200000000001,
+        "completed_us": 2219.9824000000003
+      },
+      {
+        "enqueue_us": 1.4611100000000001,
+        "completed_us": 2180.89337
+      },
+      {
+        "enqueue_us": 1.45661,
+        "completed_us": 2162.53517
+      },
+      {
+        "enqueue_us": 1.48522,
+        "completed_us": 2126.55008
+      },
+      {
+        "enqueue_us": 1.4821199999999999,
+        "completed_us": 2077.33845
+      },
+      {
+        "enqueue_us": 2.0899199999999998,
+        "completed_us": 2072.8475
+      },
+      {
+        "enqueue_us": 21.23723,
+        "completed_us": 2130.58352
+      },
+      {
+        "enqueue_us": 1.37722,
+        "completed_us": 2099.13079
+      }
+    ],
+    "initial_rel_l2": 6.752560953211685e-06,
+    "final_rel_l2": 6.752560953211685e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 5,
+    "pair_position": 1,
+    "process_sequence": 21,
+    "process_wall_s": 6.936611696000909,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "4096",
+      "4096",
+      "4096",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.2258200000000001,
+        "completed_us": 286.10191
+      },
+      {
+        "enqueue_us": 1.26301,
+        "completed_us": 260.88873
+      },
+      {
+        "enqueue_us": 18.4411,
+        "completed_us": 284.75099
+      },
+      {
+        "enqueue_us": 1.24062,
+        "completed_us": 264.54698
+      },
+      {
+        "enqueue_us": 1.3328099999999998,
+        "completed_us": 291.39036
+      },
+      {
+        "enqueue_us": 29.47142,
+        "completed_us": 281.88456
+      },
+      {
+        "enqueue_us": 1.2712100000000002,
+        "completed_us": 253.51715000000002
+      },
+      {
+        "enqueue_us": 6.35137,
+        "completed_us": 329.0755699999999
+      },
+      {
+        "enqueue_us": 1.32012,
+        "completed_us": 286.01061000000004
+      },
+      {
+        "enqueue_us": 36.7131,
+        "completed_us": 294.9859
+      },
+      {
+        "enqueue_us": 1.19311,
+        "completed_us": 302.57558
+      },
+      {
+        "enqueue_us": 1.30251,
+        "completed_us": 264.64297000000005
+      },
+      {
+        "enqueue_us": 34.45827,
+        "completed_us": 288.13913
+      },
+      {
+        "enqueue_us": 1.19741,
+        "completed_us": 288.24703
+      },
+      {
+        "enqueue_us": 1.25331,
+        "completed_us": 282.14366
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 5,
+    "pair_position": 0,
+    "process_sequence": 22,
+    "process_wall_s": 3.6973111090010207,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/after",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  },
+  {
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "policy": "deferred",
+    "calls_per_round": 100,
+    "audit_calls": 100,
+    "audit_rust_allocations": 200,
+    "rounds": [
+      {
+        "enqueue_us": 26.590889999999998,
+        "completed_us": 272.32786
+      },
+      {
+        "enqueue_us": 1.2458099999999999,
+        "completed_us": 267.6861
+      },
+      {
+        "enqueue_us": 1.3166200000000001,
+        "completed_us": 280.57235000000003
+      },
+      {
+        "enqueue_us": 1.3123099999999999,
+        "completed_us": 285.95459999999997
+      },
+      {
+        "enqueue_us": 1.3440199999999998,
+        "completed_us": 269.23612
+      },
+      {
+        "enqueue_us": 1.39761,
+        "completed_us": 270.40972999999997
+      },
+      {
+        "enqueue_us": 1.35131,
+        "completed_us": 279.61494
+      },
+      {
+        "enqueue_us": 1.6162100000000001,
+        "completed_us": 264.97677
+      },
+      {
+        "enqueue_us": 1.3559200000000002,
+        "completed_us": 281.52146
+      },
+      {
+        "enqueue_us": 1.32381,
+        "completed_us": 275.57939
+      },
+      {
+        "enqueue_us": 1.3276100000000002,
+        "completed_us": 277.53921
+      },
+      {
+        "enqueue_us": 1.42712,
+        "completed_us": 273.70817
+      },
+      {
+        "enqueue_us": 1.33982,
+        "completed_us": 279.45214
+      },
+      {
+        "enqueue_us": 1.3406099999999999,
+        "completed_us": 260.21762
+      },
+      {
+        "enqueue_us": 1.35902,
+        "completed_us": 274.32558
+      }
+    ],
+    "initial_rel_l2": 2.8948525484367597e-06,
+    "final_rel_l2": 2.8948525484367597e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 5,
+    "pair_position": 1,
+    "process_sequence": 23,
+    "process_wall_s": 3.663352281000698,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-2026-09-24/before",
+      "2048",
+      "2048",
+      "2048",
+      "deferred",
+      "100",
+      "15"
+    ]
+  }
+]

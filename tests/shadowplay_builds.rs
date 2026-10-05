@@ -213,13 +213,19 @@ fn the_gui_calls_survive_to_the_emitted_module() {
 
         let ir = std::fs::read_to_string(dir.join(format!("{stem}.ll")))
             .unwrap_or_else(|e| panic!("read {stem}.ll: {e}"));
-        for sym in [
+        let mut syms = vec![
             "init_shadowplay_gui",
             "update_shadowplay_gui",
             "get_recording_state",
             "get_indicator_state",
             "usleep",
-        ] {
+        ];
+        // The application also drives voice recording and capture, which the
+        // in-repo surface program does not call.
+        if stem == "shadowplay" {
+            syms.extend(["get_voice_recording_state", "get_capture_failure_count", "print_microphone_label"]);
+        }
+        for sym in syms {
             assert!(
                 ir.contains(&format!("declare i32 @{}(", sym)),
                 "`{}` is not declared in {stem}.ll, so the call was dropped \

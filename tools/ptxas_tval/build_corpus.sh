@@ -74,6 +74,9 @@ fi
 #   w4_top_guard       the EXIT guard tests N, not M                 -> ENTRY (top level)
 #   w5_inner_guard     the inner zero-trip guard tests N, not K      -> ENTRY (child)
 #   w6_inner_backedge  the inner back edge tests N, not K            -> LOOPCOND
+# The three guards are SIGNED compares (`ISETP.LT.AND`, `ISETP.GE.AND`): the
+# PTX emitter tests a loop's I32 bounds signed, as the invariant verifier
+# models them.
 if [ -f "$REPO/tests/y_cpu_matmul.ptx" ]; then
   arch=$(grep -m1 -oE '^\.target[[:space:]]+sm_[0-9]+[a-z]*' "$REPO/tests/y_cpu_matmul.ptx" | awk '{print $2}')
   ptxas -O1 -arch="$arch" -o o1/y_cpu_matmul.cubin "$REPO/tests/y_cpu_matmul.ptx" 2>/dev/null \
@@ -96,12 +99,12 @@ twins = {
  'w7_acc_init_k0':    ('/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, RZ ;',
                        '/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, 0x3f800000 ;\n'
                        '        /*0098*/' + I + 'FSEL R9, RZ, R9, P0 ;'),
- 'w4_top_guard':      ('/*0010*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x178], PT ;',
-                       '/*0010*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
- 'w5_inner_guard':    ('/*0080*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x180], PT ;',
-                       '/*0080*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
- 'w6_inner_backedge': ('/*01a0*/' + I + 'ISETP.GE.U32.AND P0, PT, R6, c[0x0][0x180], PT ;',
-                       '/*01a0*/' + I + 'ISETP.GE.U32.AND P0, PT, R6, c[0x0][0x17c], PT ;'),
+ 'w4_top_guard':      ('/*0010*/' + I + 'ISETP.LT.AND P0, PT, RZ, c[0x0][0x178], PT ;',
+                       '/*0010*/' + I + 'ISETP.LT.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
+ 'w5_inner_guard':    ('/*0080*/' + I + 'ISETP.LT.AND P0, PT, RZ, c[0x0][0x180], PT ;',
+                       '/*0080*/' + I + 'ISETP.LT.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
+ 'w6_inner_backedge': ('/*01a0*/' + I + 'ISETP.GE.AND P0, PT, R6, c[0x0][0x180], PT ;',
+                       '/*01a0*/' + I + 'ISETP.GE.AND P0, PT, R6, c[0x0][0x17c], PT ;'),
 }
 for name, (a, b) in twins.items():
     if src.count(a) != 1:

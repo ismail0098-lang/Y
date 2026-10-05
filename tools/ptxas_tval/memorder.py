@@ -59,20 +59,48 @@ from z3 import (BitVecVal, UGE, ULT, And, Implies, If, Extract, Concat,
 # A global store is 1, 2 or 4 bytes wide, by its value's width.  Anything else
 # is refused rather than reasoned about.
 STORE_WIDTHS_BYTES = (1, 2, 4)
+LOAD_WIDTHS_BYTES = (1, 2, 4, 8, 16)
 
 
 class Refusal(Exception):
     """A program the memory model cannot represent.  Reported as REFUSED."""
 
 
+class _LoadWidths(list):
+    """Load extents are maintained by the load trace, never separately."""
+
+    def _immutable(self, *a, **k):
+        raise Refusal('memorder: load widths may only change atomically with a load '
+                      'append  (refusing, not guessing)')
+
+    append = extend = insert = pop = remove = clear = sort = reverse = _immutable
+    __iadd__ = __imul__ = __setitem__ = __delitem__ = _immutable
+
+
 class _Trace(list):
     """A load or store list that records program order into a shared sequence."""
 
-    def __init__(self, tag, order):
+    def __init__(self, tag, order, widths=None):
         super().__init__()
         self._tag, self._order = tag, order
+        self._widths = widths
 
     def append(self, item):
+        if self._tag == 'L':
+            if not (isinstance(item, (tuple, list)) and len(item) == 3):
+                raise Refusal('memorder: a global load append requires an explicit '
+                              '(64-bit address, Boolean guard, width in bytes) '
+                              'triple  (refusing, not guessing)')
+            address, guard, width = item
+            if not (is_bv(address) and address.size() == 64 and is_bool(guard)
+                    and type(width) is int and width in LOAD_WIDTHS_BYTES):
+                raise Refusal('memorder: a global load must have a 64-bit address, '
+                              'Boolean guard and width of 1/2/4/8/16 bytes '
+                              '(refusing, not guessing)')
+            # Preserve existing address/guard consumers while recording the
+            # actual access extent, even when later code discards loaded words.
+            item = (address, guard)
+            list.append(self._widths, width)
         self._order.append(self._tag)
         super().append(item)
 
@@ -81,13 +109,14 @@ class _Trace(list):
                       'mutation would bypass the program-order record  (refusing, not guessing)')
 
     extend = insert = pop = remove = clear = sort = reverse = _grow_only
-    __iadd__ = __setitem__ = __delitem__ = _grow_only
+    __iadd__ = __imul__ = __setitem__ = __delitem__ = _grow_only
 
 
 def install(st):
     """Give an executor state order-recording `loads`/`stores`."""
     st.mem_order = []
-    st.loads = _Trace('L', st.mem_order)
+    st.load_widths = _LoadWidths()
+    st.loads = _Trace('L', st.mem_order, st.load_widths)
     st.stores = _Trace('S', st.mem_order)
 
 
@@ -104,6 +133,9 @@ def order_of(regions):
 
 def store_width(store):
     """A store's width in bytes, refusing a shape the model does not state."""
+    if not isinstance(store, (tuple, list)) or len(store) != 3:
+        raise Refusal('memorder: a global store must contain an address, value and '
+                      'guard  (refusing, not guessing)')
     a, v, g = store
     if not (is_bv(a) and a.size() == 64 and is_bv(v) and is_bool(g)
             and v.size() % 8 == 0 and v.size() // 8 in STORE_WIDTHS_BYTES):
@@ -134,12 +166,12 @@ def read_through(stores, addr, base, nbytes=4):
 
     See the module docstring for why an empty `stores` must return `base` itself.
     """
+    if not (is_bv(addr) and addr.size() == 64 and is_bv(base) and base.size() == 32
+            and type(nbytes) is int and nbytes in STORE_WIDTHS_BYTES):
+        raise Refusal('memorder: a global load is not a 64-bit address '
+                      'reading 1, 2 or 4 bytes of a 32-bit word  (refusing, not guessing)')
     if not stores:
         return base
-    if not (is_bv(addr) and addr.size() == 64 and is_bv(base) and base.size() == 32
-            and nbytes in STORE_WIDTHS_BYTES):
-        raise Refusal('memorder: a global load after a store is not a 64-bit address '
-                      'reading 1, 2 or 4 bytes of a 32-bit word  (refusing, not guessing)')
     widths = [store_width(s) for s in stores]
     c = addr.ctx
     out = []
@@ -275,12 +307,15 @@ def _self_check():
     it was, and every check added since runs in a PRIVATE `Context`, whose
     numbering nothing else shares."""
     class _S: pass
+    from z3 import Context, BoolVal
+    trace_context = Context()
+    load = (BitVecVal(0, 64, trace_context), BoolVal(True, trace_context), 4)
     s = _S(); install(s)
-    s.loads.append(0); s.stores.append(0); s.loads.append(0)
+    s.loads.append(load); s.stores.append(0); s.loads.append(load)
     if s.mem_order != ['L', 'S', 'L']:
         raise Exception(f'memorder: the trace recorded {s.mem_order}, not [L, S, L]')
     require_no_read_back_across('X', [s])      # within one region: must NOT refuse
-    t = _S(); install(t); t.loads.append(0); t.stores.append(0)
+    t = _S(); install(t); t.loads.append(load); t.stores.append(0)
     try:
         require_no_read_back_across('X', [t, t])   # a body run twice
         raise Exception('memorder: a store followed by a load in the next iteration '
@@ -288,7 +323,7 @@ def _self_check():
     except Refusal:
         pass
     u = _S(); install(u); u.stores.append(0)
-    v_ = _S(); install(v_); v_.loads.append(0)
+    v_ = _S(); install(v_); v_.loads.append(load)
     require_no_read_back_across('X', [v_, u])      # load region BEFORE store region: fine
     try:
         require_no_read_back_across('X', [u, v_])

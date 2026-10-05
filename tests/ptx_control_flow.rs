@@ -35,14 +35,11 @@ use std::process::Command;
 
 #[path = "common/pinned.rs"]
 mod pinned;
+#[path = "common/ptxas.rs"]
+mod ptxas;
 
 fn bin() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("Y")
+    PathBuf::from(env!("CARGO_BIN_EXE_Y"))
 }
 
 fn repo() -> &'static Path {
@@ -58,16 +55,22 @@ fn emit(name: &str, src: &str) -> Result<String, String> {
     // A PINNED profile in the scratch directory, which is the working
     // directory: `current_dir(repo)` compiled for this machine's card.
     pinned::pin(&dir, pinned::SM_PINNED);
+    let artifact = path.with_extension("ptx");
+    if artifact.exists() {
+        std::fs::remove_file(&artifact).expect("remove prior compiler artifact");
+    }
     let mut cmd = Command::new(bin());
     cmd.arg(&path).arg("--emit-ptx").current_dir(&dir);
     // Keep a solver in reach: every loop here carries an `@invariant`, and a
     // missing z3 would fail these for a reason that is not what they test.
-    if let Some(z3) = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
-        .iter()
-        .map(|p| repo().join(p))
-        .find(|p| p.exists())
-    {
-        cmd.env("Y_Z3_PATH", z3);
+    if std::env::var_os("Y_Z3_PATH").is_none() {
+        if let Some(z3) = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
+            .iter()
+            .map(|p| repo().join(p))
+            .find(|p| p.exists())
+        {
+            cmd.env("Y_Z3_PATH", z3);
+        }
     }
     let out = cmd.output().expect("failed to run the Y binary");
     let text = format!(
@@ -76,9 +79,13 @@ fn emit(name: &str, src: &str) -> Result<String, String> {
         String::from_utf8_lossy(&out.stderr)
     );
     if !out.status.success() {
+        assert!(!artifact.exists(), "refused loop published PTX:\n{text}");
+        let _ = std::fs::remove_dir_all(&dir);
         return Err(text);
     }
-    Ok(std::fs::read_to_string(path.with_extension("ptx")).expect("no .ptx was written"))
+    let ptx = std::fs::read_to_string(&artifact).expect("no .ptx was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(ptx)
 }
 
 const WHILE_KERNEL: &str = "kernel k(A: GlobalMemory<F32>, N: I32) {\n\
@@ -125,18 +132,18 @@ fn a_while_loop_emits_a_loop() {
 /// the kind of thing that assembles or does not.
 #[test]
 fn the_emitted_loop_assembles() {
+    let Some(assembler) = ptxas::ptxas() else {
+        return;
+    };
     let ptx = emit("ptxcf_while_asm", WHILE_KERNEL).expect("the while kernel must compile");
     let dir = std::env::temp_dir().join(format!("y_ptxcf_asm_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("k.ptx");
     std::fs::write(&f, &ptx).unwrap();
-    let out = match Command::new("ptxas").arg("-arch=sm_89").arg(&f).arg("-o").arg(dir.join("k.o")).output() {
-        Ok(o) => o,
-        Err(_) => {
-            eprintln!("skipping: no ptxas on this machine");
-            return;
-        }
-    };
+    let out = Command::new(assembler)
+        .arg("-arch=sm_89").arg(&f).arg("-o").arg(dir.join("k.o"))
+        .output().expect("run discovered ptxas");
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
         "ptxas rejected the emitted loop:\n{}\n--- ptx ---\n{}",

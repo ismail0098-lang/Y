@@ -1,0 +1,2834 @@
+[
+  {
+    "mode": "baseline",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000232783,
+    "first32_s": 0.000102951,
+    "maintenance_s": 3.6e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.003320777
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.032214534
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.316086299
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 1,
+    "process_wall_s": 3.4548965670001053
+  },
+  {
+    "mode": "adaptive",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.001489036,
+    "first32_s": 0.000179052,
+    "maintenance_s": 3.1759289219999998,
+    "tuning_s": 3.164437216,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.180687033
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.209617521
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.500231999
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.328327,
+        "selected_us": 3.259756
+      },
+      {
+        "baseline_us": 3.079514,
+        "selected_us": 3.227995
+      },
+      {
+        "baseline_us": 3.082234,
+        "selected_us": 3.3935969999999998
+      },
+      {
+        "baseline_us": 3.396228,
+        "selected_us": 3.248275
+      },
+      {
+        "baseline_us": 3.079694,
+        "selected_us": 3.082933
+      },
+      {
+        "baseline_us": 3.118035,
+        "selected_us": 3.3850569999999998
+      },
+      {
+        "baseline_us": 3.4385269999999997,
+        "selected_us": 3.080194
+      },
+      {
+        "baseline_us": 3.375397,
+        "selected_us": 3.080134
+      },
+      {
+        "baseline_us": 3.080644,
+        "selected_us": 3.4749380000000003
+      },
+      {
+        "baseline_us": 3.081863,
+        "selected_us": 3.080934
+      },
+      {
+        "baseline_us": 3.241096,
+        "selected_us": 3.237226
+      },
+      {
+        "baseline_us": 3.3152269999999997,
+        "selected_us": 3.256005
+      },
+      {
+        "baseline_us": 3.080654,
+        "selected_us": 3.246355
+      },
+      {
+        "baseline_us": 3.245235,
+        "selected_us": 3.243236
+      },
+      {
+        "baseline_us": 3.3921580000000002,
+        "selected_us": 3.080223
+      }
+    ],
+    "reference_setup_s": 0.000238263,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 2,
+    "process_wall_s": 6.718226624998351
+  },
+  {
+    "mode": "cached",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000932041,
+    "first32_s": 0.000103791,
+    "maintenance_s": 5.7e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.004210007
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.033390637
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.324687452
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.336057,
+        "selected_us": 3.265056
+      },
+      {
+        "baseline_us": 3.303006,
+        "selected_us": 3.342796
+      },
+      {
+        "baseline_us": 3.095374,
+        "selected_us": 3.377868
+      },
+      {
+        "baseline_us": 3.3044469999999997,
+        "selected_us": 3.2630950000000003
+      },
+      {
+        "baseline_us": 3.092343,
+        "selected_us": 3.093624
+      },
+      {
+        "baseline_us": 3.280156,
+        "selected_us": 3.394828
+      },
+      {
+        "baseline_us": 3.318646,
+        "selected_us": 3.092504
+      },
+      {
+        "baseline_us": 3.397227,
+        "selected_us": 3.094184
+      },
+      {
+        "baseline_us": 3.271816,
+        "selected_us": 3.2382959999999996
+      },
+      {
+        "baseline_us": 3.095725,
+        "selected_us": 3.095153
+      },
+      {
+        "baseline_us": 3.331306,
+        "selected_us": 3.263436
+      },
+      {
+        "baseline_us": 3.5232979999999996,
+        "selected_us": 3.092564
+      },
+      {
+        "baseline_us": 3.093834,
+        "selected_us": 3.2567660000000003
+      },
+      {
+        "baseline_us": 3.3211370000000002,
+        "selected_us": 3.397427
+      },
+      {
+        "baseline_us": 3.096474,
+        "selected_us": 3.0932540000000004
+      }
+    ],
+    "reference_setup_s": 0.000164132,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 3,
+    "process_wall_s": 3.5566558749997057
+  },
+  {
+    "mode": "adaptive",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00090227,
+    "first32_s": 0.000108951,
+    "maintenance_s": 3.174890992,
+    "tuning_s": 3.163330315,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.179183959
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.207977225
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.494961812
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.3128070000000003,
+        "selected_us": 3.098934
+      },
+      {
+        "baseline_us": 3.2556149999999997,
+        "selected_us": 3.099354
+      },
+      {
+        "baseline_us": 3.156545,
+        "selected_us": 3.422278
+      },
+      {
+        "baseline_us": 3.099864,
+        "selected_us": 3.103074
+      },
+      {
+        "baseline_us": 3.248645,
+        "selected_us": 3.1449049999999996
+      },
+      {
+        "baseline_us": 3.106674,
+        "selected_us": 3.3960969999999997
+      },
+      {
+        "baseline_us": 3.0994740000000003,
+        "selected_us": 3.251266
+      },
+      {
+        "baseline_us": 3.457818,
+        "selected_us": 3.144274
+      },
+      {
+        "baseline_us": 3.102864,
+        "selected_us": 3.101444
+      },
+      {
+        "baseline_us": 3.150824,
+        "selected_us": 3.245446
+      },
+      {
+        "baseline_us": 3.422538,
+        "selected_us": 3.104314
+      },
+      {
+        "baseline_us": 3.1072740000000003,
+        "selected_us": 3.1075340000000002
+      },
+      {
+        "baseline_us": 3.241116,
+        "selected_us": 3.153014
+      },
+      {
+        "baseline_us": 3.108364,
+        "selected_us": 3.4585879999999998
+      },
+      {
+        "baseline_us": 3.097604,
+        "selected_us": 3.258356
+      }
+    ],
+    "reference_setup_s": 0.000234402,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 4,
+    "process_wall_s": 6.7108889459996135
+  },
+  {
+    "mode": "cached",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00090627,
+    "first32_s": 0.000244632,
+    "maintenance_s": 4.9e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.004155545
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.033070642
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.321185292
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.1178349999999995,
+        "selected_us": 3.120314
+      },
+      {
+        "baseline_us": 3.443648,
+        "selected_us": 3.249335
+      },
+      {
+        "baseline_us": 3.0978540000000003,
+        "selected_us": 3.1085840000000005
+      },
+      {
+        "baseline_us": 3.2498560000000003,
+        "selected_us": 3.1010340000000003
+      },
+      {
+        "baseline_us": 3.150135,
+        "selected_us": 3.406437
+      },
+      {
+        "baseline_us": 3.097234,
+        "selected_us": 3.0985639999999997
+      },
+      {
+        "baseline_us": 3.246645,
+        "selected_us": 3.1409849999999997
+      },
+      {
+        "baseline_us": 3.094634,
+        "selected_us": 3.418777
+      },
+      {
+        "baseline_us": 3.114654,
+        "selected_us": 3.2490259999999997
+      },
+      {
+        "baseline_us": 3.4192670000000005,
+        "selected_us": 3.136085
+      },
+      {
+        "baseline_us": 3.1032439999999997,
+        "selected_us": 3.1029839999999997
+      },
+      {
+        "baseline_us": 3.145794,
+        "selected_us": 3.2494860000000005
+      },
+      {
+        "baseline_us": 3.4742480000000002,
+        "selected_us": 3.108384
+      },
+      {
+        "baseline_us": 3.1102130000000003,
+        "selected_us": 3.1037049999999997
+      },
+      {
+        "baseline_us": 3.2554559999999997,
+        "selected_us": 3.143505
+      }
+    ],
+    "reference_setup_s": 0.000183932,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 5,
+    "process_wall_s": 3.5397625299992796
+  },
+  {
+    "mode": "baseline",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000240202,
+    "first32_s": 0.000104262,
+    "maintenance_s": 3.5e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.00367315
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.032433636
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.32104081
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 6,
+    "process_wall_s": 3.4384529659982945
+  },
+  {
+    "mode": "baseline",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000233643,
+    "first32_s": 0.000104791,
+    "maintenance_s": 6.6e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.003357367
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.032346375
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.320845698
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 7,
+    "process_wall_s": 3.4375366130007023
+  },
+  {
+    "mode": "adaptive",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00093695,
+    "first32_s": 0.000105182,
+    "maintenance_s": 3.175919889,
+    "tuning_s": 3.164462393,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.180044955
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.20879492
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.497267552
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.154304,
+        "selected_us": 3.4741280000000003
+      },
+      {
+        "baseline_us": 3.121055,
+        "selected_us": 3.1100339999999997
+      },
+      {
+        "baseline_us": 3.2669159999999997,
+        "selected_us": 3.137734
+      },
+      {
+        "baseline_us": 3.1005640000000003,
+        "selected_us": 3.422167
+      },
+      {
+        "baseline_us": 3.106365,
+        "selected_us": 3.4311369999999997
+      },
+      {
+        "baseline_us": 3.4997380000000002,
+        "selected_us": 3.375547
+      },
+      {
+        "baseline_us": 3.0991239999999998,
+        "selected_us": 3.106554
+      },
+      {
+        "baseline_us": 3.303286,
+        "selected_us": 3.1167249999999997
+      },
+      {
+        "baseline_us": 3.726581,
+        "selected_us": 3.1022039999999995
+      },
+      {
+        "baseline_us": 3.1203440000000002,
+        "selected_us": 3.092324
+      },
+      {
+        "baseline_us": 3.63376,
+        "selected_us": 3.4612979999999998
+      },
+      {
+        "baseline_us": 3.103064,
+        "selected_us": 3.1062339999999997
+      },
+      {
+        "baseline_us": 3.0999640000000004,
+        "selected_us": 3.596759
+      },
+      {
+        "baseline_us": 3.341967,
+        "selected_us": 3.295036
+      },
+      {
+        "baseline_us": 3.1327239999999996,
+        "selected_us": 3.1257550000000003
+      }
+    ],
+    "reference_setup_s": 0.000238852,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 8,
+    "process_wall_s": 6.720254610001575
+  },
+  {
+    "mode": "cached",
+    "m": 256,
+    "n": 256,
+    "k": 256,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00091383,
+    "first32_s": 0.000104621,
+    "maintenance_s": 5.3e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.004200026
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.033071473
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.322123241
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 3.325757,
+        "selected_us": 3.155674
+      },
+      {
+        "baseline_us": 3.104015,
+        "selected_us": 3.4854080000000005
+      },
+      {
+        "baseline_us": 3.1100839999999996,
+        "selected_us": 3.105644
+      },
+      {
+        "baseline_us": 3.2605249999999995,
+        "selected_us": 3.284406
+      },
+      {
+        "baseline_us": 3.347487,
+        "selected_us": 3.103764
+      },
+      {
+        "baseline_us": 3.245316,
+        "selected_us": 3.107434
+      },
+      {
+        "baseline_us": 3.379487,
+        "selected_us": 3.255296
+      },
+      {
+        "baseline_us": 3.101955,
+        "selected_us": 3.1091729999999997
+      },
+      {
+        "baseline_us": 3.255145,
+        "selected_us": 3.1443049999999997
+      },
+      {
+        "baseline_us": 3.111264,
+        "selected_us": 3.394977
+      },
+      {
+        "baseline_us": 3.1074840000000004,
+        "selected_us": 3.257686
+      },
+      {
+        "baseline_us": 3.471048,
+        "selected_us": 3.140164
+      },
+      {
+        "baseline_us": 3.100574,
+        "selected_us": 3.110644
+      },
+      {
+        "baseline_us": 3.1565250000000002,
+        "selected_us": 3.246146
+      },
+      {
+        "baseline_us": 3.419657,
+        "selected_us": 3.099994
+      }
+    ],
+    "reference_setup_s": 0.000174992,
+    "baseline_rel_l2": 3.7940168201107414e-07,
+    "selected_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 9,
+    "process_wall_s": 3.5400915579994034
+  },
+  {
+    "mode": "baseline",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000274253,
+    "first32_s": 0.000243363,
+    "maintenance_s": 3.7e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.007750455
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.07752785
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.774403508
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 10,
+    "process_wall_s": 3.8889223289988877
+  },
+  {
+    "mode": "adaptive",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000941271,
+    "first32_s": 0.000243772,
+    "maintenance_s": 3.339840575,
+    "tuning_s": 3.328372239,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.3484822
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.418444167
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 4.114209762
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.818515,
+        "selected_us": 7.476122
+      },
+      {
+        "baseline_us": 7.4762319999999995,
+        "selected_us": 8.080219
+      },
+      {
+        "baseline_us": 7.793114999999999,
+        "selected_us": 7.697575
+      },
+      {
+        "baseline_us": 7.697844,
+        "selected_us": 7.784235
+      },
+      {
+        "baseline_us": 7.8443760000000005,
+        "selected_us": 7.694313999999999
+      },
+      {
+        "baseline_us": 7.871816,
+        "selected_us": 7.622844
+      },
+      {
+        "baseline_us": 7.618524,
+        "selected_us": 7.889876
+      },
+      {
+        "baseline_us": 8.007577999999999,
+        "selected_us": 7.4797020000000005
+      },
+      {
+        "baseline_us": 7.476982,
+        "selected_us": 8.043188
+      },
+      {
+        "baseline_us": 7.811196,
+        "selected_us": 7.476132
+      },
+      {
+        "baseline_us": 7.684434,
+        "selected_us": 7.788365
+      },
+      {
+        "baseline_us": 8.005658,
+        "selected_us": 8.17253
+      },
+      {
+        "baseline_us": 7.711574,
+        "selected_us": 7.799666
+      },
+      {
+        "baseline_us": 7.623653999999999,
+        "selected_us": 7.883045999999999
+      },
+      {
+        "baseline_us": 8.20633,
+        "selected_us": 7.960406999999999
+      }
+    ],
+    "reference_setup_s": 0.000277473,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 11,
+    "process_wall_s": 7.488589477001369
+  },
+  {
+    "mode": "cached",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.001015481,
+    "first32_s": 0.000243893,
+    "maintenance_s": 6e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.008950258
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.07844982
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.774188904
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.476302,
+        "selected_us": 7.833435999999999
+      },
+      {
+        "baseline_us": 7.826375999999999,
+        "selected_us": 7.695294
+      },
+      {
+        "baseline_us": 7.698244,
+        "selected_us": 7.624384
+      },
+      {
+        "baseline_us": 7.614072999999999,
+        "selected_us": 7.880445999999999
+      },
+      {
+        "baseline_us": 7.865567,
+        "selected_us": 7.806105
+      },
+      {
+        "baseline_us": 7.816305000000002,
+        "selected_us": 8.260041
+      },
+      {
+        "baseline_us": 8.15182,
+        "selected_us": 7.479972
+      },
+      {
+        "baseline_us": 7.477302,
+        "selected_us": 8.19509
+      },
+      {
+        "baseline_us": 7.792814999999999,
+        "selected_us": 7.6866639999999995
+      },
+      {
+        "baseline_us": 7.826616,
+        "selected_us": 7.660714
+      },
+      {
+        "baseline_us": 7.743805,
+        "selected_us": 7.726644
+      },
+      {
+        "baseline_us": 7.921227,
+        "selected_us": 7.610124
+      },
+      {
+        "baseline_us": 7.611273,
+        "selected_us": 7.916257
+      },
+      {
+        "baseline_us": 8.042448,
+        "selected_us": 7.4800819999999995
+      },
+      {
+        "baseline_us": 7.470822,
+        "selected_us": 7.795675
+      }
+    ],
+    "reference_setup_s": 0.000227382,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 12,
+    "process_wall_s": 4.1692440699989675
+  },
+  {
+    "mode": "adaptive",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.0009384,
+    "first32_s": 0.000247433,
+    "maintenance_s": 3.341658865,
+    "tuning_s": 3.33022733,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.350412131
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.419864122
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 4.119046343
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.6507439999999995,
+        "selected_us": 7.846306
+      },
+      {
+        "baseline_us": 7.8789370000000005,
+        "selected_us": 7.6095429999999995
+      },
+      {
+        "baseline_us": 7.617393,
+        "selected_us": 7.884265999999998
+      },
+      {
+        "baseline_us": 8.097798999999998,
+        "selected_us": 7.483052
+      },
+      {
+        "baseline_us": 7.477972,
+        "selected_us": 8.067028
+      },
+      {
+        "baseline_us": 7.823586000000001,
+        "selected_us": 7.8021460000000005
+      },
+      {
+        "baseline_us": 7.708974,
+        "selected_us": 7.913546999999999
+      },
+      {
+        "baseline_us": 7.649194,
+        "selected_us": 7.700034
+      },
+      {
+        "baseline_us": 7.636243,
+        "selected_us": 7.624774
+      },
+      {
+        "baseline_us": 7.478452,
+        "selected_us": 7.660594
+      },
+      {
+        "baseline_us": 7.794685,
+        "selected_us": 7.482972
+      },
+      {
+        "baseline_us": 7.597143,
+        "selected_us": 8.18784
+      },
+      {
+        "baseline_us": 7.875627,
+        "selected_us": 7.709344
+      },
+      {
+        "baseline_us": 7.721684,
+        "selected_us": 7.798896
+      },
+      {
+        "baseline_us": 7.8109660000000005,
+        "selected_us": 7.715294
+      }
+    ],
+    "reference_setup_s": 0.000274763,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 13,
+    "process_wall_s": 7.486462282999128
+  },
+  {
+    "mode": "cached",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000963061,
+    "first32_s": 0.000243612,
+    "maintenance_s": 4.7e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.008445383
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.078588611
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.781903026
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.733235,
+        "selected_us": 7.793445
+      },
+      {
+        "baseline_us": 7.619204,
+        "selected_us": 7.715585
+      },
+      {
+        "baseline_us": 7.889095999999999,
+        "selected_us": 7.607253
+      },
+      {
+        "baseline_us": 7.613174,
+        "selected_us": 7.919937
+      },
+      {
+        "baseline_us": 7.883075999999999,
+        "selected_us": 7.475092
+      },
+      {
+        "baseline_us": 7.4753620000000005,
+        "selected_us": 8.030558
+      },
+      {
+        "baseline_us": 7.797685,
+        "selected_us": 7.703395
+      },
+      {
+        "baseline_us": 7.808655000000001,
+        "selected_us": 7.853426000000001
+      },
+      {
+        "baseline_us": 7.788095,
+        "selected_us": 7.770846
+      },
+      {
+        "baseline_us": 7.922487000000001,
+        "selected_us": 7.623763000000001
+      },
+      {
+        "baseline_us": 7.613652999999999,
+        "selected_us": 7.893967
+      },
+      {
+        "baseline_us": 8.051368,
+        "selected_us": 7.482741999999999
+      },
+      {
+        "baseline_us": 7.478721999999999,
+        "selected_us": 7.844175999999999
+      },
+      {
+        "baseline_us": 7.792596,
+        "selected_us": 7.701073999999999
+      },
+      {
+        "baseline_us": 7.741534,
+        "selected_us": 7.732105000000001
+      }
+    ],
+    "reference_setup_s": 0.000274373,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 14,
+    "process_wall_s": 4.142940481000551
+  },
+  {
+    "mode": "baseline",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000272033,
+    "first32_s": 0.000244203,
+    "maintenance_s": 3.8e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.008277491
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.078361589
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.775316123
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 15,
+    "process_wall_s": 3.9209433650030405
+  },
+  {
+    "mode": "baseline",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000266023,
+    "first32_s": 0.000243533,
+    "maintenance_s": 3.7e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.008068509
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.077689311
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.775386454
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 16,
+    "process_wall_s": 3.931026190999546
+  },
+  {
+    "mode": "adaptive",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00091286,
+    "first32_s": 0.000244283,
+    "maintenance_s": 3.331192695,
+    "tuning_s": 3.327587996,
+    "cache_hit": false,
+    "tier": "Tuned",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.3394996470000002
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 3.405283227
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 4.063285434
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.897405999999999,
+        "selected_us": 7.081728
+      },
+      {
+        "baseline_us": 7.494511999999999,
+        "selected_us": 7.6176330000000005
+      },
+      {
+        "baseline_us": 7.831916,
+        "selected_us": 7.29617
+      },
+      {
+        "baseline_us": 7.724744,
+        "selected_us": 7.3932709999999995
+      },
+      {
+        "baseline_us": 7.777226,
+        "selected_us": 7.33928
+      },
+      {
+        "baseline_us": 7.946807,
+        "selected_us": 7.223749
+      },
+      {
+        "baseline_us": 7.494702,
+        "selected_us": 7.646744
+      },
+      {
+        "baseline_us": 7.739895000000001,
+        "selected_us": 7.219799
+      },
+      {
+        "baseline_us": 8.093889,
+        "selected_us": 7.428491
+      },
+      {
+        "baseline_us": 7.769595000000001,
+        "selected_us": 7.30788
+      },
+      {
+        "baseline_us": 7.743265,
+        "selected_us": 7.292140000000001
+      },
+      {
+        "baseline_us": 7.4970419999999995,
+        "selected_us": 7.33736
+      },
+      {
+        "baseline_us": 8.028808,
+        "selected_us": 7.082338
+      },
+      {
+        "baseline_us": 7.7119740000000006,
+        "selected_us": 7.3993009999999995
+      },
+      {
+        "baseline_us": 7.7529449999999995,
+        "selected_us": 7.3015799999999995
+      }
+    ],
+    "reference_setup_s": 0.000290003,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 17,
+    "process_wall_s": 7.454432128000917
+  },
+  {
+    "mode": "cached",
+    "m": 512,
+    "n": 512,
+    "k": 512,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.001061032,
+    "first32_s": 0.000231062,
+    "maintenance_s": 5.3e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "Tuned",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.008406482
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.074249823
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 0.732215239
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 7.623664,
+        "selected_us": 7.538512
+      },
+      {
+        "baseline_us": 7.972697000000001,
+        "selected_us": 7.083658
+      },
+      {
+        "baseline_us": 7.8189459999999995,
+        "selected_us": 7.553843
+      },
+      {
+        "baseline_us": 8.12881,
+        "selected_us": 7.299688999999999
+      },
+      {
+        "baseline_us": 7.715063999999999,
+        "selected_us": 7.7031540000000005
+      },
+      {
+        "baseline_us": 7.971717,
+        "selected_us": 7.345270999999999
+      },
+      {
+        "baseline_us": 7.8881570000000005,
+        "selected_us": 7.079547000000001
+      },
+      {
+        "baseline_us": 7.496492,
+        "selected_us": 8.005808
+      },
+      {
+        "baseline_us": 8.359521,
+        "selected_us": 7.084828
+      },
+      {
+        "baseline_us": 7.712115000000001,
+        "selected_us": 7.7865150000000005
+      },
+      {
+        "baseline_us": 8.155849,
+        "selected_us": 7.30636
+      },
+      {
+        "baseline_us": 7.760275,
+        "selected_us": 7.703604
+      },
+      {
+        "baseline_us": 8.043768,
+        "selected_us": 7.474411999999999
+      },
+      {
+        "baseline_us": 8.355091,
+        "selected_us": 7.080478
+      },
+      {
+        "baseline_us": 7.494922000000001,
+        "selected_us": 7.896857
+      }
+    ],
+    "reference_setup_s": 0.000229352,
+    "baseline_rel_l2": 8.869620320545043e-07,
+    "selected_rel_l2": 8.869620320545043e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 18,
+    "process_wall_s": 4.10060734900253
+  },
+  {
+    "mode": "baseline",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000278563,
+    "first32_s": 0.001041442,
+    "maintenance_s": 7e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.033609828
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.335054629
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.352770933
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 19,
+    "process_wall_s": 6.5338541789969895
+  },
+  {
+    "mode": "adaptive",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00093509,
+    "first32_s": 0.001043791,
+    "maintenance_s": 4.08546,
+    "tuning_s": 4.074041086,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 4.118903146
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.419733729
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 7.432021847
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 33.348715000000006,
+        "selected_us": 33.530207000000004
+      },
+      {
+        "baseline_us": 33.468647,
+        "selected_us": 33.426846000000005
+      },
+      {
+        "baseline_us": 33.887341,
+        "selected_us": 33.462565999999995
+      },
+      {
+        "baseline_us": 33.816301,
+        "selected_us": 33.920761
+      },
+      {
+        "baseline_us": 33.530407,
+        "selected_us": 33.78546000000001
+      },
+      {
+        "baseline_us": 33.366674999999994,
+        "selected_us": 33.543296999999995
+      },
+      {
+        "baseline_us": 33.332294999999995,
+        "selected_us": 33.509857
+      },
+      {
+        "baseline_us": 33.438176,
+        "selected_us": 33.458416
+      },
+      {
+        "baseline_us": 33.43289599999999,
+        "selected_us": 33.347075
+      },
+      {
+        "baseline_us": 33.853491000000005,
+        "selected_us": 33.430936
+      },
+      {
+        "baseline_us": 33.39922599999999,
+        "selected_us": 33.58552699999999
+      },
+      {
+        "baseline_us": 33.698179,
+        "selected_us": 33.244294000000004
+      },
+      {
+        "baseline_us": 33.300284999999995,
+        "selected_us": 33.334034
+      },
+      {
+        "baseline_us": 33.427316,
+        "selected_us": 33.500987
+      },
+      {
+        "baseline_us": 33.307455000000004,
+        "selected_us": 33.719818999999994
+      }
+    ],
+    "reference_setup_s": 0.000276524,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 20,
+    "process_wall_s": 11.62448921000032
+  },
+  {
+    "mode": "cached",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.001025692,
+    "first32_s": 0.001046111,
+    "maintenance_s": 4.8e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.03464201
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.336008749
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.351910051
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 33.492167,
+        "selected_us": 33.407515
+      },
+      {
+        "baseline_us": 34.016902,
+        "selected_us": 33.562948000000006
+      },
+      {
+        "baseline_us": 33.511957,
+        "selected_us": 33.663639
+      },
+      {
+        "baseline_us": 33.516957000000005,
+        "selected_us": 33.87508999999999
+      },
+      {
+        "baseline_us": 33.667259,
+        "selected_us": 33.443345
+      },
+      {
+        "baseline_us": 33.498726000000005,
+        "selected_us": 33.444447
+      },
+      {
+        "baseline_us": 33.463377,
+        "selected_us": 33.57015700000001
+      },
+      {
+        "baseline_us": 33.598198000000004,
+        "selected_us": 33.508047
+      },
+      {
+        "baseline_us": 33.580447,
+        "selected_us": 33.970682000000004
+      },
+      {
+        "baseline_us": 33.544796999999996,
+        "selected_us": 33.849021
+      },
+      {
+        "baseline_us": 33.842879999999994,
+        "selected_us": 33.56992699999999
+      },
+      {
+        "baseline_us": 33.364934999999996,
+        "selected_us": 33.407076
+      },
+      {
+        "baseline_us": 33.37565599999999,
+        "selected_us": 33.314693999999996
+      },
+      {
+        "baseline_us": 33.331624,
+        "selected_us": 33.450557
+      },
+      {
+        "baseline_us": 33.515406999999996,
+        "selected_us": 33.498277
+      }
+    ],
+    "reference_setup_s": 0.000260253,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 21,
+    "process_wall_s": 7.548314436997316
+  },
+  {
+    "mode": "adaptive",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00094279,
+    "first32_s": 0.001040601,
+    "maintenance_s": 3.837795004,
+    "tuning_s": 3.826342778,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.871897236
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.174608659
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 7.209134338
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 33.844961000000005,
+        "selected_us": 33.591527
+      },
+      {
+        "baseline_us": 33.74846900000001,
+        "selected_us": 33.275245000000005
+      },
+      {
+        "baseline_us": 33.480236,
+        "selected_us": 33.901061
+      },
+      {
+        "baseline_us": 33.510046,
+        "selected_us": 34.206154999999995
+      },
+      {
+        "baseline_us": 33.853601,
+        "selected_us": 34.068263
+      },
+      {
+        "baseline_us": 33.648048,
+        "selected_us": 33.752549
+      },
+      {
+        "baseline_us": 33.344364999999996,
+        "selected_us": 34.001132000000005
+      },
+      {
+        "baseline_us": 33.611368,
+        "selected_us": 33.831340000000004
+      },
+      {
+        "baseline_us": 33.511827,
+        "selected_us": 33.77418
+      },
+      {
+        "baseline_us": 33.24671299999999,
+        "selected_us": 33.607008
+      },
+      {
+        "baseline_us": 34.313846000000005,
+        "selected_us": 33.83717
+      },
+      {
+        "baseline_us": 33.605298,
+        "selected_us": 33.35946499999999
+      },
+      {
+        "baseline_us": 33.646097999999995,
+        "selected_us": 33.314245
+      },
+      {
+        "baseline_us": 33.624138,
+        "selected_us": 33.745089
+      },
+      {
+        "baseline_us": 33.36020499999999,
+        "selected_us": 33.467317
+      }
+    ],
+    "reference_setup_s": 0.000272323,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 22,
+    "process_wall_s": 11.40486269900066
+  },
+  {
+    "mode": "cached",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.00094233,
+    "first32_s": 0.001050362,
+    "maintenance_s": 8.1e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.034406516
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.335305679
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.3485615
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 33.419265,
+        "selected_us": 33.569328
+      },
+      {
+        "baseline_us": 33.30147399999999,
+        "selected_us": 33.635937999999996
+      },
+      {
+        "baseline_us": 33.82767,
+        "selected_us": 33.517637
+      },
+      {
+        "baseline_us": 33.746959000000004,
+        "selected_us": 33.560886999999994
+      },
+      {
+        "baseline_us": 33.476197,
+        "selected_us": 33.264903999999994
+      },
+      {
+        "baseline_us": 33.320644,
+        "selected_us": 33.475336000000006
+      },
+      {
+        "baseline_us": 33.387116,
+        "selected_us": 33.521757
+      },
+      {
+        "baseline_us": 33.295255000000004,
+        "selected_us": 33.43181499999999
+      },
+      {
+        "baseline_us": 33.507956,
+        "selected_us": 33.326215
+      },
+      {
+        "baseline_us": 33.658038,
+        "selected_us": 33.517987
+      },
+      {
+        "baseline_us": 33.591377,
+        "selected_us": 33.354596
+      },
+      {
+        "baseline_us": 33.436085999999996,
+        "selected_us": 33.380995
+      },
+      {
+        "baseline_us": 33.310984000000005,
+        "selected_us": 33.467876000000004
+      },
+      {
+        "baseline_us": 33.410985999999994,
+        "selected_us": 33.367135000000005
+      },
+      {
+        "baseline_us": 33.540527000000004,
+        "selected_us": 33.64707799999999
+      }
+    ],
+    "reference_setup_s": 0.000244563,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 23,
+    "process_wall_s": 7.5385805900004925
+  },
+  {
+    "mode": "baseline",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000224463,
+    "first32_s": 0.001044371,
+    "maintenance_s": 6e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.033945752
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.334409649
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.344719154
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 24,
+    "process_wall_s": 6.4803414509988215
+  },
+  {
+    "mode": "baseline",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000261773,
+    "first32_s": 0.001060722,
+    "maintenance_s": 3.2e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.035690951
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.343833781
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.424661123
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 25,
+    "process_wall_s": 6.595615343998361
+  },
+  {
+    "mode": "adaptive",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.001005321,
+    "first32_s": 0.001040021,
+    "maintenance_s": 3.82881882,
+    "tuning_s": 3.817433875,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.863005093
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.163883374
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 7.18434993
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 33.490616,
+        "selected_us": 33.338945
+      },
+      {
+        "baseline_us": 33.313925000000005,
+        "selected_us": 33.398625
+      },
+      {
+        "baseline_us": 33.412505,
+        "selected_us": 33.956862
+      },
+      {
+        "baseline_us": 33.70295899999999,
+        "selected_us": 33.41567499999999
+      },
+      {
+        "baseline_us": 33.427415,
+        "selected_us": 33.459776
+      },
+      {
+        "baseline_us": 33.36065500000001,
+        "selected_us": 33.425926
+      },
+      {
+        "baseline_us": 33.433155,
+        "selected_us": 33.456396
+      },
+      {
+        "baseline_us": 33.546747,
+        "selected_us": 33.401135000000004
+      },
+      {
+        "baseline_us": 33.317395,
+        "selected_us": 33.420145
+      },
+      {
+        "baseline_us": 33.55408700000001,
+        "selected_us": 33.545697
+      },
+      {
+        "baseline_us": 33.879961,
+        "selected_us": 33.509466
+      },
+      {
+        "baseline_us": 33.365285,
+        "selected_us": 33.502887
+      },
+      {
+        "baseline_us": 33.39702499999999,
+        "selected_us": 33.237913
+      },
+      {
+        "baseline_us": 33.384195,
+        "selected_us": 33.573568
+      },
+      {
+        "baseline_us": 33.636497000000006,
+        "selected_us": 33.518267
+      }
+    ],
+    "reference_setup_s": 0.000265553,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 26,
+    "process_wall_s": 11.393967845000589
+  },
+  {
+    "mode": "cached",
+    "m": 1024,
+    "n": 1024,
+    "k": 1024,
+    "weight_copies": 1,
+    "calls": 100000,
+    "setup_s": 0.000942711,
+    "first32_s": 0.001048521,
+    "maintenance_s": 4.6e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.034658499
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.337805795
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 3.406331891
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 34.430657000000004,
+        "selected_us": 35.18975399999999
+      },
+      {
+        "baseline_us": 34.61453899999999,
+        "selected_us": 34.182024
+      },
+      {
+        "baseline_us": 34.198904,
+        "selected_us": 34.549027
+      },
+      {
+        "baseline_us": 34.517907,
+        "selected_us": 34.69790999999999
+      },
+      {
+        "baseline_us": 34.174983999999995,
+        "selected_us": 34.431857
+      },
+      {
+        "baseline_us": 34.377966,
+        "selected_us": 34.533716999999996
+      },
+      {
+        "baseline_us": 38.618533,
+        "selected_us": 34.640848000000005
+      },
+      {
+        "baseline_us": 35.520938,
+        "selected_us": 34.891182
+      },
+      {
+        "baseline_us": 34.68592,
+        "selected_us": 34.196414000000004
+      },
+      {
+        "baseline_us": 33.888151,
+        "selected_us": 34.074482
+      },
+      {
+        "baseline_us": 34.039542000000004,
+        "selected_us": 34.223494
+      },
+      {
+        "baseline_us": 34.337956000000005,
+        "selected_us": 34.397086
+      },
+      {
+        "baseline_us": 34.205674,
+        "selected_us": 34.192464
+      },
+      {
+        "baseline_us": 33.936021,
+        "selected_us": 33.984562000000004
+      },
+      {
+        "baseline_us": 33.356075,
+        "selected_us": 33.532046
+      }
+    ],
+    "reference_setup_s": 0.000319033,
+    "baseline_rel_l2": 2.0171240677679327e-06,
+    "selected_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 27,
+    "process_wall_s": 7.662591437998344
+  },
+  {
+    "mode": "baseline",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000261543,
+    "first32_s": 0.00180762,
+    "maintenance_s": 3.6e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.059660723
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.584816465
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.8248719399999995
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 28,
+    "process_wall_s": 9.01998550800272
+  },
+  {
+    "mode": "adaptive",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000951331,
+    "first32_s": 0.00181065,
+    "maintenance_s": 4.034358395,
+    "tuning_s": 4.022997521,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 4.093913507
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.621113891
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 10.035482188
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 60.563812,
+        "selected_us": 59.944945
+      },
+      {
+        "baseline_us": 60.448301,
+        "selected_us": 59.716763
+      },
+      {
+        "baseline_us": 59.263448000000004,
+        "selected_us": 60.628561999999995
+      },
+      {
+        "baseline_us": 60.187197,
+        "selected_us": 59.922006
+      },
+      {
+        "baseline_us": 60.21307900000001,
+        "selected_us": 59.441089
+      },
+      {
+        "baseline_us": 61.521362,
+        "selected_us": 60.514712
+      },
+      {
+        "baseline_us": 61.107278,
+        "selected_us": 61.693645
+      },
+      {
+        "baseline_us": 60.34725,
+        "selected_us": 61.229749000000005
+      },
+      {
+        "baseline_us": 60.246158,
+        "selected_us": 60.160388
+      },
+      {
+        "baseline_us": 60.219457999999996,
+        "selected_us": 60.000175999999996
+      },
+      {
+        "baseline_us": 61.243038999999996,
+        "selected_us": 60.35522
+      },
+      {
+        "baseline_us": 59.379249,
+        "selected_us": 61.022697
+      },
+      {
+        "baseline_us": 59.881445,
+        "selected_us": 60.556132
+      },
+      {
+        "baseline_us": 58.431629,
+        "selected_us": 58.834983
+      },
+      {
+        "baseline_us": 59.55017,
+        "selected_us": 58.478269999999995
+      }
+    ],
+    "reference_setup_s": 0.000283993,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 29,
+    "process_wall_s": 15.114399281999795
+  },
+  {
+    "mode": "cached",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.00097455,
+    "first32_s": 0.00180614,
+    "maintenance_s": 5.4e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.059830154
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.635350724
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.963336716
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 58.514120000000005,
+        "selected_us": 58.582190000000004
+      },
+      {
+        "baseline_us": 59.105096,
+        "selected_us": 59.29365799999999
+      },
+      {
+        "baseline_us": 58.701412000000005,
+        "selected_us": 58.649750999999995
+      },
+      {
+        "baseline_us": 58.820943,
+        "selected_us": 58.59975
+      },
+      {
+        "baseline_us": 58.51934000000001,
+        "selected_us": 58.830752000000004
+      },
+      {
+        "baseline_us": 59.679142,
+        "selected_us": 58.556101000000005
+      },
+      {
+        "baseline_us": 58.699271,
+        "selected_us": 58.715112
+      },
+      {
+        "baseline_us": 58.416619000000004,
+        "selected_us": 58.761782
+      },
+      {
+        "baseline_us": 59.190296000000004,
+        "selected_us": 58.351648000000004
+      },
+      {
+        "baseline_us": 58.957465000000006,
+        "selected_us": 58.58365
+      },
+      {
+        "baseline_us": 58.807371999999994,
+        "selected_us": 58.444438999999996
+      },
+      {
+        "baseline_us": 58.605940000000004,
+        "selected_us": 58.706852
+      },
+      {
+        "baseline_us": 58.54362,
+        "selected_us": 58.579449999999994
+      },
+      {
+        "baseline_us": 58.473969,
+        "selected_us": 58.700252
+      },
+      {
+        "baseline_us": 59.246628,
+        "selected_us": 58.519309
+      }
+    ],
+    "reference_setup_s": 0.000274923,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 1,
+    "sequence": 30,
+    "process_wall_s": 10.999198958001216
+  },
+  {
+    "mode": "adaptive",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000975321,
+    "first32_s": 0.00183095,
+    "maintenance_s": 3.86353176,
+    "tuning_s": 3.852170246,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.923333764
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.45197249
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 9.835265092
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 58.466499,
+        "selected_us": 58.647000999999996
+      },
+      {
+        "baseline_us": 57.982594,
+        "selected_us": 58.785852
+      },
+      {
+        "baseline_us": 59.056925,
+        "selected_us": 58.152646
+      },
+      {
+        "baseline_us": 57.961733,
+        "selected_us": 58.87039299999999
+      },
+      {
+        "baseline_us": 58.497029000000005,
+        "selected_us": 58.349068
+      },
+      {
+        "baseline_us": 58.256087,
+        "selected_us": 58.64262
+      },
+      {
+        "baseline_us": 58.58507,
+        "selected_us": 58.808543
+      },
+      {
+        "baseline_us": 58.128386,
+        "selected_us": 58.456418000000006
+      },
+      {
+        "baseline_us": 58.407458000000005,
+        "selected_us": 58.335677000000004
+      },
+      {
+        "baseline_us": 58.447919,
+        "selected_us": 58.56914
+      },
+      {
+        "baseline_us": 58.487969,
+        "selected_us": 58.74757099999999
+      },
+      {
+        "baseline_us": 58.273747,
+        "selected_us": 58.603291000000006
+      },
+      {
+        "baseline_us": 58.319506999999994,
+        "selected_us": 58.125195
+      },
+      {
+        "baseline_us": 58.118475000000004,
+        "selected_us": 58.60675
+      },
+      {
+        "baseline_us": 58.508829,
+        "selected_us": 58.038775
+      }
+    ],
+    "reference_setup_s": 0.000271383,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 31,
+    "process_wall_s": 14.869190581001021
+  },
+  {
+    "mode": "cached",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.001039581,
+    "first32_s": 0.00181222,
+    "maintenance_s": 4.7e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.061081367
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.586788301
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.842413528
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 58.117965000000005,
+        "selected_us": 58.339417
+      },
+      {
+        "baseline_us": 58.416568,
+        "selected_us": 58.146626
+      },
+      {
+        "baseline_us": 58.256826000000004,
+        "selected_us": 58.370628
+      },
+      {
+        "baseline_us": 58.635051,
+        "selected_us": 58.411568
+      },
+      {
+        "baseline_us": 58.174055,
+        "selected_us": 58.766072
+      },
+      {
+        "baseline_us": 58.509778999999995,
+        "selected_us": 58.207716
+      },
+      {
+        "baseline_us": 58.251856999999994,
+        "selected_us": 58.922003
+      },
+      {
+        "baseline_us": 58.953103999999996,
+        "selected_us": 58.16194599999999
+      },
+      {
+        "baseline_us": 58.172765,
+        "selected_us": 58.563900000000004
+      },
+      {
+        "baseline_us": 58.408498,
+        "selected_us": 58.41858800000001
+      },
+      {
+        "baseline_us": 58.780813,
+        "selected_us": 58.541748999999996
+      },
+      {
+        "baseline_us": 58.62405100000001,
+        "selected_us": 58.167515
+      },
+      {
+        "baseline_us": 58.423978000000005,
+        "selected_us": 58.418058
+      },
+      {
+        "baseline_us": 58.811693,
+        "selected_us": 58.228066
+      },
+      {
+        "baseline_us": 58.784732,
+        "selected_us": 58.65465100000001
+      }
+    ],
+    "reference_setup_s": 0.000276003,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 32,
+    "process_wall_s": 10.874205191998044
+  },
+  {
+    "mode": "baseline",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000272653,
+    "first32_s": 0.001788179,
+    "maintenance_s": 7.5e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.058822802
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.585490795
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.854715211
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 2,
+    "sequence": 33,
+    "process_wall_s": 9.024486007998348
+  },
+  {
+    "mode": "baseline",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000267163,
+    "first32_s": 0.00182678,
+    "maintenance_s": 3.8e-07,
+    "tuning_s": 0,
+    "cache_hit": false,
+    "tier": "Baseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.060095976
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.589738571
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.8522689660000005
+      }
+    ],
+    "pairs": [],
+    "reference_setup_s": 0,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 34,
+    "process_wall_s": 9.00318392200279
+  },
+  {
+    "mode": "adaptive",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000972771,
+    "first32_s": 0.00179479,
+    "maintenance_s": 3.876505752,
+    "tuning_s": 3.865087327,
+    "cache_hit": false,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 8,
+    "tuning_attempts": 1,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 3.9375219489999997
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 4.465776268
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 9.737449321
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 58.382758,
+        "selected_us": 59.116635
+      },
+      {
+        "baseline_us": 58.389917000000004,
+        "selected_us": 58.653071000000004
+      },
+      {
+        "baseline_us": 58.559689999999996,
+        "selected_us": 58.391436999999996
+      },
+      {
+        "baseline_us": 58.437408000000005,
+        "selected_us": 58.595769999999995
+      },
+      {
+        "baseline_us": 58.54259,
+        "selected_us": 58.274356
+      },
+      {
+        "baseline_us": 58.115615000000005,
+        "selected_us": 59.31218700000001
+      },
+      {
+        "baseline_us": 58.888523,
+        "selected_us": 58.019173
+      },
+      {
+        "baseline_us": 58.793102,
+        "selected_us": 60.739004
+      },
+      {
+        "baseline_us": 66.315804,
+        "selected_us": 61.116536999999994
+      },
+      {
+        "baseline_us": 60.608892,
+        "selected_us": 61.248529000000005
+      },
+      {
+        "baseline_us": 60.983795,
+        "selected_us": 60.630693
+      },
+      {
+        "baseline_us": 59.639611,
+        "selected_us": 59.402877999999994
+      },
+      {
+        "baseline_us": 59.050955,
+        "selected_us": 59.53213
+      },
+      {
+        "baseline_us": 59.476569000000005,
+        "selected_us": 59.621441
+      },
+      {
+        "baseline_us": 59.635512000000006,
+        "selected_us": 59.266687
+      }
+    ],
+    "reference_setup_s": 0.000277253,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 35,
+    "process_wall_s": 14.806895589001215
+  },
+  {
+    "mode": "cached",
+    "m": 1,
+    "n": 4096,
+    "k": 4096,
+    "weight_copies": 6,
+    "calls": 100000,
+    "setup_s": 0.000959301,
+    "first32_s": 0.001812789,
+    "maintenance_s": 8.5e-07,
+    "tuning_s": 0,
+    "cache_hit": true,
+    "tier": "RetainedBaseline",
+    "candidates_measured": 0,
+    "tuning_attempts": 0,
+    "checkpoints": [
+      {
+        "calls": 1000,
+        "elapsed_s": 0.059394629
+      },
+      {
+        "calls": 10000,
+        "elapsed_s": 0.584659204
+      },
+      {
+        "calls": 100000,
+        "elapsed_s": 5.852666908
+      }
+    ],
+    "pairs": [
+      {
+        "baseline_us": 58.159265,
+        "selected_us": 58.60226
+      },
+      {
+        "baseline_us": 60.370199,
+        "selected_us": 58.065093999999995
+      },
+      {
+        "baseline_us": 60.520770000000006,
+        "selected_us": 60.120867
+      },
+      {
+        "baseline_us": 58.992163999999995,
+        "selected_us": 59.363208
+      },
+      {
+        "baseline_us": 59.053324999999994,
+        "selected_us": 58.557149
+      },
+      {
+        "baseline_us": 58.960972999999996,
+        "selected_us": 59.15782599999999
+      },
+      {
+        "baseline_us": 58.363788,
+        "selected_us": 58.315706
+      },
+      {
+        "baseline_us": 58.143585,
+        "selected_us": 58.5905
+      },
+      {
+        "baseline_us": 58.599899,
+        "selected_us": 58.281237000000004
+      },
+      {
+        "baseline_us": 58.352848,
+        "selected_us": 58.331676
+      },
+      {
+        "baseline_us": 59.248066,
+        "selected_us": 58.227335999999994
+      },
+      {
+        "baseline_us": 58.213856,
+        "selected_us": 58.450108
+      },
+      {
+        "baseline_us": 58.65816,
+        "selected_us": 58.260036
+      },
+      {
+        "baseline_us": 57.991813,
+        "selected_us": 58.384267
+      },
+      {
+        "baseline_us": 59.293318,
+        "selected_us": 58.543339
+      }
+    ],
+    "reference_setup_s": 0.000272913,
+    "baseline_rel_l2": 6.483089120964037e-06,
+    "selected_rel_l2": 6.483089120964037e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "repeat": 3,
+    "sequence": 36,
+    "process_wall_s": 10.885857580000447
+  }
+]

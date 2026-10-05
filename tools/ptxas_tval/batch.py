@@ -8,7 +8,7 @@
 """
 import sys, os, glob, time, traceback, importlib
 from z3 import *
-import sassexec, ptxexec, mulmode, params, memorder
+import sassexec, ptxexec, mulmode, params, memorder, smem, domain
 
 def mk(mul, layout, ab=None):
     sym = {'stackptr': BitVec('stackptr',32),
@@ -41,6 +41,7 @@ def mk(mul, layout, ab=None):
     return sym
 
 def validate(ptx, sass, budget, mode='uf'):
+    domain.require_matching_targets(ptx, sass)
     mul = mulmode.MODES[mode]()
     _, layout = params.parse(ptx)
     sym = mk(mul, layout)
@@ -51,7 +52,9 @@ def validate(ptx, sass, budget, mode='uf'):
     # finding -- so the width check below is here as well.
     if len(P.loads)!=len(S.loads) or len(P.stores)!=len(S.stores):
         return 'UNPROVED', f'load/store counts {len(P.loads)}/{len(S.loads)} {len(P.stores)}/{len(S.stores)}', 0
-    pre=[ULT(sym['tid_x'],BitVecVal(1024,32)), ULT(sym['ctaid_x'],BitVecVal(1<<24,32))]
+    pre=domain.launch_preconditions(sym)
+    verdict, shared_detail, shared_n = smem.validate_effects(P, S, sym['bar'], pre, budget)
+    if verdict != 'VALIDATED': return verdict, shared_detail, shared_n
     def same(a,b,to=20):
         s=Solver(); s.set('timeout',to*1000); s.add(pre); s.add(a!=b); return str(s.check())=='unsat'
     def same_if(g,a,b,to=20):
@@ -69,12 +72,15 @@ def validate(ptx, sass, budget, mode='uf'):
         it is still exactly the semantics; a match that becomes ambiguous under
         the weaker test is refused by the `len(hit)!=1` count."""
         s=Solver(); s.set('timeout',to*1000); s.add(pre); s.add(And(g, a!=b)); return str(s.check())=='unsat'
-    n=0
+    n=shared_n
     lhits=[]
     for i in range(len(P.loads)):
         lhits.append([j for j in range(len(S.loads)) if same_if(P.loads[i][1], P.loads[i][0], S.loads[j][0])]); n+=1
     lperm, lrep = memorder.pair_by_address(lhits)
     if lperm is None: return 'UNPROVED', f'load {lrep} sass loads', n
+    for i, j in enumerate(lperm):
+        wp, ws = 8*P.load_widths[i], 8*S.load_widths[j]
+        if wp != ws: return 'UNPROVED', f'load {i} width: ptx {wp} bits, sass {ws} bits', n
     for i in range(len(P.loads)):
         if not same(P.loads[i][1], S.loads[lperm[i]][1]): return 'UNPROVED', f'load {i} guard', n
         n+=1
@@ -109,14 +115,16 @@ def validate(ptx, sass, budget, mode='uf'):
     sinv={j:i for i,j in enumerate(sperm)}
     symS['abstract_addr']=lambda kind, j: (P2.loads[inv[j]][0] if kind=='L' else P2.stores[sinv[j]][0])
     S2=sassexec.run_sass(sass,symS)
-    pre2=[ULT(symP['tid_x'],BitVecVal(1024,32)), ULT(symP['ctaid_x'],BitVecVal(1<<24,32))]
+    pre2=domain.launch_preconditions(symP)
     for i in range(len(P2.stores)):
         pa,pv,pg = P2.stores[i]; sa,sv,sg = S2.stores[sperm[i]]
         s=Solver(); s.set('timeout',budget*1000); s.add(pre2); s.add(And(pg, pv!=sv))
         r=str(s.check())
         if r!='unsat': return 'UNPROVED', f'store {i} value: {r}', n
         n+=1
-    return 'VALIDATED', f'{len(P.stores)} stores, {len(P.loads)} loads', n
+    detail = f'{len(P.stores)} stores, {len(P.loads)} loads'
+    if shared_n: detail += f'  [+{shared_n} shared obligations, {shared_detail}]'
+    return 'VALIDATED', detail, n
 
 def validate2(ptx, sass, budget):
     """Abstraction refinement.  The uninterpreted-multiply posing is fast and

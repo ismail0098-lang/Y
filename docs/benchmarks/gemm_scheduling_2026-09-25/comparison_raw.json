@@ -1,0 +1,2690 @@
+[
+  {
+    "mode": "compare",
+    "shape": [
+      512,
+      512,
+      512
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 64, cta_k: 64, warps_m: 2, warps_n: 2, num_stages: 4, num_warps: 4 }",
+    "before_ptx_sha256": "58389f1e3f54333d944a97d0d4701be2cc9f951e8d04ea7b69cc5dc78d83f315",
+    "after_ptx_sha256": "3bc067a01d497fd424a23d7a12db6b8299383699e0e3f99a9e61dc55b501ea70",
+    "reference_outputs": 128,
+    "total_outputs": 262144,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "final_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 7.46248,
+        "after_wall_us": 7.464880000000001,
+        "before_event_us": 7.481920123100281,
+        "after_event_us": 7.457919716835022
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 7.4648699999999995,
+        "after_wall_us": 7.492380000000001,
+        "before_event_us": 7.45248019695282,
+        "after_event_us": 7.8540802001953125
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 7.46397,
+        "after_wall_us": 7.46447,
+        "before_event_us": 7.454720139503479,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 7.464880000000001,
+        "after_wall_us": 7.46427,
+        "before_event_us": 7.444480061531067,
+        "after_event_us": 7.451199889183044
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 7.46038,
+        "after_wall_us": 8.74159,
+        "before_event_us": 7.444480061531067,
+        "after_event_us": 7.44704008102417
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 7.46288,
+        "after_wall_us": 7.468979999999999,
+        "before_event_us": 7.434239983558655,
+        "after_event_us": 7.4457597732543945
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 7.458970000000001,
+        "after_wall_us": 7.51898,
+        "before_event_us": 7.454720139503479,
+        "after_event_us": 7.8540802001953125
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 8.79458,
+        "after_wall_us": 7.465469999999999,
+        "before_event_us": 7.454720139503479,
+        "after_event_us": 7.445440292358398
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 7.465469999999999,
+        "after_wall_us": 7.46847,
+        "before_event_us": 7.44159996509552,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 7.4659699999999996,
+        "after_wall_us": 7.46697,
+        "before_event_us": 7.444480061531067,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 8.74009,
+        "after_wall_us": 7.4558800000000005,
+        "before_event_us": 7.454079985618591,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 7.50127,
+        "after_wall_us": 7.46538,
+        "before_event_us": 7.462400197982788,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 7.476369999999999,
+        "after_wall_us": 7.46358,
+        "before_event_us": 7.7824002504348755,
+        "after_event_us": 7.444480061531067
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 7.46727,
+        "after_wall_us": 8.81309,
+        "before_event_us": 7.434239983558655,
+        "after_event_us": 7.434239983558655
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 7.459670000000001,
+        "after_wall_us": 7.460369999999999,
+        "before_event_us": 7.444480061531067,
+        "after_event_us": 7.434239983558655
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 8.74299,
+        "after_wall_us": 7.45867,
+        "before_event_us": 7.434239983558655,
+        "after_event_us": 7.450559735298157
+      }
+    ],
+    "trial": 0,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "512",
+      "512",
+      "512",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "75f4fa5fdebca48e0640130325a8ea89b0b17e70e971c2d104ef939d1b7b2572",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.20922,
+        "after_wall_us": 33.427530000000004,
+        "before_event_us": 32.25696086883545,
+        "after_event_us": 32.54143953323364
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 32.09792,
+        "after_wall_us": 34.06634,
+        "before_event_us": 32.06144094467163,
+        "after_event_us": 32.03039884567261
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 32.55742,
+        "after_wall_us": 32.17072,
+        "before_event_us": 34.639039039611816,
+        "after_event_us": 32.1126389503479
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 32.11452,
+        "after_wall_us": 33.72654,
+        "before_event_us": 32.11679935455322,
+        "after_event_us": 32.481279373168945
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 32.146420000000006,
+        "after_wall_us": 32.50613,
+        "before_event_us": 32.10239887237549,
+        "after_event_us": 33.87840032577515
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 33.42473,
+        "after_wall_us": 32.10292,
+        "before_event_us": 32.51199960708618,
+        "after_event_us": 32.07456111907959
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 33.79844,
+        "after_wall_us": 32.069120000000005,
+        "before_event_us": 32.030720710754395,
+        "after_event_us": 33.768320083618164
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.09122,
+        "after_wall_us": 32.50352,
+        "before_event_us": 32.09216117858887,
+        "after_event_us": 33.87392044067383
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 33.822739999999996,
+        "after_wall_us": 33.87683,
+        "before_event_us": 32.44992017745972,
+        "after_event_us": 32.077438831329346
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 32.46732,
+        "after_wall_us": 32.12532,
+        "before_event_us": 33.876800537109375,
+        "after_event_us": 33.691840171813965
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.10362,
+        "after_wall_us": 33.908229999999996,
+        "before_event_us": 32.07168102264404,
+        "after_event_us": 32.04096078872681
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 32.10083,
+        "after_wall_us": 34.31104,
+        "before_event_us": 33.84320020675659,
+        "after_event_us": 32.02752113342285
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 32.10942,
+        "after_wall_us": 32.07862,
+        "before_event_us": 33.91488075256348,
+        "after_event_us": 32.030720710754395
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 34.00884,
+        "after_wall_us": 34.64565,
+        "before_event_us": 32.119998931884766,
+        "after_event_us": 32.033278942108154
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 32.02592,
+        "after_wall_us": 32.09702,
+        "before_event_us": 34.36543941497803,
+        "after_event_us": 32.42432117462158
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 33.89984,
+        "after_wall_us": 33.47294,
+        "before_event_us": 32.081921100616455,
+        "after_event_us": 32.09216117858887
+      }
+    ],
+    "trial": 0,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "1024",
+      "1024",
+      "1024",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 50,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "6df995381110f4f206842add2aacb060b7bf00b2a5cf0f47a460477653eed4dc",
+    "after_ptx_sha256": "97f1f60cd5c54c007d46a9c1cb9e23ddbd1b7c08959e13077324b15fdc86de84",
+    "reference_outputs": 128,
+    "total_outputs": 4194304,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "final_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 222.03002,
+        "after_wall_us": 269.33952,
+        "before_event_us": 221.69599533081055,
+        "after_event_us": 228.2636833190918
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 224.66504,
+        "after_wall_us": 216.94158000000004,
+        "before_event_us": 220.74623107910156,
+        "after_event_us": 215.88415145874023
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 220.74862000000002,
+        "after_wall_us": 222.04464,
+        "before_event_us": 224.4607925415039,
+        "after_event_us": 220.8768081665039
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 220.82742,
+        "after_wall_us": 225.60164,
+        "before_event_us": 225.66911697387695,
+        "after_event_us": 222.17920303344727
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 222.15702000000002,
+        "after_wall_us": 224.44486,
+        "before_event_us": 220.8755111694336,
+        "after_event_us": 222.23039627075195
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 222.82582,
+        "after_wall_us": 222.08622,
+        "before_event_us": 222.14656829833984,
+        "after_event_us": 221.42976760864258
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 224.46184000000002,
+        "after_wall_us": 228.11888,
+        "before_event_us": 230.44095993041992,
+        "after_event_us": 222.51520156860352
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 221.30202,
+        "after_wall_us": 222.16621999999998,
+        "before_event_us": 222.18751907348633,
+        "after_event_us": 226.55616760253906
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 225.92327999999998,
+        "after_wall_us": 222.46264000000002,
+        "before_event_us": 220.92416763305664,
+        "after_event_us": 226.14015579223633
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 226.48986000000002,
+        "after_wall_us": 221.24682,
+        "before_event_us": 222.10559844970703,
+        "after_event_us": 222.2879981994629
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 222.00083999999998,
+        "after_wall_us": 221.19882,
+        "before_event_us": 226.56639099121094,
+        "after_event_us": 221.77600860595703
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 222.00122,
+        "after_wall_us": 226.09866,
+        "before_event_us": 226.09920501708984,
+        "after_event_us": 220.91264724731445
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 221.08602000000002,
+        "after_wall_us": 226.23568,
+        "before_event_us": 222.00319290161133,
+        "after_event_us": 220.9382438659668
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 222.32222,
+        "after_wall_us": 222.41862,
+        "before_event_us": 223.0067253112793,
+        "after_event_us": 227.15839385986328
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 226.33147999999997,
+        "after_wall_us": 223.83722,
+        "before_event_us": 220.82752227783203,
+        "after_event_us": 228.72320175170898
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 226.17148,
+        "after_wall_us": 222.02804,
+        "before_event_us": 221.96224212646484,
+        "after_event_us": 220.9996795654297
+      }
+    ],
+    "trial": 0,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "2048",
+      "2048",
+      "2048",
+      "50",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "16657cd05e778676892e1c2bbccbc961a9d4aa00c2893ea86f159ffa92eaaa87",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1738.70595,
+        "after_wall_us": 1821.7482499999999,
+        "before_event_us": 1737.727928161621,
+        "after_event_us": 1738.5984420776367
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1738.9469000000001,
+        "after_wall_us": 1739.4094499999999,
+        "before_event_us": 1738.547134399414,
+        "after_event_us": 1739.2511367797852
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1752.7381,
+        "after_wall_us": 1774.2008,
+        "before_event_us": 1747.2511291503906,
+        "after_event_us": 1748.2751846313477
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1746.21155,
+        "after_wall_us": 1755.0845999999997,
+        "before_event_us": 1746.2783813476562,
+        "after_event_us": 1747.153663635254
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1745.3884999999998,
+        "after_wall_us": 1755.0276000000001,
+        "before_event_us": 1744.9472427368164,
+        "after_event_us": 1745.7664489746094
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1752.2925500000001,
+        "after_wall_us": 1749.73805,
+        "before_event_us": 1745.408058166504,
+        "after_event_us": 1753.2415390014648
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1771.6137999999999,
+        "after_wall_us": 1745.7025,
+        "before_event_us": 1749.1392135620117,
+        "after_event_us": 1755.4943084716797
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1747.98255,
+        "after_wall_us": 1753.0456,
+        "before_event_us": 1810.2272033691406,
+        "after_event_us": 1746.5887069702148
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1738.30795,
+        "after_wall_us": 1739.1534500000002,
+        "before_event_us": 1736.252784729004,
+        "after_event_us": 1746.1759567260742
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1777.7363,
+        "after_wall_us": 1745.777,
+        "before_event_us": 1750.2208709716797,
+        "after_event_us": 1746.5343475341797
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1747.7190500000002,
+        "after_wall_us": 1745.002,
+        "before_event_us": 1754.9823760986328,
+        "after_event_us": 1746.1248397827148
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1745.5825500000003,
+        "after_wall_us": 1746.77605,
+        "before_event_us": 1745.4591751098633,
+        "after_event_us": 1746.4271545410156
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1755.1911,
+        "after_wall_us": 1748.459,
+        "before_event_us": 1762.78076171875,
+        "after_event_us": 1756.1088562011719
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1745.4270000000001,
+        "after_wall_us": 1763.8986999999997,
+        "before_event_us": 1745.9199905395508,
+        "after_event_us": 1753.446388244629
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1746.352,
+        "after_wall_us": 1745.81555,
+        "before_event_us": 1755.2719116210938,
+        "after_event_us": 1747.8656768798828
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1744.337,
+        "after_wall_us": 1746.1850000000002,
+        "before_event_us": 1746.0735321044922,
+        "after_event_us": 1755.0416946411133
+      }
+    ],
+    "trial": 0,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "4096",
+      "4096",
+      "4096",
+      "20",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "75f4fa5fdebca48e0640130325a8ea89b0b17e70e971c2d104ef939d1b7b2572",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.10602,
+        "after_wall_us": 32.55303000000001,
+        "before_event_us": 34.058239459991455,
+        "after_event_us": 32.1945595741272
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 33.93914,
+        "after_wall_us": 32.077020000000005,
+        "before_event_us": 32.624640464782715,
+        "after_event_us": 32.1126389503479
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 33.56824,
+        "after_wall_us": 32.23652,
+        "before_event_us": 32.17407941818237,
+        "after_event_us": 33.91488075256348
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 32.286820000000006,
+        "after_wall_us": 32.65222,
+        "before_event_us": 32.184319496154785,
+        "after_event_us": 34.06847953796387
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 33.989540000000005,
+        "after_wall_us": 34.13114,
+        "before_event_us": 32.60416030883789,
+        "after_event_us": 32.15104103088379
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 32.58493,
+        "after_wall_us": 32.236019999999996,
+        "before_event_us": 34.06847953796387,
+        "after_event_us": 34.004480838775635
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 32.16942,
+        "after_wall_us": 33.924839999999996,
+        "before_event_us": 32.14335918426514,
+        "after_event_us": 32.51199960708618
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.14372,
+        "after_wall_us": 33.97844,
+        "before_event_us": 34.04799938201904,
+        "after_event_us": 32.176640033721924
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 32.813719999999996,
+        "after_wall_us": 32.50562,
+        "before_event_us": 34.158079624176025,
+        "after_event_us": 32.47711896896362
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 33.79884,
+        "after_wall_us": 34.28534,
+        "before_event_us": 32.28543996810913,
+        "after_event_us": 32.68735885620117
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.28022,
+        "after_wall_us": 32.78453,
+        "before_event_us": 34.02751922607422,
+        "after_event_us": 33.78175973892212
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 33.78284,
+        "after_wall_us": 32.310030000000005,
+        "before_event_us": 32.68287897109985,
+        "after_event_us": 32.276480197906494
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 33.80794,
+        "after_wall_us": 32.12192,
+        "before_event_us": 32.25600004196167,
+        "after_event_us": 33.80223989486694
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.073119999999996,
+        "after_wall_us": 32.55343,
+        "before_event_us": 32.25311994552612,
+        "after_event_us": 33.75103950500488
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 32.50142,
+        "after_wall_us": 33.83793,
+        "before_event_us": 32.88064002990723,
+        "after_event_us": 32.400639057159424
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 33.911840000000005,
+        "after_wall_us": 32.42573,
+        "before_event_us": 33.77151966094971,
+        "after_event_us": 32.33792066574097
+      }
+    ],
+    "trial": 1,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "1024",
+      "1024",
+      "1024",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 50,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "6df995381110f4f206842add2aacb060b7bf00b2a5cf0f47a460477653eed4dc",
+    "after_ptx_sha256": "97f1f60cd5c54c007d46a9c1cb9e23ddbd1b7c08959e13077324b15fdc86de84",
+    "reference_outputs": 128,
+    "total_outputs": 4194304,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "final_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 228.6827,
+        "after_wall_us": 224.05384,
+        "before_event_us": 222.6380729675293,
+        "after_event_us": 228.39296340942383
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 228.28509999999997,
+        "after_wall_us": 223.01404,
+        "before_event_us": 223.03936004638672,
+        "after_event_us": 223.0681610107422
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 224.19804,
+        "after_wall_us": 225.99206,
+        "before_event_us": 233.53343963623047,
+        "after_event_us": 223.02719116210938
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 222.61223999999999,
+        "after_wall_us": 228.5233,
+        "before_event_us": 227.43040084838867,
+        "after_event_us": 222.8019142150879
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 223.28084,
+        "after_wall_us": 227.42708,
+        "before_event_us": 222.12736129760742,
+        "after_event_us": 223.02719116210938
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 222.73904000000002,
+        "after_wall_us": 222.46884000000003,
+        "before_event_us": 222.14656829833984,
+        "after_event_us": 227.0694351196289
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 226.79826,
+        "after_wall_us": 222.40921999999998,
+        "before_event_us": 222.84479141235352,
+        "after_event_us": 227.16032028198242
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 248.5505,
+        "after_wall_us": 223.04464,
+        "before_event_us": 226.6476821899414,
+        "after_event_us": 226.0985565185547
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 222.16502,
+        "after_wall_us": 226.24686000000003,
+        "before_event_us": 221.90080642700195,
+        "after_event_us": 221.10015869140625
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 222.14221999999998,
+        "after_wall_us": 222.77924000000002,
+        "before_event_us": 222.8019142150879,
+        "after_event_us": 227.24607467651367
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 226.20368,
+        "after_wall_us": 222.19744,
+        "before_event_us": 221.71648025512695,
+        "after_event_us": 226.81024551391602
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 227.1311,
+        "after_wall_us": 222.44182,
+        "before_event_us": 221.7964744567871,
+        "after_event_us": 223.06623458862305
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 222.84364000000002,
+        "after_wall_us": 222.61444,
+        "before_event_us": 227.12703704833984,
+        "after_event_us": 223.15135955810547
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 222.21264,
+        "after_wall_us": 226.98588,
+        "before_event_us": 228.43263626098633,
+        "after_event_us": 231.21919631958008
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 224.11064000000002,
+        "after_wall_us": 226.95308,
+        "before_event_us": 221.9584083557129,
+        "after_event_us": 222.608642578125
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 223.01964,
+        "after_wall_us": 222.48982,
+        "before_event_us": 221.96224212646484,
+        "after_event_us": 227.2051239013672
+      }
+    ],
+    "trial": 1,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "2048",
+      "2048",
+      "2048",
+      "50",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "16657cd05e778676892e1c2bbccbc961a9d4aa00c2893ea86f159ffa92eaaa87",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1761.9612000000002,
+        "after_wall_us": 1769.1823,
+        "before_event_us": 1758.9759826660156,
+        "after_event_us": 1785.4463577270508
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1754.02965,
+        "after_wall_us": 1751.8746000000003,
+        "before_event_us": 1757.9952239990234,
+        "after_event_us": 1762.548828125
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1758.73265,
+        "after_wall_us": 1757.8122000000003,
+        "before_event_us": 1823.4479904174805,
+        "after_event_us": 1751.905632019043
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1766.7237499999999,
+        "after_wall_us": 1761.9582000000003,
+        "before_event_us": 1758.1056594848633,
+        "after_event_us": 1757.3375701904297
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1751.2315999999998,
+        "after_wall_us": 1754.43815,
+        "before_event_us": 1768.3967590332031,
+        "after_event_us": 1762.5455856323242
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1761.8102,
+        "after_wall_us": 1750.7900999999997,
+        "before_event_us": 1748.8943099975586,
+        "after_event_us": 1753.3439636230469
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1751.3755999999998,
+        "after_wall_us": 1760.1732,
+        "before_event_us": 1757.0863723754883,
+        "after_event_us": 1759.3856811523438
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1752.67715,
+        "after_wall_us": 1768.26725,
+        "before_event_us": 1777.8175354003906,
+        "after_event_us": 1751.193618774414
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1770.1437999999998,
+        "after_wall_us": 1759.6797000000001,
+        "before_event_us": 1751.3471603393555,
+        "after_event_us": 1764.1984939575195
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1756.76915,
+        "after_wall_us": 1759.0827000000002,
+        "before_event_us": 1761.2159729003906,
+        "after_event_us": 1750.3231048583984
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1768.4587999999999,
+        "after_wall_us": 1750.1126,
+        "before_event_us": 1756.9696426391602,
+        "after_event_us": 1750.4463195800781
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1767.0523,
+        "after_wall_us": 1759.9052,
+        "before_event_us": 1750.067138671875,
+        "after_event_us": 1777.6639938354492
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1761.8471999999997,
+        "after_wall_us": 1768.2883000000002,
+        "before_event_us": 1758.9248657226562,
+        "after_event_us": 1754.7344207763672
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1759.5107,
+        "after_wall_us": 1750.9490999999998,
+        "before_event_us": 1749.4415283203125,
+        "after_event_us": 1751.9615173339844
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1762.1201999999998,
+        "after_wall_us": 1758.7512,
+        "before_event_us": 1752.729606628418,
+        "after_event_us": 1777.7664184570312
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1775.9538500000003,
+        "after_wall_us": 1757.5661499999999,
+        "before_event_us": 1770.2064514160156,
+        "after_event_us": 1750.8352279663086
+      }
+    ],
+    "trial": 1,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "4096",
+      "4096",
+      "4096",
+      "20",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      512,
+      512,
+      512
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 64, cta_k: 64, warps_m: 2, warps_n: 2, num_stages: 4, num_warps: 4 }",
+    "before_ptx_sha256": "58389f1e3f54333d944a97d0d4701be2cc9f951e8d04ea7b69cc5dc78d83f315",
+    "after_ptx_sha256": "3bc067a01d497fd424a23d7a12db6b8299383699e0e3f99a9e61dc55b501ea70",
+    "reference_outputs": 128,
+    "total_outputs": 262144,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "final_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 7.48947,
+        "after_wall_us": 7.4878800000000005,
+        "before_event_us": 7.545920014381409,
+        "after_event_us": 7.487040162086487
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 7.4918700000000005,
+        "after_wall_us": 7.782070000000001,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 8.84419,
+        "after_wall_us": 7.4918700000000005,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.471359968185425
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 7.48457,
+        "after_wall_us": 7.48697,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.464960217475891
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 7.48577,
+        "after_wall_us": 7.49207,
+        "before_event_us": 7.474880218505859,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 8.76559,
+        "after_wall_us": 7.485569999999999,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 7.49967,
+        "after_wall_us": 7.84737,
+        "before_event_us": 7.49567985534668,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 8.83519,
+        "after_wall_us": 7.48958,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 7.48927,
+        "after_wall_us": 7.4899700000000005,
+        "before_event_us": 7.481920123100281,
+        "after_event_us": 7.481279969215393
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 7.49038,
+        "after_wall_us": 7.48388,
+        "before_event_us": 7.482240200042725,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 7.49928,
+        "after_wall_us": 7.488580000000001,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 7.49277,
+        "after_wall_us": 8.77179,
+        "before_event_us": 7.4934399127960205,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 7.944780000000001,
+        "after_wall_us": 7.490179999999999,
+        "before_event_us": 7.481920123100281,
+        "after_event_us": 7.464960217475891
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 7.48587,
+        "after_wall_us": 8.81358,
+        "before_event_us": 7.478079795837402,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 7.49068,
+        "after_wall_us": 7.49688,
+        "before_event_us": 7.472959756851196,
+        "after_event_us": 7.4745601415634155
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 7.487280000000001,
+        "after_wall_us": 7.486280000000001,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.473919987678528
+      }
+    ],
+    "trial": 1,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "512",
+      "512",
+      "512",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 50,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "6df995381110f4f206842add2aacb060b7bf00b2a5cf0f47a460477653eed4dc",
+    "after_ptx_sha256": "97f1f60cd5c54c007d46a9c1cb9e23ddbd1b7c08959e13077324b15fdc86de84",
+    "reference_outputs": 128,
+    "total_outputs": 4194304,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "final_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 223.25504,
+        "after_wall_us": 224.51326,
+        "before_event_us": 228.79999160766602,
+        "after_event_us": 227.45088577270508
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 225.98507999999998,
+        "after_wall_us": 224.72186000000002,
+        "before_event_us": 224.3084716796875,
+        "after_event_us": 224.35840606689453
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 228.7261,
+        "after_wall_us": 224.42705999999998,
+        "before_event_us": 223.0259132385254,
+        "after_event_us": 228.1260871887207
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 228.5555,
+        "after_wall_us": 223.04663999999997,
+        "before_event_us": 222.740478515625,
+        "after_event_us": 224.1868782043457
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 222.36504000000002,
+        "after_wall_us": 222.55044,
+        "before_event_us": 226.7897605895996,
+        "after_event_us": 223.28832626342773
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 224.34966,
+        "after_wall_us": 227.29428,
+        "before_event_us": 228.25664520263672,
+        "after_event_us": 222.28992462158203
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 223.21824,
+        "after_wall_us": 227.40328000000002,
+        "before_event_us": 223.23200225830078,
+        "after_event_us": 222.27327346801758
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 223.75226000000004,
+        "after_wall_us": 223.92806000000002,
+        "before_event_us": 222.2220802307129,
+        "after_event_us": 229.31135177612305
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 227.06628,
+        "after_wall_us": 222.61363999999998,
+        "before_event_us": 223.01376342773438,
+        "after_event_us": 227.05663681030273
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 227.16688,
+        "after_wall_us": 224.21205999999998,
+        "before_event_us": 233.57440948486328,
+        "after_event_us": 223.74143600463867
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 222.40024000000003,
+        "after_wall_us": 224.26286,
+        "before_event_us": 228.44736099243164,
+        "after_event_us": 222.31935501098633
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 224.92926,
+        "after_wall_us": 223.28266,
+        "before_event_us": 223.0086326599121,
+        "after_event_us": 222.7289581298828
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 226.74509999999998,
+        "after_wall_us": 223.51986,
+        "before_event_us": 222.14847564697266,
+        "after_event_us": 226.57024383544922
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 227.38230000000004,
+        "after_wall_us": 222.50424000000004,
+        "before_event_us": 222.1798324584961,
+        "after_event_us": 223.09951782226562
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 222.10062,
+        "after_wall_us": 222.52504000000002,
+        "before_event_us": 226.8307113647461,
+        "after_event_us": 223.2524871826172
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 222.17324,
+        "after_wall_us": 226.95667999999998,
+        "before_event_us": 228.72064590454102,
+        "after_event_us": 222.18751907348633
+      }
+    ],
+    "trial": 2,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "2048",
+      "2048",
+      "2048",
+      "50",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "16657cd05e778676892e1c2bbccbc961a9d4aa00c2893ea86f159ffa92eaaa87",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1775.7308999999998,
+        "after_wall_us": 1760.84375,
+        "before_event_us": 1759.4367980957031,
+        "after_event_us": 1759.9008560180664
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1761.15425,
+        "after_wall_us": 1760.2386999999999,
+        "before_event_us": 1750.169563293457,
+        "after_event_us": 1758.3616256713867
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1753.0286499999997,
+        "after_wall_us": 1770.9753500000002,
+        "before_event_us": 1750.4768371582031,
+        "after_event_us": 1751.807975769043
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1777.40435,
+        "after_wall_us": 1750.8861499999998,
+        "before_event_us": 1763.4815216064453,
+        "after_event_us": 1750.2208709716797
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1750.4576000000002,
+        "after_wall_us": 1768.9758000000002,
+        "before_event_us": 1756.7327499389648,
+        "after_event_us": 1758.8560104370117
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1759.87725,
+        "after_wall_us": 1758.7552,
+        "before_event_us": 1756.9631576538086,
+        "after_event_us": 1758.6687088012695
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1774.2858499999998,
+        "after_wall_us": 1772.5843,
+        "before_event_us": 1758.6175918579102,
+        "after_event_us": 1767.7824020385742
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1768.7318,
+        "after_wall_us": 1794.7945499999998,
+        "before_event_us": 1768.2527542114258,
+        "after_event_us": 1770.137596130371
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1773.0443500000001,
+        "after_wall_us": 1762.84725,
+        "before_event_us": 1759.7648620605469,
+        "after_event_us": 1768.5504913330078
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1764.18975,
+        "after_wall_us": 1760.6017,
+        "before_event_us": 1764.6480560302734,
+        "after_event_us": 1759.0816497802734
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1759.5157,
+        "after_wall_us": 1784.2839499999998,
+        "before_event_us": 1750.5792617797852,
+        "after_event_us": 1754.8463821411133
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1751.51915,
+        "after_wall_us": 1758.7772,
+        "before_event_us": 1751.091194152832,
+        "after_event_us": 1750.1728057861328
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1750.9501,
+        "after_wall_us": 1758.4872000000003,
+        "before_event_us": 1750.5792617797852,
+        "after_event_us": 1750.539207458496
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1757.6922,
+        "after_wall_us": 1753.4906500000002,
+        "before_event_us": 1750.1184463500977,
+        "after_event_us": 1750.271987915039
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1777.0219000000002,
+        "after_wall_us": 1841.1680499999998,
+        "before_event_us": 1804.697608947754,
+        "after_event_us": 1805.7727813720703
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1772.70635,
+        "after_wall_us": 1809.88825,
+        "before_event_us": 1754.262351989746,
+        "after_event_us": 1789.7472381591797
+      }
+    ],
+    "trial": 2,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "4096",
+      "4096",
+      "4096",
+      "20",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      512,
+      512,
+      512
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 64, cta_k: 64, warps_m: 2, warps_n: 2, num_stages: 4, num_warps: 4 }",
+    "before_ptx_sha256": "58389f1e3f54333d944a97d0d4701be2cc9f951e8d04ea7b69cc5dc78d83f315",
+    "after_ptx_sha256": "3bc067a01d497fd424a23d7a12db6b8299383699e0e3f99a9e61dc55b501ea70",
+    "reference_outputs": 128,
+    "total_outputs": 262144,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "final_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 7.493379999999999,
+        "after_wall_us": 7.4914700000000005,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 7.49028,
+        "after_wall_us": 7.49037,
+        "before_event_us": 7.496960163116455,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 7.93448,
+        "after_wall_us": 7.5063699999999995,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 7.493469999999999,
+        "after_wall_us": 8.82029,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 7.4926699999999995,
+        "after_wall_us": 7.491079999999999,
+        "before_event_us": 7.486079931259155,
+        "after_event_us": 7.464960217475891
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 7.49038,
+        "after_wall_us": 7.48988,
+        "before_event_us": 7.483199834823608,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 7.49048,
+        "after_wall_us": 8.77128,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.464960217475891
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 7.88038,
+        "after_wall_us": 7.4945699999999995,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.516160011291504
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 7.49377,
+        "after_wall_us": 8.820689999999999,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.464960217475891
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 7.48947,
+        "after_wall_us": 7.49168,
+        "before_event_us": 7.473919987678528,
+        "after_event_us": 7.481279969215393
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 7.4958800000000005,
+        "after_wall_us": 7.48927,
+        "before_event_us": 7.4726402759552,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 7.487369999999999,
+        "after_wall_us": 7.490170000000001,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 8.76759,
+        "after_wall_us": 7.49368,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.49567985534668
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 7.49168,
+        "after_wall_us": 7.87928,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.482240200042725
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 8.845889999999999,
+        "after_wall_us": 7.49577,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 7.48498,
+        "after_wall_us": 7.49278,
+        "before_event_us": 7.481279969215393,
+        "after_event_us": 7.475200295448303
+      }
+    ],
+    "trial": 2,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "512",
+      "512",
+      "512",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "75f4fa5fdebca48e0640130325a8ea89b0b17e70e971c2d104ef939d1b7b2572",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.90433,
+        "after_wall_us": 32.622730000000004,
+        "before_event_us": 34.47999954223633,
+        "after_event_us": 32.532479763031006
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 34.25284,
+        "after_wall_us": 34.37165,
+        "before_event_us": 32.24287986755371,
+        "after_event_us": 32.93215990066528
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 32.26942,
+        "after_wall_us": 32.64553,
+        "before_event_us": 34.160640239715576,
+        "after_event_us": 34.22208070755005
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 32.60263,
+        "after_wall_us": 32.26253,
+        "before_event_us": 32.9420804977417,
+        "after_event_us": 32.555201053619385
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 34.61315,
+        "after_wall_us": 32.61813,
+        "before_event_us": 32.583680152893066,
+        "after_event_us": 32.50848054885864
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 32.47643,
+        "after_wall_us": 34.23934,
+        "before_event_us": 32.41983890533447,
+        "after_event_us": 34.35424089431763
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 32.48702,
+        "after_wall_us": 34.77235,
+        "before_event_us": 32.99328088760376,
+        "after_event_us": 32.75424003601074
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 34.50905,
+        "after_wall_us": 32.78493,
+        "before_event_us": 34.498560428619385,
+        "after_event_us": 32.74751901626587
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 32.650130000000004,
+        "after_wall_us": 32.73453,
+        "before_event_us": 32.63488054275513,
+        "after_event_us": 33.075199127197266
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 32.37173,
+        "after_wall_us": 34.62224,
+        "before_event_us": 33.75744104385376,
+        "after_event_us": 32.30720043182373
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.74233,
+        "after_wall_us": 32.35563,
+        "before_event_us": 33.79328012466431,
+        "after_event_us": 32.36639976501465
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 34.30045,
+        "after_wall_us": 32.28893,
+        "before_event_us": 32.33792066574097,
+        "after_event_us": 32.73727893829346
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 32.33193,
+        "after_wall_us": 34.038050000000005,
+        "before_event_us": 32.286720275878906,
+        "after_event_us": 33.77151966094971
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.322230000000005,
+        "after_wall_us": 32.298829999999995,
+        "before_event_us": 32.70656108856201,
+        "after_event_us": 32.26624011993408
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 34.274449999999995,
+        "after_wall_us": 32.326730000000005,
+        "before_event_us": 32.249600887298584,
+        "after_event_us": 32.26624011993408
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 32.56632,
+        "after_wall_us": 34.040049999999994,
+        "before_event_us": 32.60416030883789,
+        "after_event_us": 34.406399726867676
+      }
+    ],
+    "trial": 2,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "1024",
+      "1024",
+      "1024",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "16657cd05e778676892e1c2bbccbc961a9d4aa00c2893ea86f159ffa92eaaa87",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1802.6331999999998,
+        "after_wall_us": 1772.5649,
+        "before_event_us": 1800.035285949707,
+        "after_event_us": 1764.454460144043
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1767.0783,
+        "after_wall_us": 1751.3456999999999,
+        "before_event_us": 1756.1103820800781,
+        "after_event_us": 1753.3935546875
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1750.3382000000001,
+        "after_wall_us": 1766.4253500000002,
+        "before_event_us": 1751.1360168457031,
+        "after_event_us": 1757.9872131347656
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1754.0031999999999,
+        "after_wall_us": 1762.3067999999998,
+        "before_event_us": 1750.783920288086,
+        "after_event_us": 1751.7343521118164
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1757.4942500000002,
+        "after_wall_us": 1752.4932000000001,
+        "before_event_us": 1751.5008926391602,
+        "after_event_us": 1755.289649963379
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1767.6678,
+        "after_wall_us": 1760.8217999999997,
+        "before_event_us": 1761.7919921875,
+        "after_event_us": 1760.0000381469727
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1789.45255,
+        "after_wall_us": 1771.0288500000001,
+        "before_event_us": 1769.2607879638672,
+        "after_event_us": 1766.8096542358398
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1767.75085,
+        "after_wall_us": 1761.21875,
+        "before_event_us": 1759.7440719604492,
+        "after_event_us": 1758.8127136230469
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1761.4303,
+        "after_wall_us": 1770.6024000000002,
+        "before_event_us": 1771.3151931762695,
+        "after_event_us": 1763.265609741211
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1759.24925,
+        "after_wall_us": 1752.8162499999999,
+        "before_event_us": 1784.8831176757812,
+        "after_event_us": 1751.1520385742188
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1753.6682,
+        "after_wall_us": 1758.4022,
+        "before_event_us": 1750.2351760864258,
+        "after_event_us": 1749.2944717407227
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1759.8572499999998,
+        "after_wall_us": 1751.56615,
+        "before_event_us": 1757.040023803711,
+        "after_event_us": 1753.2928466796875
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1765.2042999999999,
+        "after_wall_us": 1777.6383999999998,
+        "before_event_us": 1769.6735382080078,
+        "after_event_us": 1769.620704650879
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1764.7773499999998,
+        "after_wall_us": 1769.81335,
+        "before_event_us": 1759.6784591674805,
+        "after_event_us": 1783.3440780639648
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1767.2983,
+        "after_wall_us": 1759.7897500000004,
+        "before_event_us": 1761.9455337524414,
+        "after_event_us": 1770.8175659179688
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1760.23425,
+        "after_wall_us": 1761.01925,
+        "before_event_us": 1765.3247833251953,
+        "after_event_us": 1759.6416473388672
+      }
+    ],
+    "trial": 3,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "4096",
+      "4096",
+      "4096",
+      "20",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      512,
+      512,
+      512
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 64, cta_k: 64, warps_m: 2, warps_n: 2, num_stages: 4, num_warps: 4 }",
+    "before_ptx_sha256": "58389f1e3f54333d944a97d0d4701be2cc9f951e8d04ea7b69cc5dc78d83f315",
+    "after_ptx_sha256": "3bc067a01d497fd424a23d7a12db6b8299383699e0e3f99a9e61dc55b501ea70",
+    "reference_outputs": 128,
+    "total_outputs": 262144,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "final_relative_l2": [
+      9.144397528764807e-07,
+      9.144397528764807e-07
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 7.49658,
+        "after_wall_us": 7.497769999999999,
+        "before_event_us": 7.536640167236328,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 7.49858,
+        "after_wall_us": 7.492970000000001,
+        "before_event_us": 7.483199834823608,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 7.49728,
+        "after_wall_us": 7.508869999999999,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.49567985534668
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 7.49408,
+        "after_wall_us": 7.90548,
+        "before_event_us": 7.483839988708496,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 8.81639,
+        "after_wall_us": 7.4958800000000005,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.471039891242981
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 7.490069999999999,
+        "after_wall_us": 7.50428,
+        "before_event_us": 7.471680045127869,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 7.49667,
+        "after_wall_us": 7.49917,
+        "before_event_us": 7.464960217475891,
+        "after_event_us": 7.485439777374268
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 8.78509,
+        "after_wall_us": 7.49317,
+        "before_event_us": 7.483519911766052,
+        "after_event_us": 7.483199834823608
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 7.51057,
+        "after_wall_us": 7.83058,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.485439777374268
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 7.4888699999999995,
+        "after_wall_us": 7.49438,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 7.4958800000000005,
+        "after_wall_us": 7.5069799999999995,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.4828797578811646
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 7.4977800000000006,
+        "after_wall_us": 7.49658,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 7.49827,
+        "after_wall_us": 7.50217,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.485439777374268
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 7.503769999999999,
+        "after_wall_us": 7.49308,
+        "before_event_us": 7.8540802001953125,
+        "after_event_us": 7.481279969215393
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 7.494980000000001,
+        "after_wall_us": 7.4993799999999995,
+        "before_event_us": 7.485439777374268,
+        "after_event_us": 7.475200295448303
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 7.492970000000001,
+        "after_wall_us": 7.4891700000000005,
+        "before_event_us": 7.475200295448303,
+        "after_event_us": 7.475200295448303
+      }
+    ],
+    "trial": 3,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "512",
+      "512",
+      "512",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "75f4fa5fdebca48e0640130325a8ea89b0b17e70e971c2d104ef939d1b7b2572",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.538720000000005,
+        "after_wall_us": 34.429140000000004,
+        "before_event_us": 32.624640464782715,
+        "after_event_us": 33.08511972427368
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 32.57223,
+        "after_wall_us": 33.93284,
+        "before_event_us": 34.38591957092285,
+        "after_event_us": 32.53119945526123
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 33.00733,
+        "after_wall_us": 32.61433,
+        "before_event_us": 32.522239685058594,
+        "after_event_us": 32.49151945114136
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 33.97935,
+        "after_wall_us": 34.41685,
+        "before_event_us": 32.5600004196167,
+        "after_event_us": 32.972800731658936
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 32.59533,
+        "after_wall_us": 32.93214,
+        "before_event_us": 34.271039962768555,
+        "after_event_us": 32.54271984100342
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 34.40545,
+        "after_wall_us": 32.551230000000004,
+        "before_event_us": 33.01055908203125,
+        "after_event_us": 32.573440074920654
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 34.00714,
+        "after_wall_us": 32.62393,
+        "before_event_us": 32.49824047088623,
+        "after_event_us": 34.26367998123169
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.552620000000005,
+        "after_wall_us": 33.03873,
+        "before_event_us": 32.50816106796265,
+        "after_event_us": 32.59392023086548
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 34.39935,
+        "after_wall_us": 33.900639999999996,
+        "before_event_us": 33.18655967712402,
+        "after_event_us": 32.53216028213501
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 32.98563,
+        "after_wall_us": 32.58793,
+        "before_event_us": 32.49151945114136,
+        "after_event_us": 34.31423902511597
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.49463,
+        "after_wall_us": 34.18734,
+        "before_event_us": 32.45023965835571,
+        "after_event_us": 32.829439640045166
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 32.52453,
+        "after_wall_us": 33.90504,
+        "before_event_us": 34.37920093536377,
+        "after_event_us": 32.59743928909302
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 32.976530000000004,
+        "after_wall_us": 32.52843,
+        "before_event_us": 32.583680152893066,
+        "after_event_us": 32.50976085662842
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 33.95124,
+        "after_wall_us": 34.208239999999996,
+        "before_event_us": 32.48095989227295,
+        "after_event_us": 32.89088010787964
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 32.49453,
+        "after_wall_us": 32.992630000000005,
+        "before_event_us": 34.242238998413086,
+        "after_event_us": 32.50175952911377
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 34.16134,
+        "after_wall_us": 32.52133,
+        "before_event_us": 32.84991979598999,
+        "after_event_us": 32.47103929519653
+      }
+    ],
+    "trial": 3,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "1024",
+      "1024",
+      "1024",
+      "100",
+      "16"
+    ]
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 50,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "6df995381110f4f206842add2aacb060b7bf00b2a5cf0f47a460477653eed4dc",
+    "after_ptx_sha256": "97f1f60cd5c54c007d46a9c1cb9e23ddbd1b7c08959e13077324b15fdc86de84",
+    "reference_outputs": 128,
+    "total_outputs": 4194304,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "final_relative_l2": [
+      3.731005567129007e-06,
+      3.731005567129007e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 223.71746000000002,
+        "after_wall_us": 228.74512,
+        "before_event_us": 224.6656036376953,
+        "after_event_us": 223.41632843017578
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 223.86366,
+        "after_wall_us": 224.75306,
+        "before_event_us": 224.21503067016602,
+        "after_event_us": 228.67136001586914
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 228.5447,
+        "after_wall_us": 224.41986,
+        "before_event_us": 223.08095932006836,
+        "after_event_us": 228.6796760559082
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 228.50549999999998,
+        "after_wall_us": 223.64886,
+        "before_event_us": 223.67807388305664,
+        "after_event_us": 224.1868782043457
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 224.40808,
+        "after_wall_us": 224.74768,
+        "before_event_us": 228.2316780090332,
+        "after_event_us": 223.62112045288086
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 223.97346,
+        "after_wall_us": 230.11072000000001,
+        "before_event_us": 231.014404296875,
+        "after_event_us": 224.8236846923828
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 222.81806,
+        "after_wall_us": 227.4661,
+        "before_event_us": 222.30527877807617,
+        "after_event_us": 222.77759552001953
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 222.95226000000002,
+        "after_wall_us": 222.16664,
+        "before_event_us": 225.11615753173828,
+        "after_event_us": 227.2051239013672
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 223.28763999999998,
+        "after_wall_us": 218.4534,
+        "before_event_us": 231.6908836364746,
+        "after_event_us": 223.2524871826172
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 223.44286,
+        "after_wall_us": 227.85170000000002,
+        "before_event_us": 226.6111946105957,
+        "after_event_us": 222.14208602905273
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 222.57646,
+        "after_wall_us": 226.76648,
+        "before_event_us": 223.19103240966797,
+        "after_event_us": 222.2470474243164
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 222.60544000000002,
+        "after_wall_us": 223.48344,
+        "before_event_us": 222.0230484008789,
+        "after_event_us": 227.49183654785156
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 227.3889,
+        "after_wall_us": 222.26863999999998,
+        "before_event_us": 222.33087539672852,
+        "after_event_us": 227.1436882019043
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 226.9283,
+        "after_wall_us": 222.52903999999998,
+        "before_event_us": 222.14527130126953,
+        "after_event_us": 222.18751907348633
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 223.14426,
+        "after_wall_us": 222.80144,
+        "before_event_us": 227.40991592407227,
+        "after_event_us": 223.33696365356445
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 222.26004,
+        "after_wall_us": 227.3773,
+        "before_event_us": 227.32799530029297,
+        "after_event_us": 222.4127960205078
+      }
+    ],
+    "trial": 3,
+    "command": [
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate_exporter",
+      "compare",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/before",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/gemm-scheduling-2026-09-25/candidate",
+      "2048",
+      "2048",
+      "2048",
+      "50",
+      "16"
+    ]
+  }
+]

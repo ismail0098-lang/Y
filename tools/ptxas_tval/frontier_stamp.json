@@ -1,6 +1,6 @@
 {
  "O1": {
-  "digest": "bbc8f3c52539c6bbd9bdbbccbe33a48dff2157284b4b3d16a769f54b206de06d|o1",
+  "digest": "d625fccde9176bc7edbe0773d43657850ebc61de45933cec64dca070edc5e76d|o1",
   "summary": {
    "counts": [
     0,
@@ -18,15 +18,15 @@
     1,
     2,
     3,
+    3,
+    3,
+    3,
+    3,
     4,
     5,
     5,
+    5,
     6,
-    7,
-    7,
-    7,
-    7,
-    7,
     7,
     7,
     7,
@@ -70,7 +70,7 @@
     26,
     31
    ],
-   "distinct": 106,
+   "distinct": 107,
    "kernels": 66,
    "sole": [
     "bn254_fr_mul_fast",
@@ -81,7 +81,7 @@
   }
  },
  "O3": {
-  "digest": "bbc8f3c52539c6bbd9bdbbccbe33a48dff2157284b4b3d16a769f54b206de06d",
+  "digest": "d625fccde9176bc7edbe0773d43657850ebc61de45933cec64dca070edc5e76d",
   "summary": {
    "counts": [
     0,
@@ -96,10 +96,15 @@
     1,
     2,
     3,
+    3,
+    3,
+    3,
+    3,
     4,
     4,
     4,
-    4,
+    5,
+    5,
     5,
     5,
     5,
@@ -107,15 +112,10 @@
     5,
     6,
     6,
-    7,
-    7,
-    7,
-    7,
-    7,
     7,
     7,
     9,
-    12,
+    13,
     14,
     14,
     15,
@@ -151,7 +151,7 @@
     26,
     26
    ],
-   "distinct": 103,
+   "distinct": 104,
    "kernels": 66,
    "sole": [
     "bn254_fr_mul_fast",

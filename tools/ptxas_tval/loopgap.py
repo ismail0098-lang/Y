@@ -56,6 +56,12 @@ NOLOOP = re.compile(r'(PTX|SASS) has no loop')
 # .text sections (...)`.  The parenthesised list is per-kernel; the form is not.
 SUBJECT = re.compile(r'this (PTX module|disassembly) holds \d+ (?:entry points|\.text sections)')
 
+# A cross-thread operation inside a loop (`loopcfg`): the instruction's TEXT
+# is in the message, register operands and all, and a key that keeps them
+# reports one bucket per register allocation -- the 23 FP16 GEMMs, one cause,
+# came out as three rows of 13, 6 and 4. The OPCODE is the form a lift would
+# have to model, so the key keeps that and drops the operands.
+CROSS_THREAD = re.compile(r"UNMODELLED (PTX|SASS) loop cross-thread(/reconvergence)? effect '([^\s']+)")
 UNPLACEABLE = re.compile(r'(PTX|SASS) branch form this CFG cannot place at 0x[0-9a-f]+: (\'[^\']*\')')
 
 
@@ -90,6 +96,9 @@ def reason_key(msg, kernel=None):
         form = re.sub(r'@!?P\d+\s+', '@P ', m.group(2))
         form = re.sub(r'`\(\.L_\w+\)', '`(.L)', form)
         return f'{m.group(1)} branch form this CFG cannot place: {form}'
+    m = CROSS_THREAD.search(msg)
+    if m:
+        return f'{m.group(1)} loop cross-thread{m.group(2) or ""} effect: {m.group(3)}'
     m = NOLOOP.search(msg)
     if m:
         # `nestval`'s phrasing for what `loopval` calls zero back edges.  Kept

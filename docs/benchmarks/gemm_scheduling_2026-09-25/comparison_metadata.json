@@ -1,0 +1,27 @@
+{
+  "started_utc": "2026-09-24T21:47:01.959925+00:00",
+  "trials": 4,
+  "rounds": 16,
+  "cases": [
+    [
+      512,
+      100
+    ],
+    [
+      1024,
+      100
+    ],
+    [
+      2048,
+      50
+    ],
+    [
+      4096,
+      20
+    ]
+  ],
+  "binary_sha256": "ace17294c3803a45cfbde6c1b7cd0291863ffd4303156169aa8d8c7e3b9afebc",
+  "policy": "paired in one process; alternating order per round; unchanged tile/precision; keep only a repeatable completed-time improvement with no material regression",
+  "gpu_exclusive": false,
+  "clock_control": false
+}

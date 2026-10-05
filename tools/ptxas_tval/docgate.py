@@ -183,9 +183,12 @@ def check_loop_census(perturb=None):
     # The prose total, DERIVED the way the prose derives it: both sides of the
     # same reason.  It was the half of this figure that stayed right while the
     # block went stale, so it is not redundant with the rows above.
-    both = sum(n for r, n in agg.items() if 'more than one loop at one level' in r)
-    m = re.search(r'\*\*(\d+) of (\d+) refuse for one reason: more than one loop at one '
-                  r'level\.\*\*', doc)
+    # The headline is the largest single cause, and it moved: since the audit a
+    # cross-thread operation inside a loop is refused before the loop SHAPE is
+    # looked at, so it is what a first-refusal census counts first.
+    both = sum(n for r, n in agg.items() if 'cross-thread' in r)
+    m = re.search(r'\*\*(\d+) of (\d+) refuse for one reason: a loop body holds a '
+                  r'cross-thread operation\.\*\*', doc)
     if not m:
         print('FAIL: the prose sentence deriving the back-edge total is gone')
         bad += 1
@@ -200,18 +203,16 @@ def check_loop_census(perturb=None):
     # \s+ rather than a literal space: both files WRAP, so a sentence-shaped
     # pattern with hard spaces in it matches only until someone reflows a
     # paragraph -- and then the gate reports the claim as missing.
-    rm = re.search(r'\*\*(\d+)\s+of\s+the\s+(\d+)\s+refuse\s+for\s+one\s+reason:\s+more\s+than\s+one'
-                   r'\s+loop\s+at\s+one\s+level\*\*\s+\((\d+)\s+on\s+the\s+PTX\s+side,'
-                   r'\s+(\d+)\s+on\s+the\s+SASS\)',
+    rm = re.search(r'\*\*(\d+)\s+of\s+the\s+(\d+)\s+refuse\s+for\s+one\s+reason:\s+a\s+loop'
+                   r'\s+body\s+holds\s+a\s+cross-thread\s+operation\*\*\s+\((\d+)\s+on\s+the\s+PTX'
+                   r'\s+side,\s+(\d+)\s+on\s+the\s+SASS\)',
                    open(README).read())
     if not rm:
         print('FAIL: the README no longer states the back-edge census')
         bad += 1
     else:
-        pn = sum(n for r, n in agg.items()
-                 if r.startswith('PTX') and 'more than one loop at one level' in r)
-        sn = sum(n for r, n in agg.items()
-                 if r.startswith('SASS') and 'more than one loop at one level' in r)
+        pn = sum(n for r, n in agg.items() if r.startswith('PTX') and 'cross-thread' in r)
+        sn = sum(n for r, n in agg.items() if r.startswith('SASS') and 'cross-thread' in r)
         got = tuple(int(x) for x in rm.groups())
         if got != (both, n_k, pn, sn):
             print(f'FAIL: README says {got}; measured {(both, n_k, pn, sn)} '
@@ -219,7 +220,7 @@ def check_loop_census(perturb=None):
             bad += 1
     if not bad:
         print(f'ok: loop-structure census, {n_k} kernels, {len(rows)} buckets, '
-              f'{both} behind more than one loop at one level, doc and README agreeing')
+              f'{both} behind a cross-thread operation in a loop, doc and README agreeing')
     return bad
 
 
@@ -717,6 +718,12 @@ def perturbed_unroll(kernel):
             body = line.strip().split('*/')[-1].strip().rstrip(';').strip()
             if unroll.SASS_OBS.match(body):
                 out.append(line)
+        # RENUMBER the addresses, as `unroll._selftest`'s twin of this
+        # perturbation does: the executors refuse a disassembly whose addresses
+        # do not increase strictly, and branches name labels, not addresses.
+        addr = iter(range(0, 16 * len(out), 16))
+        out = [re.sub(r'^(\s*)/\*[0-9a-f]{4,}\*/', lambda m: f'{m.group(1)}/*{next(addr):04x}*/', l)
+               for l in out]
         open(f'{tmp}/{kernel}.sass', 'w').writelines(out)
         return unroll.factor(kernel, tmp)
     finally:

@@ -28,6 +28,27 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use y::type_checker::z3_candidates;
+
+#[path = "common/verification.rs"]
+mod verification;
+
+fn solver() -> Option<PathBuf> {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let found = z3_candidates().into_iter().find_map(|candidate| {
+        let mut path = PathBuf::from(candidate);
+        if path.is_relative() && path.components().count() > 1 {
+            path = repo.join(path);
+        }
+        Command::new(&path)
+            .arg("-version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+            .then_some(path)
+    });
+    verification::prerequisite_available(found.is_some(), "executable Z3 for invariant enforcement");
+    found
+}
 
 /// A `@safe` loop whose invariant is false: `i` ranges over `0..10`.
 const FALSE_INVARIANT: &str = r#"
@@ -84,7 +105,12 @@ fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> Strin
     cmd.arg(src);
     cmd.env_remove("Y_Z3_PATH");
     cmd.env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS");
-    if !solver_visible {
+    if solver_visible {
+        if let Some(z3) = solver() {
+            cmd.env("Y_Z3_PATH", z3);
+        }
+        cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+    } else {
         // No `z3` on PATH, and no `$HOME/.local/bin/z3`. The relative
         // candidates resolve against the working directory, so run somewhere
         // that has no `venv/` or `z3/` in it.
@@ -152,20 +178,7 @@ fn opt_out_downgrades_to_a_warning() {
 /// testing `@safe`'s central claim.
 #[test]
 fn with_a_solver_false_invariants_are_caught_and_true_ones_pass() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let z3 = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
-        .iter()
-        .map(|p| repo.join(p))
-        .find(|p| p.exists())
-        .or_else(|| {
-            std::env::var("PATH").ok().and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|d| d.join("z3"))
-                    .find(|p| p.exists())
-            })
-        });
-    let Some(z3) = z3 else {
-        eprintln!("skipping: no z3 binary found");
+    let Some(z3) = solver() else {
         return;
     };
 
@@ -204,6 +217,10 @@ fn with_a_solver_false_invariants_are_caught_and_true_ones_pass() {
         "`i >= 0` holds on a 0..10 loop and must be accepted.\n{}",
         out
     );
+    assert!(
+        out.contains("Front-end analysis complete"),
+        "the true invariant must actually pass front-end verification:\n{out}"
+    );
 }
 
 // ─────────────────────── soundness of the SMT encoding ───────────────────────
@@ -221,15 +238,7 @@ fn with_a_solver_false_invariants_are_caught_and_true_ones_pass() {
 /// Runs `src` with a solver available and returns the compiler's output.
 fn compile_with_solver(name: &str, src: &str) -> Option<String> {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let z3 = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
-        .iter()
-        .map(|p| repo.join(p))
-        .find(|p| p.exists())
-        .or_else(|| {
-            std::env::var("PATH").ok().and_then(|paths| {
-                std::env::split_paths(&paths).map(|d| d.join("z3")).find(|p| p.exists())
-            })
-        })?;
+    let z3 = solver()?;
     let src_path = write_source(name, src);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src_path)
@@ -354,9 +363,11 @@ kernel probe(A: GlobalMemory<F32>, N: I32, Lo: I32) {
 fn main() {}
 "#;
 
+// thread_idx_x is at most 1023, so lo + 8 is representable. block_idx_x
+// can approach I32::MAX, which made the former positive fixture overflow.
 const VAR_BOUNDS: &str = r#"
 kernel probe(A: GlobalMemory<F32>, N: I32) {
-    let lo: I32 = block_idx_x();
+    let lo: I32 = thread_idx_x();
     let hi: I32 = lo + 8;
     @invariant(k >= lo)
     for k in lo..hi {
@@ -369,6 +380,9 @@ fn main() {}
 
 #[test]
 fn a_loop_with_variable_bounds_can_be_verified() {
+    if solver().is_none() {
+        return;
+    }
     let src = write_source("var_bounds_ok", VAR_BOUNDS);
     let out = compile(&src, true, false);
     assert!(
@@ -389,6 +403,9 @@ fn a_loop_with_variable_bounds_can_be_verified() {
 /// false invariant would now pass.
 #[test]
 fn a_false_invariant_on_a_variable_bounded_loop_is_still_rejected() {
+    if solver().is_none() {
+        return;
+    }
     let src = write_source(
         "var_bounds_false",
         &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k > 1000)"),
@@ -412,6 +429,9 @@ fn a_false_invariant_on_a_variable_bounded_loop_is_still_rejected() {
 /// modelling limit in the MSM kernel.
 #[test]
 fn an_unprovable_invariant_on_an_unknown_bound_is_reported_as_such() {
+    if solver().is_none() {
+        return;
+    }
     let src = write_source(
         "var_bounds_unknown",
         &UNKNOWN_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
@@ -441,41 +461,41 @@ fn an_unprovable_invariant_on_an_unknown_bound_is_reported_as_such() {
 /// that makes an obligation easier rather than harder.
 #[test]
 fn a_bound_from_a_gpu_index_intrinsic_is_known_non_negative() {
+    if solver().is_none() {
+        return;
+    }
     let src = write_source(
         "var_bounds_intrinsic",
         &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
     );
     let out = compile(&src, true, false);
-    if out.contains("could not be run") {
-        eprintln!("SKIP: no z3 on this machine");
-        return;
-    }
+    assert!(!out.contains("could not be run"), "a discovered solver must run:\n{out}");
     assert!(
         out.contains("Front-end analysis complete"),
-        "`k >= 0` on `for k in block_idx_x()..hi` was not provable, so a \
+        "`k >= 0` on `for k in thread_idx_x()..hi` was not provable, so a \
          grid-stride loop still cannot carry an invariant:\n{}",
         out
     );
 }
 
-/// ...and the intrinsic's range must not be over-claimed. `%ctaid.x` is
+/// ...and the intrinsic's range must not be over-claimed. `%tid.x` is
 /// non-negative, but nothing says it is non-ZERO, so a strict `> 0` must still
 /// be refuted.
 #[test]
 fn the_intrinsic_range_is_not_over_claimed() {
+    if solver().is_none() {
+        return;
+    }
     let src = write_source(
         "var_bounds_strict",
         &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k > 0)"),
     );
     let out = compile(&src, true, false);
-    if out.contains("could not be run") {
-        eprintln!("SKIP: no z3 on this machine");
-        return;
-    }
+    assert!(!out.contains("could not be run"), "a discovered solver must run:\n{out}");
     assert!(
         !out.contains("Front-end analysis complete"),
-        "`k > 0` was accepted on a loop starting at `block_idx_x()`, which is \
-         zero on the first CTA of every launch. The interval bounds are too \
+        "`k > 0` was accepted on a loop starting at `thread_idx_x()`, which is \
+         zero on the first thread of every CTA. The interval bounds are too \
          strong:\n{}",
         out
     );
@@ -651,13 +671,16 @@ fn phase(name: &str, src: &str) -> Option<&'static str> {
     })
 }
 
-/// A true invariant over a variable the body assigns must verify.
+/// An inductive invariant over a variable the body assigns must verify.
+/// The accumulator is tied to the bounded loop index: `acc >= 0` alone
+/// would also admit I32::MAX / I64::MAX at the preservation check, where
+/// incrementing the machine integer overflows.
 #[test]
 fn an_invariant_over_a_body_assigned_variable_can_be_verified() {
     let cases = [
         (
             "entry_for",
-            "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
+            "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc == i && i >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
         ),
         (
             "entry_while",
@@ -669,7 +692,7 @@ fn an_invariant_over_a_body_assigned_variable_can_be_verified() {
         ),
         (
             "entry_for_i64",
-            "fn main() {\n    let acc: I64 = 0;\n    @invariant(acc >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
+            "fn main() {\n    let acc: I64 = 0;\n    @invariant(acc == i && i >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
         ),
     ];
     for (name, src) in cases {

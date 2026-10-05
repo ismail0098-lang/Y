@@ -1,5 +1,9 @@
 """Floating point as uninterpreted functions over the 32-bit pattern.
 
+This is a conditional sm_89 model. Raw factory calls build symbolic terms;
+public validator verdicts enforce that target license through domain.py. The
+empirical identifications below are not licenses for another architecture.
+
 SOUNDNESS.  Every float operation becomes an uninterpreted function of its
 operands' bit patterns.  That is an ABSTRACTION, and every real interpretation
 -- IEEE 754 round-to-nearest included -- is a model of it.  So if the two
@@ -28,11 +32,10 @@ sequence.  So the macro-op class is not a float-semantics gap, it is a
 different verification problem -- proving an IEEE division algorithm -- and it
 is REFUSED BY NAME here rather than approximated.
 
-TWO IDENTIFICATIONS ARE IMPOSED, each licensed by a device probe and each
-recorded with the flag that says so -- `FADD` commutes, and `FSUB(a,b)` is
-`FADD(a, FNEG(b))`.  Both were once written here as deliberately open, and both
-were closed only when something needed them, which is the order to do it in: an
-identification nothing needs is an unmeasured assumption with no benefit.
+The licensed identifications are recorded by flags below: `FADD` and `FMAX`
+commute, and `FSUB(a,b)` is `FADD(a, FNEG(b))`. They were closed only when a
+kernel needed them and a device probe settled them: an identification nothing
+needs is an unmeasured assumption with no benefit.
 
 Deliberately NOT assumed: `FMUL` commutativity.  Nothing has needed it, so
 nothing has measured it, and `_self_check` pins BOTH halves of every
@@ -40,6 +43,7 @@ identification -- the one that must hold and the one that must not -- so a
 third cannot arrive without a probe.
 """
 from z3 import *
+import mulmode
 W = 32
 
 # --- the float problem is THREE classes, measured per opcode ------------------
@@ -150,6 +154,7 @@ MACRO_OPS = dict.fromkeys(list(EXPANDED) + list(TRANSLITERATED))
 #     unmeasured identification is the guess this file exists to refuse.  Same
 #     treatment as FMUL commutativity.
 IDENTIFICATIONS = {
+    'FADD_IS_COMMUTATIVE': True,
     'FSUB_IS_FADD_OF_FNEG': True,
     'FMAX_IS_COMMUTATIVE': True,
 }
@@ -247,18 +252,26 @@ def factory():
                 raise Exception('FSUB is identified with FADD(a, FNEG(b)) but the '
                                 'device probe that settles it is marked unvalidated')
             return f('FADD', args[0], f('FNEG', args[1], side=side), side=side)
-        if name == 'FADD' and len(args) == 2 and args[0].get_id() > args[1].get_id():
-            args = (args[1], args[0])
         # MAX IS COMMUTATIVE, and licensed by a measurement -- see the note on
         # IDENTIFICATIONS.  The shipped ReLU lowering swaps the operands, so
         # this is not an optimisation of the term size: without it that kernel
         # cannot validate at all.  FMIN is deliberately left alone.
-        if name == 'FMAX' and len(args) == 2:
-            if not IDENTIFICATIONS['FMAX_IS_COMMUTATIVE']:
-                raise Exception('FMAX is canonicalised by operand id but the '
-                                'device probe that settles it is marked unvalidated')
-            if args[0].get_id() > args[1].get_id():
-                args = (args[1], args[0])
+        if name in ('FADD', 'FMAX') and len(args) == 2:
+            if not IDENTIFICATIONS[f'{name}_IS_COMMUTATIVE']:
+                raise Exception(f'{name} is identified with its swapped operands '
+                                'but the device probe that settles it is marked '
+                                'unvalidated')
+            # Sort BITS by value, not expression allocation IDs. Equal operands
+            # can have different syntax (and new IDs after substitution), so
+            # ID sorting alone can reverse one program's addends and hide a
+            # valid correspondence. This represents exactly a commutative UF:
+            # every licensed interpretation can assign the sorted pair its
+            # original result. It assumes no numerical ordering property.
+            # Lexical orientation only keeps syntactically swapped calls
+            # identical, including the simplify-only checks below.
+            a, b = mulmode.orient(*args)
+            ordered = ULE(a, b)
+            args = (If(ordered, a, b), If(ordered, b, a))
         if side not in ('ptx', 'sass'):
             raise Exception(f'float op {name!r} asked for without a side'
                             f' -- the caller must say which program it is executing')
@@ -391,17 +404,20 @@ def _side_check(f):
     # reason: the flag is a comment unless something reads it.
     # SAVE and RESTORE, never assign the flag back to True: a check that puts a
     # constant back is a check that repairs the mutation it was written to find.
-    _was = IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG']
-    IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG'] = False
-    try:
-        f('FSUB', a, a, side='sass')
-    except Exception:
-        pass
-    else:
-        raise Exception('FSUB was identified with FADD(a, FNEG(b)) although the '
-                        'validated flag says no device probe has settled it')
-    finally:
-        IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG'] = _was
+    for name, flag in (('FSUB', 'FSUB_IS_FADD_OF_FNEG'),
+                       ('FADD', 'FADD_IS_COMMUTATIVE'),
+                       ('FMAX', 'FMAX_IS_COMMUTATIVE')):
+        _was = IDENTIFICATIONS[flag]
+        IDENTIFICATIONS[flag] = False
+        try:
+            f(name, a, a, side='sass')
+        except Exception:
+            pass
+        else:
+            raise Exception(f'{name} was identified although its validated flag '
+                            'says no device probe has settled it')
+        finally:
+            IDENTIFICATIONS[flag] = _was
     unval = [o for o, (_, v) in TRANSLITERATED.items() if not v]
     if unval:
         try:

@@ -1,0 +1,7022 @@
+[
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.1863119999999998,
+        "completed_us": 2.2160230000000003
+      },
+      {
+        "enqueue_us": 1.175473,
+        "completed_us": 2.5141970000000002
+      },
+      {
+        "enqueue_us": 1.194282,
+        "completed_us": 2.829819
+      },
+      {
+        "enqueue_us": 1.159453,
+        "completed_us": 3.423036
+      },
+      {
+        "enqueue_us": 1.142152,
+        "completed_us": 2.897051
+      },
+      {
+        "enqueue_us": 1.1576119999999999,
+        "completed_us": 2.215033
+      },
+      {
+        "enqueue_us": 1.1586319999999999,
+        "completed_us": 2.2153229999999997
+      },
+      {
+        "enqueue_us": 1.164913,
+        "completed_us": 2.5181169999999997
+      },
+      {
+        "enqueue_us": 1.164442,
+        "completed_us": 2.365265
+      },
+      {
+        "enqueue_us": 1.176942,
+        "completed_us": 3.648888
+      },
+      {
+        "enqueue_us": 1.1075220000000001,
+        "completed_us": 3.1498429999999997
+      },
+      {
+        "enqueue_us": 1.130152,
+        "completed_us": 2.215893
+      },
+      {
+        "enqueue_us": 1.131022,
+        "completed_us": 2.215944
+      },
+      {
+        "enqueue_us": 1.1550919999999998,
+        "completed_us": 2.215403
+      },
+      {
+        "enqueue_us": 1.140912,
+        "completed_us": 2.5148560000000004
+      },
+      {
+        "enqueue_us": 1.154953,
+        "completed_us": 2.535187
+      },
+      {
+        "enqueue_us": 1.156352,
+        "completed_us": 2.217563
+      },
+      {
+        "enqueue_us": 1.1862629999999998,
+        "completed_us": 2.909571
+      },
+      {
+        "enqueue_us": 1.1124020000000001,
+        "completed_us": 4.252585
+      },
+      {
+        "enqueue_us": 1.1583120000000002,
+        "completed_us": 2.2155430000000003
+      },
+      {
+        "enqueue_us": 1.162482,
+        "completed_us": 2.532277
+      },
+      {
+        "enqueue_us": 1.180952,
+        "completed_us": 3.7183490000000003
+      },
+      {
+        "enqueue_us": 1.145972,
+        "completed_us": 2.91488
+      },
+      {
+        "enqueue_us": 1.1332419999999999,
+        "completed_us": 2.499387
+      },
+      {
+        "enqueue_us": 1.137381,
+        "completed_us": 2.579507
+      },
+      {
+        "enqueue_us": 1.1650019999999999,
+        "completed_us": 2.510156
+      },
+      {
+        "enqueue_us": 1.142632,
+        "completed_us": 3.190094
+      },
+      {
+        "enqueue_us": 1.163712,
+        "completed_us": 3.742549
+      },
+      {
+        "enqueue_us": 1.087871,
+        "completed_us": 3.2602040000000003
+      },
+      {
+        "enqueue_us": 1.1243519999999998,
+        "completed_us": 2.215993
+      },
+      {
+        "enqueue_us": 1.125132,
+        "completed_us": 2.216154
+      },
+      {
+        "enqueue_us": 1.132202,
+        "completed_us": 2.215703
+      },
+      {
+        "enqueue_us": 1.1472920000000002,
+        "completed_us": 2.523076
+      },
+      {
+        "enqueue_us": 1.173263,
+        "completed_us": 3.7837199999999998
+      },
+      {
+        "enqueue_us": 1.0838420000000002,
+        "completed_us": 3.267545
+      },
+      {
+        "enqueue_us": 1.128241,
+        "completed_us": 2.2156730000000002
+      },
+      {
+        "enqueue_us": 1.1265319999999999,
+        "completed_us": 2.215863
+      },
+      {
+        "enqueue_us": 1.149482,
+        "completed_us": 2.215293
+      },
+      {
+        "enqueue_us": 1.145382,
+        "completed_us": 2.520947
+      },
+      {
+        "enqueue_us": 1.217103,
+        "completed_us": 2.906931
+      },
+      {
+        "enqueue_us": 1.1560120000000003,
+        "completed_us": 3.467266
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 0,
+    "pair_position": 0,
+    "process_sequence": 0,
+    "process_wall_s": 3.2553960049990565,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.060721,
+        "completed_us": 2.233863
+      },
+      {
+        "enqueue_us": 1.078572,
+        "completed_us": 2.384035
+      },
+      {
+        "enqueue_us": 1.060872,
+        "completed_us": 2.229364
+      },
+      {
+        "enqueue_us": 1.0821310000000002,
+        "completed_us": 2.2282529999999996
+      },
+      {
+        "enqueue_us": 1.1139919999999999,
+        "completed_us": 2.404926
+      },
+      {
+        "enqueue_us": 1.1293410000000002,
+        "completed_us": 3.946611
+      },
+      {
+        "enqueue_us": 1.051571,
+        "completed_us": 2.747329
+      },
+      {
+        "enqueue_us": 1.068691,
+        "completed_us": 2.6141970000000003
+      },
+      {
+        "enqueue_us": 1.053591,
+        "completed_us": 2.5299270000000003
+      },
+      {
+        "enqueue_us": 1.121222,
+        "completed_us": 2.548507
+      },
+      {
+        "enqueue_us": 1.113181,
+        "completed_us": 2.7732390000000002
+      },
+      {
+        "enqueue_us": 1.1050309999999999,
+        "completed_us": 3.034202
+      },
+      {
+        "enqueue_us": 1.144082,
+        "completed_us": 3.697629
+      },
+      {
+        "enqueue_us": 1.068281,
+        "completed_us": 3.241664
+      },
+      {
+        "enqueue_us": 1.1149319999999998,
+        "completed_us": 2.228583
+      },
+      {
+        "enqueue_us": 1.117192,
+        "completed_us": 2.230694
+      },
+      {
+        "enqueue_us": 1.114641,
+        "completed_us": 2.537446
+      },
+      {
+        "enqueue_us": 1.125502,
+        "completed_us": 3.7295990000000003
+      },
+      {
+        "enqueue_us": 1.103842,
+        "completed_us": 2.676909
+      },
+      {
+        "enqueue_us": 1.107661,
+        "completed_us": 2.685938
+      },
+      {
+        "enqueue_us": 1.106711,
+        "completed_us": 2.5069760000000003
+      },
+      {
+        "enqueue_us": 1.1046319999999998,
+        "completed_us": 2.551127
+      },
+      {
+        "enqueue_us": 1.1033320000000002,
+        "completed_us": 2.85048
+      },
+      {
+        "enqueue_us": 1.0814110000000001,
+        "completed_us": 4.346636
+      },
+      {
+        "enqueue_us": 1.0186,
+        "completed_us": 3.3117340000000004
+      },
+      {
+        "enqueue_us": 1.0626820000000001,
+        "completed_us": 2.229684
+      },
+      {
+        "enqueue_us": 1.080751,
+        "completed_us": 2.229623
+      },
+      {
+        "enqueue_us": 1.074942,
+        "completed_us": 2.229614
+      },
+      {
+        "enqueue_us": 1.131532,
+        "completed_us": 3.962531
+      },
+      {
+        "enqueue_us": 1.048751,
+        "completed_us": 2.8406400000000005
+      },
+      {
+        "enqueue_us": 1.054771,
+        "completed_us": 2.77683
+      },
+      {
+        "enqueue_us": 1.052911,
+        "completed_us": 2.980351
+      },
+      {
+        "enqueue_us": 1.109641,
+        "completed_us": 2.228953
+      },
+      {
+        "enqueue_us": 1.1248420000000001,
+        "completed_us": 2.228084
+      },
+      {
+        "enqueue_us": 1.1562919999999999,
+        "completed_us": 3.1183620000000003
+      },
+      {
+        "enqueue_us": 1.063322,
+        "completed_us": 3.934322
+      },
+      {
+        "enqueue_us": 1.028201,
+        "completed_us": 3.093292
+      },
+      {
+        "enqueue_us": 1.058711,
+        "completed_us": 2.2295040000000004
+      },
+      {
+        "enqueue_us": 1.0895010000000003,
+        "completed_us": 2.229093
+      },
+      {
+        "enqueue_us": 1.099502,
+        "completed_us": 2.228894
+      },
+      {
+        "enqueue_us": 1.237763,
+        "completed_us": 3.066422
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 0,
+    "pair_position": 1,
+    "process_sequence": 1,
+    "process_wall_s": 3.2462608459973126,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.154353,
+        "completed_us": 3.383516
+      },
+      {
+        "enqueue_us": 1.155632,
+        "completed_us": 4.4241269999999995
+      },
+      {
+        "enqueue_us": 1.082661,
+        "completed_us": 4.85717
+      },
+      {
+        "enqueue_us": 1.117902,
+        "completed_us": 3.227044
+      },
+      {
+        "enqueue_us": 1.134722,
+        "completed_us": 3.390296
+      },
+      {
+        "enqueue_us": 1.167502,
+        "completed_us": 4.373685999999999
+      },
+      {
+        "enqueue_us": 1.0871609999999998,
+        "completed_us": 4.8738909999999995
+      },
+      {
+        "enqueue_us": 1.121792,
+        "completed_us": 3.233154
+      },
+      {
+        "enqueue_us": 1.122932,
+        "completed_us": 3.0931029999999997
+      },
+      {
+        "enqueue_us": 1.152082,
+        "completed_us": 4.569428000000001
+      },
+      {
+        "enqueue_us": 1.114992,
+        "completed_us": 4.80478
+      },
+      {
+        "enqueue_us": 1.135972,
+        "completed_us": 3.231884
+      },
+      {
+        "enqueue_us": 1.1349420000000001,
+        "completed_us": 3.087813
+      },
+      {
+        "enqueue_us": 1.155332,
+        "completed_us": 3.386325
+      },
+      {
+        "enqueue_us": 1.162513,
+        "completed_us": 3.427666
+      },
+      {
+        "enqueue_us": 1.1608129999999999,
+        "completed_us": 4.431627
+      },
+      {
+        "enqueue_us": 1.090931,
+        "completed_us": 4.986773
+      },
+      {
+        "enqueue_us": 1.131721,
+        "completed_us": 3.403085
+      },
+      {
+        "enqueue_us": 1.132272,
+        "completed_us": 3.088553
+      },
+      {
+        "enqueue_us": 1.1645819999999998,
+        "completed_us": 3.689089
+      },
+      {
+        "enqueue_us": 1.1143109999999998,
+        "completed_us": 5.188174
+      },
+      {
+        "enqueue_us": 1.1596520000000001,
+        "completed_us": 3.0874629999999996
+      },
+      {
+        "enqueue_us": 1.158272,
+        "completed_us": 3.387075
+      },
+      {
+        "enqueue_us": 1.1610319999999998,
+        "completed_us": 3.0874430000000004
+      },
+      {
+        "enqueue_us": 1.1388520000000002,
+        "completed_us": 5.671239
+      },
+      {
+        "enqueue_us": 1.115342,
+        "completed_us": 3.217334
+      },
+      {
+        "enqueue_us": 1.137582,
+        "completed_us": 3.395766
+      },
+      {
+        "enqueue_us": 1.1273819999999999,
+        "completed_us": 5.492967999999999
+      },
+      {
+        "enqueue_us": 1.102751,
+        "completed_us": 3.658078
+      },
+      {
+        "enqueue_us": 1.113442,
+        "completed_us": 3.221314
+      },
+      {
+        "enqueue_us": 1.1543219999999998,
+        "completed_us": 3.389815
+      },
+      {
+        "enqueue_us": 1.1423320000000001,
+        "completed_us": 4.336286
+      },
+      {
+        "enqueue_us": 1.083641,
+        "completed_us": 4.883581
+      },
+      {
+        "enqueue_us": 1.1206720000000001,
+        "completed_us": 3.229044
+      },
+      {
+        "enqueue_us": 1.1344020000000001,
+        "completed_us": 3.392006
+      },
+      {
+        "enqueue_us": 1.1529019999999999,
+        "completed_us": 4.268065
+      },
+      {
+        "enqueue_us": 1.079961,
+        "completed_us": 4.922931999999999
+      },
+      {
+        "enqueue_us": 1.123881,
+        "completed_us": 3.247424
+      },
+      {
+        "enqueue_us": 1.120542,
+        "completed_us": 3.087712
+      },
+      {
+        "enqueue_us": 1.141812,
+        "completed_us": 3.388106
+      },
+      {
+        "enqueue_us": 1.1626020000000001,
+        "completed_us": 3.746769
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 0,
+    "pair_position": 0,
+    "process_sequence": 2,
+    "process_wall_s": 3.2860430120017554,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.102552,
+        "completed_us": 3.249854
+      },
+      {
+        "enqueue_us": 1.107932,
+        "completed_us": 3.102793
+      },
+      {
+        "enqueue_us": 1.1051019999999998,
+        "completed_us": 3.4159960000000003
+      },
+      {
+        "enqueue_us": 1.091262,
+        "completed_us": 5.393477
+      },
+      {
+        "enqueue_us": 1.030701,
+        "completed_us": 4.178654000000001
+      },
+      {
+        "enqueue_us": 1.0553310000000002,
+        "completed_us": 3.103132
+      },
+      {
+        "enqueue_us": 1.0993419999999998,
+        "completed_us": 3.1037730000000003
+      },
+      {
+        "enqueue_us": 1.109772,
+        "completed_us": 5.524697999999999
+      },
+      {
+        "enqueue_us": 1.0827909999999998,
+        "completed_us": 4.299195
+      },
+      {
+        "enqueue_us": 1.0843319999999999,
+        "completed_us": 3.102683
+      },
+      {
+        "enqueue_us": 1.102221,
+        "completed_us": 3.103283
+      },
+      {
+        "enqueue_us": 1.1178309999999998,
+        "completed_us": 5.465656999999999
+      },
+      {
+        "enqueue_us": 1.036811,
+        "completed_us": 4.004732000000001
+      },
+      {
+        "enqueue_us": 1.0483809999999998,
+        "completed_us": 3.243855
+      },
+      {
+        "enqueue_us": 1.0603209999999998,
+        "completed_us": 3.1036819999999996
+      },
+      {
+        "enqueue_us": 1.107162,
+        "completed_us": 3.522527
+      },
+      {
+        "enqueue_us": 1.2651430000000001,
+        "completed_us": 5.5222880000000005
+      },
+      {
+        "enqueue_us": 1.076151,
+        "completed_us": 3.892651
+      },
+      {
+        "enqueue_us": 1.0985520000000002,
+        "completed_us": 3.1039930000000004
+      },
+      {
+        "enqueue_us": 1.101801,
+        "completed_us": 3.4083849999999996
+      },
+      {
+        "enqueue_us": 1.0725120000000001,
+        "completed_us": 5.993294
+      },
+      {
+        "enqueue_us": 1.0958409999999998,
+        "completed_us": 3.245484
+      },
+      {
+        "enqueue_us": 1.100231,
+        "completed_us": 3.104242
+      },
+      {
+        "enqueue_us": 1.101742,
+        "completed_us": 3.2783650000000004
+      },
+      {
+        "enqueue_us": 1.093201,
+        "completed_us": 5.458747000000001
+      },
+      {
+        "enqueue_us": 1.0526010000000001,
+        "completed_us": 4.171844
+      },
+      {
+        "enqueue_us": 1.0494809999999999,
+        "completed_us": 3.103433
+      },
+      {
+        "enqueue_us": 1.096461,
+        "completed_us": 3.102943
+      },
+      {
+        "enqueue_us": 1.102301,
+        "completed_us": 5.266135
+      },
+      {
+        "enqueue_us": 1.042791,
+        "completed_us": 3.944441
+      },
+      {
+        "enqueue_us": 1.050971,
+        "completed_us": 3.238934
+      },
+      {
+        "enqueue_us": 1.065301,
+        "completed_us": 3.102663
+      },
+      {
+        "enqueue_us": 1.107782,
+        "completed_us": 5.191624
+      },
+      {
+        "enqueue_us": 1.071342,
+        "completed_us": 3.9386819999999996
+      },
+      {
+        "enqueue_us": 1.089011,
+        "completed_us": 3.246044
+      },
+      {
+        "enqueue_us": 1.100262,
+        "completed_us": 3.103303
+      },
+      {
+        "enqueue_us": 1.107891,
+        "completed_us": 5.182784000000001
+      },
+      {
+        "enqueue_us": 1.0282710000000002,
+        "completed_us": 3.8985410000000003
+      },
+      {
+        "enqueue_us": 1.051291,
+        "completed_us": 3.1385330000000002
+      },
+      {
+        "enqueue_us": 1.041721,
+        "completed_us": 3.238344
+      },
+      {
+        "enqueue_us": 1.094432,
+        "completed_us": 3.103393
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 0,
+    "pair_position": 1,
+    "process_sequence": 3,
+    "process_wall_s": 3.295111925002857,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.0789819999999999,
+        "completed_us": 39.050031
+      },
+      {
+        "enqueue_us": 1.116422,
+        "completed_us": 38.642836
+      },
+      {
+        "enqueue_us": 1.119082,
+        "completed_us": 41.178674
+      },
+      {
+        "enqueue_us": 1.120401,
+        "completed_us": 38.119080000000004
+      },
+      {
+        "enqueue_us": 1.0916620000000001,
+        "completed_us": 40.042882000000006
+      },
+      {
+        "enqueue_us": 1.118772,
+        "completed_us": 39.650617
+      },
+      {
+        "enqueue_us": 1.0778910000000002,
+        "completed_us": 38.279303
+      },
+      {
+        "enqueue_us": 1.128531,
+        "completed_us": 41.757577999999995
+      },
+      {
+        "enqueue_us": 1.1062820000000002,
+        "completed_us": 39.927281
+      },
+      {
+        "enqueue_us": 1.115271,
+        "completed_us": 38.973859
+      },
+      {
+        "enqueue_us": 1.133973,
+        "completed_us": 43.110304000000006
+      },
+      {
+        "enqueue_us": 1.1358620000000001,
+        "completed_us": 41.089932
+      },
+      {
+        "enqueue_us": 1.0975620000000001,
+        "completed_us": 36.947169
+      },
+      {
+        "enqueue_us": 1.144252,
+        "completed_us": 41.097262
+      },
+      {
+        "enqueue_us": 1.318124,
+        "completed_us": 40.146072
+      },
+      {
+        "enqueue_us": 1.105532,
+        "completed_us": 39.495135999999995
+      },
+      {
+        "enqueue_us": 1.125952,
+        "completed_us": 37.837337999999995
+      },
+      {
+        "enqueue_us": 1.134822,
+        "completed_us": 41.144712999999996
+      },
+      {
+        "enqueue_us": 1.0880509999999999,
+        "completed_us": 38.12179999999999
+      },
+      {
+        "enqueue_us": 1.132342,
+        "completed_us": 40.122183
+      },
+      {
+        "enqueue_us": 1.105401,
+        "completed_us": 40.678616999999996
+      },
+      {
+        "enqueue_us": 1.095862,
+        "completed_us": 38.665057
+      },
+      {
+        "enqueue_us": 1.102682,
+        "completed_us": 40.162881999999996
+      },
+      {
+        "enqueue_us": 1.119292,
+        "completed_us": 39.330414000000005
+      },
+      {
+        "enqueue_us": 1.1255819999999999,
+        "completed_us": 38.128041
+      },
+      {
+        "enqueue_us": 1.1418220000000001,
+        "completed_us": 41.140723
+      },
+      {
+        "enqueue_us": 1.0868010000000001,
+        "completed_us": 38.171901
+      },
+      {
+        "enqueue_us": 1.0900519999999998,
+        "completed_us": 38.082121
+      },
+      {
+        "enqueue_us": 1.1296019999999998,
+        "completed_us": 41.320515
+      },
+      {
+        "enqueue_us": 1.1163519999999998,
+        "completed_us": 38.443834
+      },
+      {
+        "enqueue_us": 1.119052,
+        "completed_us": 38.45045400000001
+      },
+      {
+        "enqueue_us": 1.123392,
+        "completed_us": 40.791630000000005
+      },
+      {
+        "enqueue_us": 1.095041,
+        "completed_us": 38.188731
+      },
+      {
+        "enqueue_us": 1.1115420000000003,
+        "completed_us": 40.535837
+      },
+      {
+        "enqueue_us": 1.089971,
+        "completed_us": 39.275853000000005
+      },
+      {
+        "enqueue_us": 1.096512,
+        "completed_us": 38.517725000000006
+      },
+      {
+        "enqueue_us": 1.137722,
+        "completed_us": 40.86213000000001
+      },
+      {
+        "enqueue_us": 1.093211,
+        "completed_us": 38.703247000000005
+      },
+      {
+        "enqueue_us": 1.0883310000000002,
+        "completed_us": 38.133441
+      },
+      {
+        "enqueue_us": 1.1223319999999999,
+        "completed_us": 40.396635
+      },
+      {
+        "enqueue_us": 1.122982,
+        "completed_us": 39.071001
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 0,
+    "pair_position": 0,
+    "process_sequence": 4,
+    "process_wall_s": 4.793436482999823,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.084711,
+        "completed_us": 40.729099
+      },
+      {
+        "enqueue_us": 1.0718310000000002,
+        "completed_us": 38.366882999999994
+      },
+      {
+        "enqueue_us": 1.090032,
+        "completed_us": 40.709818
+      },
+      {
+        "enqueue_us": 1.0780919999999998,
+        "completed_us": 40.073042
+      },
+      {
+        "enqueue_us": 1.0933920000000001,
+        "completed_us": 39.616437
+      },
+      {
+        "enqueue_us": 1.2502229999999999,
+        "completed_us": 42.134263
+      },
+      {
+        "enqueue_us": 1.333024,
+        "completed_us": 38.519186
+      },
+      {
+        "enqueue_us": 1.063181,
+        "completed_us": 38.411454
+      },
+      {
+        "enqueue_us": 1.109661,
+        "completed_us": 41.509947
+      },
+      {
+        "enqueue_us": 1.077761,
+        "completed_us": 38.133070999999994
+      },
+      {
+        "enqueue_us": 1.068541,
+        "completed_us": 40.884620000000005
+      },
+      {
+        "enqueue_us": 1.0428810000000002,
+        "completed_us": 38.569586
+      },
+      {
+        "enqueue_us": 1.097761,
+        "completed_us": 37.734617
+      },
+      {
+        "enqueue_us": 1.080941,
+        "completed_us": 41.671597999999996
+      },
+      {
+        "enqueue_us": 1.077272,
+        "completed_us": 37.992470000000004
+      },
+      {
+        "enqueue_us": 1.095972,
+        "completed_us": 38.452785000000006
+      },
+      {
+        "enqueue_us": 1.072021,
+        "completed_us": 40.512436
+      },
+      {
+        "enqueue_us": 1.043971,
+        "completed_us": 38.119431000000006
+      },
+      {
+        "enqueue_us": 1.053261,
+        "completed_us": 37.735307
+      },
+      {
+        "enqueue_us": 1.085131,
+        "completed_us": 40.583117
+      },
+      {
+        "enqueue_us": 1.083741,
+        "completed_us": 38.237963
+      },
+      {
+        "enqueue_us": 1.1000910000000002,
+        "completed_us": 38.371873
+      },
+      {
+        "enqueue_us": 1.087201,
+        "completed_us": 40.066662
+      },
+      {
+        "enqueue_us": 1.0730810000000002,
+        "completed_us": 38.627226
+      },
+      {
+        "enqueue_us": 1.296394,
+        "completed_us": 39.482336000000004
+      },
+      {
+        "enqueue_us": 1.071391,
+        "completed_us": 38.197981
+      },
+      {
+        "enqueue_us": 1.078062,
+        "completed_us": 37.839319
+      },
+      {
+        "enqueue_us": 1.087401,
+        "completed_us": 37.325712
+      },
+      {
+        "enqueue_us": 1.0558910000000001,
+        "completed_us": 40.360395
+      },
+      {
+        "enqueue_us": 1.040961,
+        "completed_us": 38.035689999999995
+      },
+      {
+        "enqueue_us": 1.043511,
+        "completed_us": 37.404264000000005
+      },
+      {
+        "enqueue_us": 1.077241,
+        "completed_us": 39.065861
+      },
+      {
+        "enqueue_us": 1.0738010000000002,
+        "completed_us": 38.03209
+      },
+      {
+        "enqueue_us": 1.057851,
+        "completed_us": 37.562875
+      },
+      {
+        "enqueue_us": 1.049231,
+        "completed_us": 37.03492
+      },
+      {
+        "enqueue_us": 1.088681,
+        "completed_us": 37.298023
+      },
+      {
+        "enqueue_us": 1.0951410000000001,
+        "completed_us": 40.449575
+      },
+      {
+        "enqueue_us": 1.076832,
+        "completed_us": 37.224062
+      },
+      {
+        "enqueue_us": 1.192642,
+        "completed_us": 38.927119000000005
+      },
+      {
+        "enqueue_us": 1.0690119999999999,
+        "completed_us": 38.260023
+      },
+      {
+        "enqueue_us": 1.0668410000000002,
+        "completed_us": 37.772667
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 0,
+    "pair_position": 1,
+    "process_sequence": 5,
+    "process_wall_s": 4.768192283001554,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.033461,
+        "completed_us": 4.041913
+      },
+      {
+        "enqueue_us": 1.0706710000000002,
+        "completed_us": 3.248924
+      },
+      {
+        "enqueue_us": 1.081831,
+        "completed_us": 3.112953
+      },
+      {
+        "enqueue_us": 1.118001,
+        "completed_us": 4.653349
+      },
+      {
+        "enqueue_us": 1.0723410000000002,
+        "completed_us": 4.253255
+      },
+      {
+        "enqueue_us": 1.109001,
+        "completed_us": 3.2529339999999998
+      },
+      {
+        "enqueue_us": 1.107841,
+        "completed_us": 3.114742
+      },
+      {
+        "enqueue_us": 1.121712,
+        "completed_us": 3.79284
+      },
+      {
+        "enqueue_us": 1.032201,
+        "completed_us": 5.291805999999999
+      },
+      {
+        "enqueue_us": 1.0641209999999999,
+        "completed_us": 3.1508629999999997
+      },
+      {
+        "enqueue_us": 1.085412,
+        "completed_us": 3.246624
+      },
+      {
+        "enqueue_us": 1.1238620000000001,
+        "completed_us": 3.288125
+      },
+      {
+        "enqueue_us": 1.071061,
+        "completed_us": 5.874782
+      },
+      {
+        "enqueue_us": 1.103771,
+        "completed_us": 3.150143
+      },
+      {
+        "enqueue_us": 1.1058610000000002,
+        "completed_us": 3.257744
+      },
+      {
+        "enqueue_us": 1.113162,
+        "completed_us": 3.113553
+      },
+      {
+        "enqueue_us": 1.097942,
+        "completed_us": 4.9548119999999995
+      },
+      {
+        "enqueue_us": 1.0346710000000001,
+        "completed_us": 4.086993
+      },
+      {
+        "enqueue_us": 1.070482,
+        "completed_us": 3.252404
+      },
+      {
+        "enqueue_us": 1.1206420000000001,
+        "completed_us": 3.112463
+      },
+      {
+        "enqueue_us": 1.1230820000000001,
+        "completed_us": 3.1167629999999997
+      },
+      {
+        "enqueue_us": 1.113222,
+        "completed_us": 5.404927000000001
+      },
+      {
+        "enqueue_us": 1.073991,
+        "completed_us": 3.8703700000000003
+      },
+      {
+        "enqueue_us": 1.102482,
+        "completed_us": 3.2621350000000002
+      },
+      {
+        "enqueue_us": 1.111942,
+        "completed_us": 3.112803
+      },
+      {
+        "enqueue_us": 1.105871,
+        "completed_us": 5.011933
+      },
+      {
+        "enqueue_us": 1.03292,
+        "completed_us": 4.0212520000000005
+      },
+      {
+        "enqueue_us": 1.086101,
+        "completed_us": 3.2567939999999997
+      },
+      {
+        "enqueue_us": 1.0994920000000001,
+        "completed_us": 3.115953
+      },
+      {
+        "enqueue_us": 1.121532,
+        "completed_us": 4.661849
+      },
+      {
+        "enqueue_us": 1.071041,
+        "completed_us": 4.186104
+      },
+      {
+        "enqueue_us": 1.103572,
+        "completed_us": 3.1498630000000003
+      },
+      {
+        "enqueue_us": 1.114862,
+        "completed_us": 3.2468739999999996
+      },
+      {
+        "enqueue_us": 1.113962,
+        "completed_us": 3.286765
+      },
+      {
+        "enqueue_us": 1.076551,
+        "completed_us": 5.74722
+      },
+      {
+        "enqueue_us": 1.070061,
+        "completed_us": 3.152453
+      },
+      {
+        "enqueue_us": 1.081732,
+        "completed_us": 3.1108029999999998
+      },
+      {
+        "enqueue_us": 1.104602,
+        "completed_us": 3.418556
+      },
+      {
+        "enqueue_us": 1.1297819999999998,
+        "completed_us": 4.971043
+      },
+      {
+        "enqueue_us": 1.0658709999999998,
+        "completed_us": 4.395656
+      },
+      {
+        "enqueue_us": 1.110231,
+        "completed_us": 3.2537040000000004
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 1,
+    "pair_position": 0,
+    "process_sequence": 6,
+    "process_wall_s": 3.3323256360017695,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.113832,
+        "completed_us": 3.264074
+      },
+      {
+        "enqueue_us": 1.1290820000000001,
+        "completed_us": 3.113363
+      },
+      {
+        "enqueue_us": 1.144252,
+        "completed_us": 3.73827
+      },
+      {
+        "enqueue_us": 1.0678210000000001,
+        "completed_us": 5.192634
+      },
+      {
+        "enqueue_us": 1.112282,
+        "completed_us": 3.489167
+      },
+      {
+        "enqueue_us": 1.115192,
+        "completed_us": 3.4443759999999997
+      },
+      {
+        "enqueue_us": 1.1368220000000002,
+        "completed_us": 4.019043
+      },
+      {
+        "enqueue_us": 1.127982,
+        "completed_us": 6.132544
+      },
+      {
+        "enqueue_us": 1.537137,
+        "completed_us": 3.258125
+      },
+      {
+        "enqueue_us": 1.126031,
+        "completed_us": 3.113342
+      },
+      {
+        "enqueue_us": 1.1693619999999998,
+        "completed_us": 3.114343
+      },
+      {
+        "enqueue_us": 1.1417519999999999,
+        "completed_us": 5.74312
+      },
+      {
+        "enqueue_us": 1.136192,
+        "completed_us": 3.583948
+      },
+      {
+        "enqueue_us": 1.143672,
+        "completed_us": 4.048313
+      },
+      {
+        "enqueue_us": 1.135882,
+        "completed_us": 3.112072
+      },
+      {
+        "enqueue_us": 1.1430019999999999,
+        "completed_us": 3.4224270000000003
+      },
+      {
+        "enqueue_us": 1.1482919999999999,
+        "completed_us": 5.101283
+      },
+      {
+        "enqueue_us": 1.1410420000000001,
+        "completed_us": 4.003632
+      },
+      {
+        "enqueue_us": 1.137362,
+        "completed_us": 3.1136929999999996
+      },
+      {
+        "enqueue_us": 1.146572,
+        "completed_us": 5.687410000000001
+      },
+      {
+        "enqueue_us": 1.100102,
+        "completed_us": 4.124384
+      },
+      {
+        "enqueue_us": 1.132131,
+        "completed_us": 3.2660240000000003
+      },
+      {
+        "enqueue_us": 1.113131,
+        "completed_us": 3.1143630000000004
+      },
+      {
+        "enqueue_us": 1.144722,
+        "completed_us": 5.3342659999999995
+      },
+      {
+        "enqueue_us": 1.466465,
+        "completed_us": 3.963572
+      },
+      {
+        "enqueue_us": 1.120482,
+        "completed_us": 3.2542740000000006
+      },
+      {
+        "enqueue_us": 1.1137720000000002,
+        "completed_us": 3.111702
+      },
+      {
+        "enqueue_us": 1.1550230000000001,
+        "completed_us": 3.9780529999999996
+      },
+      {
+        "enqueue_us": 1.109731,
+        "completed_us": 5.408536
+      },
+      {
+        "enqueue_us": 1.135472,
+        "completed_us": 3.257095
+      },
+      {
+        "enqueue_us": 1.147452,
+        "completed_us": 3.118023
+      },
+      {
+        "enqueue_us": 1.1738020000000002,
+        "completed_us": 3.411165
+      },
+      {
+        "enqueue_us": 1.118512,
+        "completed_us": 5.852212
+      },
+      {
+        "enqueue_us": 1.106872,
+        "completed_us": 3.1536730000000004
+      },
+      {
+        "enqueue_us": 1.1247719999999999,
+        "completed_us": 3.252554
+      },
+      {
+        "enqueue_us": 1.130162,
+        "completed_us": 3.286005
+      },
+      {
+        "enqueue_us": 1.1255320000000002,
+        "completed_us": 5.383657
+      },
+      {
+        "enqueue_us": 1.091731,
+        "completed_us": 4.162084
+      },
+      {
+        "enqueue_us": 1.107841,
+        "completed_us": 3.2489939999999997
+      },
+      {
+        "enqueue_us": 1.1389219999999998,
+        "completed_us": 3.112552
+      },
+      {
+        "enqueue_us": 1.1413129999999998,
+        "completed_us": 5.271686000000001
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 1,
+    "pair_position": 1,
+    "process_sequence": 7,
+    "process_wall_s": 3.2909363790022326,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 4.192844,
+        "completed_us": 44.296406000000005
+      },
+      {
+        "enqueue_us": 1.116332,
+        "completed_us": 41.329795000000004
+      },
+      {
+        "enqueue_us": 4.644359,
+        "completed_us": 43.978213000000004
+      },
+      {
+        "enqueue_us": 1.122762,
+        "completed_us": 42.950283
+      },
+      {
+        "enqueue_us": 1.045711,
+        "completed_us": 41.266874
+      },
+      {
+        "enqueue_us": 1.116802,
+        "completed_us": 41.032502
+      },
+      {
+        "enqueue_us": 1.057202,
+        "completed_us": 42.18997399999999
+      },
+      {
+        "enqueue_us": 1.0731619999999997,
+        "completed_us": 40.304894999999995
+      },
+      {
+        "enqueue_us": 2.1347519999999998,
+        "completed_us": 41.594857
+      },
+      {
+        "enqueue_us": 1.065322,
+        "completed_us": 39.786379
+      },
+      {
+        "enqueue_us": 2.1386220000000002,
+        "completed_us": 42.393106
+      },
+      {
+        "enqueue_us": 1.121642,
+        "completed_us": 40.380955
+      },
+      {
+        "enqueue_us": 2.0604009999999997,
+        "completed_us": 41.678118000000005
+      },
+      {
+        "enqueue_us": 1.090722,
+        "completed_us": 41.61236900000001
+      },
+      {
+        "enqueue_us": 2.134433,
+        "completed_us": 41.227284
+      },
+      {
+        "enqueue_us": 1.094242,
+        "completed_us": 39.126432
+      },
+      {
+        "enqueue_us": 1.0783319999999998,
+        "completed_us": 41.074512999999996
+      },
+      {
+        "enqueue_us": 1.097801,
+        "completed_us": 40.791269
+      },
+      {
+        "enqueue_us": 1.085442,
+        "completed_us": 41.378396
+      },
+      {
+        "enqueue_us": 1.093972,
+        "completed_us": 40.201403
+      },
+      {
+        "enqueue_us": 1.062121,
+        "completed_us": 39.540065999999996
+      },
+      {
+        "enqueue_us": 3.460607,
+        "completed_us": 42.766131
+      },
+      {
+        "enqueue_us": 1.0817610000000002,
+        "completed_us": 40.074432
+      },
+      {
+        "enqueue_us": 4.498366999999999,
+        "completed_us": 41.81868
+      },
+      {
+        "enqueue_us": 1.1031019999999998,
+        "completed_us": 38.206682
+      },
+      {
+        "enqueue_us": 5.544839,
+        "completed_us": 40.055492
+      },
+      {
+        "enqueue_us": 1.077392,
+        "completed_us": 40.459056
+      },
+      {
+        "enqueue_us": 1.101682,
+        "completed_us": 39.889300000000006
+      },
+      {
+        "enqueue_us": 2.0803520000000004,
+        "completed_us": 42.113313000000005
+      },
+      {
+        "enqueue_us": 1.110722,
+        "completed_us": 39.392055
+      },
+      {
+        "enqueue_us": 3.864531,
+        "completed_us": 43.077983999999994
+      },
+      {
+        "enqueue_us": 1.134952,
+        "completed_us": 40.017051
+      },
+      {
+        "enqueue_us": 3.210584,
+        "completed_us": 42.250845
+      },
+      {
+        "enqueue_us": 1.1115020000000002,
+        "completed_us": 39.132312000000006
+      },
+      {
+        "enqueue_us": 4.148574000000001,
+        "completed_us": 40.954032
+      },
+      {
+        "enqueue_us": 1.1108310000000001,
+        "completed_us": 39.459355
+      },
+      {
+        "enqueue_us": 1.1038219999999999,
+        "completed_us": 40.605698000000004
+      },
+      {
+        "enqueue_us": 1.062221,
+        "completed_us": 39.302023999999996
+      },
+      {
+        "enqueue_us": 1.0598610000000002,
+        "completed_us": 38.465274
+      },
+      {
+        "enqueue_us": 1.108732,
+        "completed_us": 40.839841
+      },
+      {
+        "enqueue_us": 1.101991,
+        "completed_us": 38.680237
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 1,
+    "pair_position": 0,
+    "process_sequence": 8,
+    "process_wall_s": 4.8635722039980465,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 5.185205,
+        "completed_us": 41.885762
+      },
+      {
+        "enqueue_us": 1.0948209999999998,
+        "completed_us": 41.412116000000005
+      },
+      {
+        "enqueue_us": 5.411607,
+        "completed_us": 42.087243
+      },
+      {
+        "enqueue_us": 1.147202,
+        "completed_us": 40.575127
+      },
+      {
+        "enqueue_us": 1.119172,
+        "completed_us": 40.40162600000001
+      },
+      {
+        "enqueue_us": 1.0988619999999998,
+        "completed_us": 39.377114999999996
+      },
+      {
+        "enqueue_us": 1.1416520000000001,
+        "completed_us": 38.511835
+      },
+      {
+        "enqueue_us": 5.225554999999999,
+        "completed_us": 40.367945
+      },
+      {
+        "enqueue_us": 1.110272,
+        "completed_us": 39.740608
+      },
+      {
+        "enqueue_us": 1.115672,
+        "completed_us": 39.159053
+      },
+      {
+        "enqueue_us": 2.161483,
+        "completed_us": 40.883751000000004
+      },
+      {
+        "enqueue_us": 1.1016320000000002,
+        "completed_us": 38.664657
+      },
+      {
+        "enqueue_us": 4.934762,
+        "completed_us": 40.615138
+      },
+      {
+        "enqueue_us": 1.1057219999999999,
+        "completed_us": 38.862079
+      },
+      {
+        "enqueue_us": 1.1544429999999999,
+        "completed_us": 40.776050000000005
+      },
+      {
+        "enqueue_us": 2.246584,
+        "completed_us": 41.862841
+      },
+      {
+        "enqueue_us": 1.1086420000000001,
+        "completed_us": 39.936641
+      },
+      {
+        "enqueue_us": 1.144892,
+        "completed_us": 40.535946
+      },
+      {
+        "enqueue_us": 1.135262,
+        "completed_us": 42.234444
+      },
+      {
+        "enqueue_us": 1.1228410000000002,
+        "completed_us": 41.94268100000001
+      },
+      {
+        "enqueue_us": 1.098652,
+        "completed_us": 39.789669
+      },
+      {
+        "enqueue_us": 1.153883,
+        "completed_us": 41.421517
+      },
+      {
+        "enqueue_us": 1.1033110000000002,
+        "completed_us": 39.774288999999996
+      },
+      {
+        "enqueue_us": 1.1402919999999999,
+        "completed_us": 41.080493000000004
+      },
+      {
+        "enqueue_us": 2.373755,
+        "completed_us": 41.441897
+      },
+      {
+        "enqueue_us": 1.156122,
+        "completed_us": 38.880479
+      },
+      {
+        "enqueue_us": 3.908672,
+        "completed_us": 39.885169999999995
+      },
+      {
+        "enqueue_us": 1.1552229999999999,
+        "completed_us": 38.786799
+      },
+      {
+        "enqueue_us": 1.111912,
+        "completed_us": 37.594686
+      },
+      {
+        "enqueue_us": 1.144992,
+        "completed_us": 39.689598
+      },
+      {
+        "enqueue_us": 1.1174119999999998,
+        "completed_us": 38.653127
+      },
+      {
+        "enqueue_us": 1.114202,
+        "completed_us": 38.376934999999996
+      },
+      {
+        "enqueue_us": 1.1503320000000001,
+        "completed_us": 38.894719
+      },
+      {
+        "enqueue_us": 2.2374629999999995,
+        "completed_us": 40.028911
+      },
+      {
+        "enqueue_us": 1.1189920000000002,
+        "completed_us": 38.235013
+      },
+      {
+        "enqueue_us": 4.361256,
+        "completed_us": 40.956152
+      },
+      {
+        "enqueue_us": 1.0962809999999998,
+        "completed_us": 37.577495000000006
+      },
+      {
+        "enqueue_us": 1.1358119999999998,
+        "completed_us": 37.921200000000006
+      },
+      {
+        "enqueue_us": 3.516577,
+        "completed_us": 40.274664
+      },
+      {
+        "enqueue_us": 1.1008719999999999,
+        "completed_us": 38.040181
+      },
+      {
+        "enqueue_us": 1.1138620000000001,
+        "completed_us": 39.87069
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 1,
+    "pair_position": 1,
+    "process_sequence": 9,
+    "process_wall_s": 4.849382551001327,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.081881,
+        "completed_us": 2.231143
+      },
+      {
+        "enqueue_us": 1.094582,
+        "completed_us": 2.391915
+      },
+      {
+        "enqueue_us": 1.107712,
+        "completed_us": 2.230554
+      },
+      {
+        "enqueue_us": 4.9846129999999995,
+        "completed_us": 5.854882
+      },
+      {
+        "enqueue_us": 1.051711,
+        "completed_us": 3.8949409999999998
+      },
+      {
+        "enqueue_us": 1.087421,
+        "completed_us": 2.233893
+      },
+      {
+        "enqueue_us": 1.100702,
+        "completed_us": 2.402185
+      },
+      {
+        "enqueue_us": 1.1408530000000001,
+        "completed_us": 2.2297839999999995
+      },
+      {
+        "enqueue_us": 1.1166019999999999,
+        "completed_us": 2.3360149999999997
+      },
+      {
+        "enqueue_us": 4.270645,
+        "completed_us": 5.510948
+      },
+      {
+        "enqueue_us": 1.054571,
+        "completed_us": 4.030822
+      },
+      {
+        "enqueue_us": 1.1162619999999999,
+        "completed_us": 2.377535
+      },
+      {
+        "enqueue_us": 1.115672,
+        "completed_us": 2.232004
+      },
+      {
+        "enqueue_us": 1.1235719999999998,
+        "completed_us": 2.729768
+      },
+      {
+        "enqueue_us": 3.914582,
+        "completed_us": 5.308457000000001
+      },
+      {
+        "enqueue_us": 1.063491,
+        "completed_us": 3.938991
+      },
+      {
+        "enqueue_us": 1.114302,
+        "completed_us": 2.3870150000000003
+      },
+      {
+        "enqueue_us": 1.0933419999999998,
+        "completed_us": 2.230204
+      },
+      {
+        "enqueue_us": 4.809769999999999,
+        "completed_us": 5.881512000000001
+      },
+      {
+        "enqueue_us": 1.048501,
+        "completed_us": 3.654658
+      },
+      {
+        "enqueue_us": 1.114322,
+        "completed_us": 2.2311129999999997
+      },
+      {
+        "enqueue_us": 1.119372,
+        "completed_us": 2.387556
+      },
+      {
+        "enqueue_us": 1.1183020000000001,
+        "completed_us": 2.230263
+      },
+      {
+        "enqueue_us": 1.1155620000000002,
+        "completed_us": 2.2291239999999997
+      },
+      {
+        "enqueue_us": 5.230554999999999,
+        "completed_us": 6.218735000000001
+      },
+      {
+        "enqueue_us": 1.1037219999999999,
+        "completed_us": 2.6962689999999996
+      },
+      {
+        "enqueue_us": 1.108201,
+        "completed_us": 3.651378
+      },
+      {
+        "enqueue_us": 1.112392,
+        "completed_us": 2.389125
+      },
+      {
+        "enqueue_us": 2.8307599999999997,
+        "completed_us": 2.83465
+      },
+      {
+        "enqueue_us": 3.0618630000000002,
+        "completed_us": 5.1996150000000005
+      },
+      {
+        "enqueue_us": 1.0513409999999999,
+        "completed_us": 3.83672
+      },
+      {
+        "enqueue_us": 1.116972,
+        "completed_us": 2.392216
+      },
+      {
+        "enqueue_us": 1.121421,
+        "completed_us": 2.230033
+      },
+      {
+        "enqueue_us": 5.373887,
+        "completed_us": 6.425038000000001
+      },
+      {
+        "enqueue_us": 1.0593510000000002,
+        "completed_us": 2.746879
+      },
+      {
+        "enqueue_us": 1.072541,
+        "completed_us": 3.5242070000000005
+      },
+      {
+        "enqueue_us": 1.081361,
+        "completed_us": 2.7518890000000003
+      },
+      {
+        "enqueue_us": 1.105071,
+        "completed_us": 2.235273
+      },
+      {
+        "enqueue_us": 1.122712,
+        "completed_us": 2.230194
+      },
+      {
+        "enqueue_us": 1.117012,
+        "completed_us": 5.396317
+      },
+      {
+        "enqueue_us": 4.532717000000001,
+        "completed_us": 6.326966
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 1,
+    "pair_position": 0,
+    "process_sequence": 10,
+    "process_wall_s": 3.3071844579972094,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.121041,
+        "completed_us": 2.421005
+      },
+      {
+        "enqueue_us": 3.304875,
+        "completed_us": 5.061204
+      },
+      {
+        "enqueue_us": 1.143942,
+        "completed_us": 3.156373
+      },
+      {
+        "enqueue_us": 1.122231,
+        "completed_us": 2.231673
+      },
+      {
+        "enqueue_us": 1.144872,
+        "completed_us": 2.372305
+      },
+      {
+        "enqueue_us": 1.141092,
+        "completed_us": 2.230374
+      },
+      {
+        "enqueue_us": 2.089022,
+        "completed_us": 2.4069249999999998
+      },
+      {
+        "enqueue_us": 2.8473800000000002,
+        "completed_us": 4.628489
+      },
+      {
+        "enqueue_us": 1.133702,
+        "completed_us": 3.161333
+      },
+      {
+        "enqueue_us": 1.1422820000000002,
+        "completed_us": 2.2335540000000003
+      },
+      {
+        "enqueue_us": 1.127101,
+        "completed_us": 2.371215
+      },
+      {
+        "enqueue_us": 1.139812,
+        "completed_us": 2.230803
+      },
+      {
+        "enqueue_us": 4.106733999999999,
+        "completed_us": 5.70643
+      },
+      {
+        "enqueue_us": 1.102922,
+        "completed_us": 3.159274
+      },
+      {
+        "enqueue_us": 1.118572,
+        "completed_us": 2.2313630000000004
+      },
+      {
+        "enqueue_us": 1.118332,
+        "completed_us": 2.230664
+      },
+      {
+        "enqueue_us": 1.154862,
+        "completed_us": 2.3759050000000004
+      },
+      {
+        "enqueue_us": 1.139462,
+        "completed_us": 2.4432460000000003
+      },
+      {
+        "enqueue_us": 3.139153,
+        "completed_us": 4.911061000000001
+      },
+      {
+        "enqueue_us": 1.139332,
+        "completed_us": 3.2396439999999997
+      },
+      {
+        "enqueue_us": 1.125292,
+        "completed_us": 2.231134
+      },
+      {
+        "enqueue_us": 1.1463720000000002,
+        "completed_us": 2.230283
+      },
+      {
+        "enqueue_us": 1.1446420000000002,
+        "completed_us": 2.365695
+      },
+      {
+        "enqueue_us": 4.157564000000001,
+        "completed_us": 5.4461379999999995
+      },
+      {
+        "enqueue_us": 1.096411,
+        "completed_us": 3.1704830000000004
+      },
+      {
+        "enqueue_us": 1.113602,
+        "completed_us": 2.230134
+      },
+      {
+        "enqueue_us": 1.140232,
+        "completed_us": 2.230883
+      },
+      {
+        "enqueue_us": 1.1415719999999998,
+        "completed_us": 2.3710549999999997
+      },
+      {
+        "enqueue_us": 1.151532,
+        "completed_us": 2.5996270000000004
+      },
+      {
+        "enqueue_us": 3.219484,
+        "completed_us": 5.015083
+      },
+      {
+        "enqueue_us": 1.125972,
+        "completed_us": 3.167454
+      },
+      {
+        "enqueue_us": 1.1307820000000002,
+        "completed_us": 2.236543
+      },
+      {
+        "enqueue_us": 1.153442,
+        "completed_us": 2.232074
+      },
+      {
+        "enqueue_us": 1.163452,
+        "completed_us": 2.3878250000000003
+      },
+      {
+        "enqueue_us": 1.7731890000000001,
+        "completed_us": 2.2604140000000004
+      },
+      {
+        "enqueue_us": 3.312355,
+        "completed_us": 5.164044
+      },
+      {
+        "enqueue_us": 1.0946219999999998,
+        "completed_us": 3.0752129999999998
+      },
+      {
+        "enqueue_us": 1.116272,
+        "completed_us": 2.2358130000000003
+      },
+      {
+        "enqueue_us": 1.1237219999999999,
+        "completed_us": 2.373035
+      },
+      {
+        "enqueue_us": 1.119452,
+        "completed_us": 2.230414
+      },
+      {
+        "enqueue_us": 1.1458620000000002,
+        "completed_us": 3.2898850000000004
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 1,
+    "pair_position": 1,
+    "process_sequence": 11,
+    "process_wall_s": 3.287554968999757,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.150603,
+        "completed_us": 40.80326
+      },
+      {
+        "enqueue_us": 1.1677829999999998,
+        "completed_us": 40.982452
+      },
+      {
+        "enqueue_us": 1.1032520000000001,
+        "completed_us": 42.723821
+      },
+      {
+        "enqueue_us": 1.175452,
+        "completed_us": 41.831241
+      },
+      {
+        "enqueue_us": 1.122742,
+        "completed_us": 43.11247399999999
+      },
+      {
+        "enqueue_us": 3.043042,
+        "completed_us": 41.60284899999999
+      },
+      {
+        "enqueue_us": 1.1392719999999998,
+        "completed_us": 43.638709999999996
+      },
+      {
+        "enqueue_us": 4.349826,
+        "completed_us": 44.478498
+      },
+      {
+        "enqueue_us": 1.149003,
+        "completed_us": 41.241704999999996
+      },
+      {
+        "enqueue_us": 2.193263,
+        "completed_us": 44.469108
+      },
+      {
+        "enqueue_us": 1.1492620000000002,
+        "completed_us": 42.844121
+      },
+      {
+        "enqueue_us": 1.1856119999999999,
+        "completed_us": 39.989841999999996
+      },
+      {
+        "enqueue_us": 1.1353209999999998,
+        "completed_us": 46.834093
+      },
+      {
+        "enqueue_us": 5.983103,
+        "completed_us": 45.803133
+      },
+      {
+        "enqueue_us": 22.513087,
+        "completed_us": 56.883559999999996
+      },
+      {
+        "enqueue_us": 1.186912,
+        "completed_us": 52.896587
+      },
+      {
+        "enqueue_us": 1.283213,
+        "completed_us": 46.86090300000001
+      },
+      {
+        "enqueue_us": 1.133902,
+        "completed_us": 48.442601
+      },
+      {
+        "enqueue_us": 1.157432,
+        "completed_us": 42.567269
+      },
+      {
+        "enqueue_us": 3.046502,
+        "completed_us": 48.621222
+      },
+      {
+        "enqueue_us": 3.9077210000000004,
+        "completed_us": 46.43573899999999
+      },
+      {
+        "enqueue_us": 5.299085999999999,
+        "completed_us": 44.480429
+      },
+      {
+        "enqueue_us": 1.1140919999999999,
+        "completed_us": 43.103834
+      },
+      {
+        "enqueue_us": 1.1413820000000001,
+        "completed_us": 43.300217
+      },
+      {
+        "enqueue_us": 1.145902,
+        "completed_us": 42.223005
+      },
+      {
+        "enqueue_us": 1.146062,
+        "completed_us": 39.697608
+      },
+      {
+        "enqueue_us": 1.1549920000000002,
+        "completed_us": 40.71309
+      },
+      {
+        "enqueue_us": 1.104621,
+        "completed_us": 38.546806000000004
+      },
+      {
+        "enqueue_us": 1.1715419999999999,
+        "completed_us": 38.091502
+      },
+      {
+        "enqueue_us": 1.152292,
+        "completed_us": 39.241763
+      },
+      {
+        "enqueue_us": 1.1103120000000002,
+        "completed_us": 38.099282
+      },
+      {
+        "enqueue_us": 1.143662,
+        "completed_us": 40.337485
+      },
+      {
+        "enqueue_us": 4.379136,
+        "completed_us": 39.543186999999996
+      },
+      {
+        "enqueue_us": 1.140012,
+        "completed_us": 40.946312
+      },
+      {
+        "enqueue_us": 1.1272010000000001,
+        "completed_us": 37.924329
+      },
+      {
+        "enqueue_us": 11.767275000000001,
+        "completed_us": 42.214276000000005
+      },
+      {
+        "enqueue_us": 1.1349310000000001,
+        "completed_us": 40.082212
+      },
+      {
+        "enqueue_us": 32.160548999999996,
+        "completed_us": 41.77027
+      },
+      {
+        "enqueue_us": 1.1250520000000002,
+        "completed_us": 41.37954700000001
+      },
+      {
+        "enqueue_us": 5.2338450000000005,
+        "completed_us": 40.782599000000005
+      },
+      {
+        "enqueue_us": 1.149442,
+        "completed_us": 40.67432900000001
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 2,
+    "pair_position": 0,
+    "process_sequence": 12,
+    "process_wall_s": 4.9600828549992,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 2.283604,
+        "completed_us": 40.612118
+      },
+      {
+        "enqueue_us": 5.594799,
+        "completed_us": 39.518397
+      },
+      {
+        "enqueue_us": 2.3088039999999994,
+        "completed_us": 39.401985
+      },
+      {
+        "enqueue_us": 1.0613219999999999,
+        "completed_us": 39.120483
+      },
+      {
+        "enqueue_us": 4.804580999999999,
+        "completed_us": 40.699489
+      },
+      {
+        "enqueue_us": 1.1125720000000001,
+        "completed_us": 38.58720699999999
+      },
+      {
+        "enqueue_us": 1.068951,
+        "completed_us": 38.381765
+      },
+      {
+        "enqueue_us": 4.9635419999999995,
+        "completed_us": 40.227914
+      },
+      {
+        "enqueue_us": 1.048601,
+        "completed_us": 38.716208
+      },
+      {
+        "enqueue_us": 1.0684010000000002,
+        "completed_us": 37.797528
+      },
+      {
+        "enqueue_us": 3.600138,
+        "completed_us": 41.200084
+      },
+      {
+        "enqueue_us": 1.0861020000000001,
+        "completed_us": 38.493946
+      },
+      {
+        "enqueue_us": 1.1040519999999998,
+        "completed_us": 38.362505
+      },
+      {
+        "enqueue_us": 1.106541,
+        "completed_us": 40.313725
+      },
+      {
+        "enqueue_us": 1.089231,
+        "completed_us": 35.06626
+      },
+      {
+        "enqueue_us": 3.957451,
+        "completed_us": 40.030332
+      },
+      {
+        "enqueue_us": 1.8263289999999999,
+        "completed_us": 37.574436
+      },
+      {
+        "enqueue_us": 1.047131,
+        "completed_us": 36.498005
+      },
+      {
+        "enqueue_us": 1.052251,
+        "completed_us": 35.981909
+      },
+      {
+        "enqueue_us": 1.083222,
+        "completed_us": 36.354814
+      },
+      {
+        "enqueue_us": 1.092031,
+        "completed_us": 36.437564
+      },
+      {
+        "enqueue_us": 4.0833129999999995,
+        "completed_us": 36.602196
+      },
+      {
+        "enqueue_us": 2.1236330000000003,
+        "completed_us": 38.82176
+      },
+      {
+        "enqueue_us": 1.0490510000000002,
+        "completed_us": 37.127520999999994
+      },
+      {
+        "enqueue_us": 1.097022,
+        "completed_us": 38.86887
+      },
+      {
+        "enqueue_us": 2.2073539999999996,
+        "completed_us": 39.069052000000006
+      },
+      {
+        "enqueue_us": 1.0958719999999997,
+        "completed_us": 36.683727
+      },
+      {
+        "enqueue_us": 1.0611510000000002,
+        "completed_us": 37.56868599999999
+      },
+      {
+        "enqueue_us": 1.058712,
+        "completed_us": 37.261503000000005
+      },
+      {
+        "enqueue_us": 2.494857,
+        "completed_us": 39.961372000000004
+      },
+      {
+        "enqueue_us": 1.047261,
+        "completed_us": 37.93803
+      },
+      {
+        "enqueue_us": 1.076911,
+        "completed_us": 38.470646
+      },
+      {
+        "enqueue_us": 4.2190639999999995,
+        "completed_us": 40.010611000000004
+      },
+      {
+        "enqueue_us": 1.085772,
+        "completed_us": 39.493307
+      },
+      {
+        "enqueue_us": 4.664529,
+        "completed_us": 39.308805
+      },
+      {
+        "enqueue_us": 1.0565710000000001,
+        "completed_us": 39.259523
+      },
+      {
+        "enqueue_us": 1.084742,
+        "completed_us": 40.282765
+      },
+      {
+        "enqueue_us": 3.8301899999999995,
+        "completed_us": 42.067854
+      },
+      {
+        "enqueue_us": 1.0655409999999998,
+        "completed_us": 39.349824999999996
+      },
+      {
+        "enqueue_us": 10.401809,
+        "completed_us": 41.134563
+      },
+      {
+        "enqueue_us": 1.087742,
+        "completed_us": 42.081894
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 2,
+    "pair_position": 1,
+    "process_sequence": 13,
+    "process_wall_s": 4.8113705020005,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.156202,
+        "completed_us": 2.2332129999999997
+      },
+      {
+        "enqueue_us": 1.1501430000000001,
+        "completed_us": 2.2388439999999994
+      },
+      {
+        "enqueue_us": 1.162202,
+        "completed_us": 2.374855
+      },
+      {
+        "enqueue_us": 3.7517300000000002,
+        "completed_us": 4.860061
+      },
+      {
+        "enqueue_us": 1.152153,
+        "completed_us": 2.231354
+      },
+      {
+        "enqueue_us": 1.1523919999999999,
+        "completed_us": 2.517336
+      },
+      {
+        "enqueue_us": 1.154153,
+        "completed_us": 2.231254
+      },
+      {
+        "enqueue_us": 1.164992,
+        "completed_us": 2.2396239999999996
+      },
+      {
+        "enqueue_us": 1.190932,
+        "completed_us": 2.382375
+      },
+      {
+        "enqueue_us": 4.7534,
+        "completed_us": 5.354436
+      },
+      {
+        "enqueue_us": 1.159532,
+        "completed_us": 2.231874
+      },
+      {
+        "enqueue_us": 1.155772,
+        "completed_us": 2.522846
+      },
+      {
+        "enqueue_us": 1.1545220000000003,
+        "completed_us": 2.2321839999999997
+      },
+      {
+        "enqueue_us": 1.1546119999999997,
+        "completed_us": 2.235424
+      },
+      {
+        "enqueue_us": 1.172642,
+        "completed_us": 2.7577890000000003
+      },
+      {
+        "enqueue_us": 4.123113,
+        "completed_us": 5.554098
+      },
+      {
+        "enqueue_us": 1.145252,
+        "completed_us": 2.232244
+      },
+      {
+        "enqueue_us": 1.1476220000000001,
+        "completed_us": 2.5212660000000002
+      },
+      {
+        "enqueue_us": 1.149563,
+        "completed_us": 2.231394
+      },
+      {
+        "enqueue_us": 1.1685519999999998,
+        "completed_us": 2.2481730000000004
+      },
+      {
+        "enqueue_us": 1.189063,
+        "completed_us": 2.4737370000000003
+      },
+      {
+        "enqueue_us": 3.6022179999999997,
+        "completed_us": 5.062583
+      },
+      {
+        "enqueue_us": 1.130662,
+        "completed_us": 2.233434
+      },
+      {
+        "enqueue_us": 1.118092,
+        "completed_us": 2.534926
+      },
+      {
+        "enqueue_us": 1.1185019999999999,
+        "completed_us": 2.233384
+      },
+      {
+        "enqueue_us": 1.1380620000000001,
+        "completed_us": 2.252164
+      },
+      {
+        "enqueue_us": 1.167602,
+        "completed_us": 2.539506
+      },
+      {
+        "enqueue_us": 3.662219,
+        "completed_us": 5.038013
+      },
+      {
+        "enqueue_us": 1.1303310000000002,
+        "completed_us": 2.232363
+      },
+      {
+        "enqueue_us": 1.125782,
+        "completed_us": 2.5219069999999997
+      },
+      {
+        "enqueue_us": 1.121732,
+        "completed_us": 2.232453
+      },
+      {
+        "enqueue_us": 1.1310719999999999,
+        "completed_us": 2.238864
+      },
+      {
+        "enqueue_us": 1.159322,
+        "completed_us": 3.388366
+      },
+      {
+        "enqueue_us": 4.183224,
+        "completed_us": 5.450527
+      },
+      {
+        "enqueue_us": 1.119452,
+        "completed_us": 2.524137
+      },
+      {
+        "enqueue_us": 1.118431,
+        "completed_us": 2.2333230000000004
+      },
+      {
+        "enqueue_us": 1.1231520000000002,
+        "completed_us": 2.237364
+      },
+      {
+        "enqueue_us": 1.1366219999999998,
+        "completed_us": 2.376625
+      },
+      {
+        "enqueue_us": 4.532368,
+        "completed_us": 5.68572
+      },
+      {
+        "enqueue_us": 1.1510019999999999,
+        "completed_us": 2.2319430000000002
+      },
+      {
+        "enqueue_us": 1.151872,
+        "completed_us": 2.516207
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 2,
+    "pair_position": 0,
+    "process_sequence": 14,
+    "process_wall_s": 3.289880822001578,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.088962,
+        "completed_us": 2.227264
+      },
+      {
+        "enqueue_us": 1.100032,
+        "completed_us": 2.236874
+      },
+      {
+        "enqueue_us": 1.1020809999999999,
+        "completed_us": 3.695439
+      },
+      {
+        "enqueue_us": 4.279764999999999,
+        "completed_us": 7.939382999999999
+      },
+      {
+        "enqueue_us": 1.046381,
+        "completed_us": 3.134974
+      },
+      {
+        "enqueue_us": 1.096971,
+        "completed_us": 2.231503
+      },
+      {
+        "enqueue_us": 1.1366420000000002,
+        "completed_us": 2.373945
+      },
+      {
+        "enqueue_us": 1.1263919999999998,
+        "completed_us": 2.227884
+      },
+      {
+        "enqueue_us": 5.73206,
+        "completed_us": 6.560389
+      },
+      {
+        "enqueue_us": 1.066831,
+        "completed_us": 2.9601610000000003
+      },
+      {
+        "enqueue_us": 1.092562,
+        "completed_us": 3.8088
+      },
+      {
+        "enqueue_us": 4.387576,
+        "completed_us": 5.672149999999999
+      },
+      {
+        "enqueue_us": 1.0971710000000001,
+        "completed_us": 3.680649
+      },
+      {
+        "enqueue_us": 1.120271,
+        "completed_us": 2.5098759999999998
+      },
+      {
+        "enqueue_us": 1.1095320000000002,
+        "completed_us": 2.241764
+      },
+      {
+        "enqueue_us": 1.1232719999999998,
+        "completed_us": 2.366715
+      },
+      {
+        "enqueue_us": 5.553078,
+        "completed_us": 6.165025000000001
+      },
+      {
+        "enqueue_us": 1.088001,
+        "completed_us": 2.8177800000000004
+      },
+      {
+        "enqueue_us": 1.1030309999999999,
+        "completed_us": 3.656188
+      },
+      {
+        "enqueue_us": 1.112522,
+        "completed_us": 2.230584
+      },
+      {
+        "enqueue_us": 1.119222,
+        "completed_us": 2.376975
+      },
+      {
+        "enqueue_us": 4.434417000000001,
+        "completed_us": 6.128584000000001
+      },
+      {
+        "enqueue_us": 1.037521,
+        "completed_us": 3.816731
+      },
+      {
+        "enqueue_us": 1.092351,
+        "completed_us": 2.231313
+      },
+      {
+        "enqueue_us": 1.096992,
+        "completed_us": 2.234444
+      },
+      {
+        "enqueue_us": 1.094781,
+        "completed_us": 2.365485
+      },
+      {
+        "enqueue_us": 4.661789000000001,
+        "completed_us": 6.417277
+      },
+      {
+        "enqueue_us": 1.078662,
+        "completed_us": 3.485397
+      },
+      {
+        "enqueue_us": 1.0738709999999998,
+        "completed_us": 2.239334
+      },
+      {
+        "enqueue_us": 1.105832,
+        "completed_us": 2.368595
+      },
+      {
+        "enqueue_us": 1.116652,
+        "completed_us": 2.225853
+      },
+      {
+        "enqueue_us": 4.429347,
+        "completed_us": 6.329267000000001
+      },
+      {
+        "enqueue_us": 1.100612,
+        "completed_us": 3.170084
+      },
+      {
+        "enqueue_us": 1.1194110000000002,
+        "completed_us": 2.380034
+      },
+      {
+        "enqueue_us": 1.159593,
+        "completed_us": 2.655539
+      },
+      {
+        "enqueue_us": 1.112741,
+        "completed_us": 2.2273129999999997
+      },
+      {
+        "enqueue_us": 1.1203020000000001,
+        "completed_us": 2.2273039999999997
+      },
+      {
+        "enqueue_us": 1.1151209999999998,
+        "completed_us": 3.204783
+      },
+      {
+        "enqueue_us": 4.360265999999999,
+        "completed_us": 6.017854000000001
+      },
+      {
+        "enqueue_us": 1.120372,
+        "completed_us": 3.558828
+      },
+      {
+        "enqueue_us": 1.113731,
+        "completed_us": 2.87419
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 2,
+    "pair_position": 1,
+    "process_sequence": 15,
+    "process_wall_s": 3.299401897998905,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.133402,
+        "completed_us": 3.122903
+      },
+      {
+        "enqueue_us": 1.147162,
+        "completed_us": 3.228094
+      },
+      {
+        "enqueue_us": 6.525638,
+        "completed_us": 7.652270000000001
+      },
+      {
+        "enqueue_us": 1.129743,
+        "completed_us": 4.1670039999999995
+      },
+      {
+        "enqueue_us": 1.149512,
+        "completed_us": 3.226584
+      },
+      {
+        "enqueue_us": 6.1616550000000005,
+        "completed_us": 7.259457
+      },
+      {
+        "enqueue_us": 1.129072,
+        "completed_us": 3.4838270000000002
+      },
+      {
+        "enqueue_us": 1.137912,
+        "completed_us": 3.406146
+      },
+      {
+        "enqueue_us": 1.1467319999999999,
+        "completed_us": 4.75378
+      },
+      {
+        "enqueue_us": 4.7736,
+        "completed_us": 7.167216
+      },
+      {
+        "enqueue_us": 1.099171,
+        "completed_us": 4.068122000000001
+      },
+      {
+        "enqueue_us": 1.1174119999999998,
+        "completed_us": 4.181524
+      },
+      {
+        "enqueue_us": 4.893532,
+        "completed_us": 7.740312
+      },
+      {
+        "enqueue_us": 1.132802,
+        "completed_us": 3.371866
+      },
+      {
+        "enqueue_us": 1.134302,
+        "completed_us": 3.1346529999999997
+      },
+      {
+        "enqueue_us": 1.162962,
+        "completed_us": 3.253564
+      },
+      {
+        "enqueue_us": 4.390286999999999,
+        "completed_us": 6.881273
+      },
+      {
+        "enqueue_us": 1.1399820000000003,
+        "completed_us": 4.042523
+      },
+      {
+        "enqueue_us": 1.163912,
+        "completed_us": 3.1292329999999997
+      },
+      {
+        "enqueue_us": 1.137442,
+        "completed_us": 3.228284
+      },
+      {
+        "enqueue_us": 4.9991520000000005,
+        "completed_us": 8.176915999999999
+      },
+      {
+        "enqueue_us": 1.128242,
+        "completed_us": 3.127683
+      },
+      {
+        "enqueue_us": 1.1438819999999998,
+        "completed_us": 3.086262
+      },
+      {
+        "enqueue_us": 6.651781,
+        "completed_us": 7.50039
+      },
+      {
+        "enqueue_us": 1.1125509999999998,
+        "completed_us": 4.118293
+      },
+      {
+        "enqueue_us": 1.104902,
+        "completed_us": 3.121913
+      },
+      {
+        "enqueue_us": 1.1293019999999998,
+        "completed_us": 3.76416
+      },
+      {
+        "enqueue_us": 4.949602,
+        "completed_us": 7.788842
+      },
+      {
+        "enqueue_us": 1.122012,
+        "completed_us": 3.366946
+      },
+      {
+        "enqueue_us": 1.182262,
+        "completed_us": 3.1204929999999997
+      },
+      {
+        "enqueue_us": 1.1420919999999999,
+        "completed_us": 3.237374
+      },
+      {
+        "enqueue_us": 4.216743999999999,
+        "completed_us": 7.262167000000001
+      },
+      {
+        "enqueue_us": 1.106381,
+        "completed_us": 3.399105
+      },
+      {
+        "enqueue_us": 1.118162,
+        "completed_us": 3.233184
+      },
+      {
+        "enqueue_us": 6.161445,
+        "completed_us": 8.286147999999999
+      },
+      {
+        "enqueue_us": 1.1066209999999999,
+        "completed_us": 3.76303
+      },
+      {
+        "enqueue_us": 1.117201,
+        "completed_us": 3.1173130000000002
+      },
+      {
+        "enqueue_us": 1.1755920000000002,
+        "completed_us": 3.2520040000000003
+      },
+      {
+        "enqueue_us": 3.8099900000000004,
+        "completed_us": 6.867982
+      },
+      {
+        "enqueue_us": 1.138462,
+        "completed_us": 3.390356
+      },
+      {
+        "enqueue_us": 1.122182,
+        "completed_us": 3.120373
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 2,
+    "pair_position": 0,
+    "process_sequence": 16,
+    "process_wall_s": 3.346905667000101,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.065191,
+        "completed_us": 3.3708050000000003
+      },
+      {
+        "enqueue_us": 1.0868019999999998,
+        "completed_us": 3.120383
+      },
+      {
+        "enqueue_us": 5.554069,
+        "completed_us": 6.758230999999999
+      },
+      {
+        "enqueue_us": 1.038491,
+        "completed_us": 3.8118610000000004
+      },
+      {
+        "enqueue_us": 1.056581,
+        "completed_us": 3.380855
+      },
+      {
+        "enqueue_us": 1.0638519999999998,
+        "completed_us": 3.1257930000000003
+      },
+      {
+        "enqueue_us": 5.275416,
+        "completed_us": 6.371497000000001
+      },
+      {
+        "enqueue_us": 1.097062,
+        "completed_us": 3.801861
+      },
+      {
+        "enqueue_us": 1.1319919999999999,
+        "completed_us": 3.385245
+      },
+      {
+        "enqueue_us": 1.113682,
+        "completed_us": 3.124473
+      },
+      {
+        "enqueue_us": 5.874012,
+        "completed_us": 7.308046999999999
+      },
+      {
+        "enqueue_us": 1.050912,
+        "completed_us": 3.72434
+      },
+      {
+        "enqueue_us": 1.0726410000000002,
+        "completed_us": 3.415926
+      },
+      {
+        "enqueue_us": 1.0836109999999999,
+        "completed_us": 3.5396170000000002
+      },
+      {
+        "enqueue_us": 4.814811,
+        "completed_us": 7.416658999999999
+      },
+      {
+        "enqueue_us": 1.0781910000000001,
+        "completed_us": 4.029672
+      },
+      {
+        "enqueue_us": 1.1133320000000002,
+        "completed_us": 3.1230230000000003
+      },
+      {
+        "enqueue_us": 1.111552,
+        "completed_us": 5.6696100000000005
+      },
+      {
+        "enqueue_us": 1.066641,
+        "completed_us": 4.514817
+      },
+      {
+        "enqueue_us": 1.080752,
+        "completed_us": 3.3850260000000003
+      },
+      {
+        "enqueue_us": 1.098122,
+        "completed_us": 3.131393
+      },
+      {
+        "enqueue_us": 1.102282,
+        "completed_us": 3.2274339999999997
+      },
+      {
+        "enqueue_us": 3.590018,
+        "completed_us": 7.061665
+      },
+      {
+        "enqueue_us": 1.1214819999999999,
+        "completed_us": 3.378015
+      },
+      {
+        "enqueue_us": 1.134592,
+        "completed_us": 3.129383
+      },
+      {
+        "enqueue_us": 5.198635,
+        "completed_us": 5.979004
+      },
+      {
+        "enqueue_us": 1.052911,
+        "completed_us": 3.85708
+      },
+      {
+        "enqueue_us": 1.0588410000000001,
+        "completed_us": 3.376426
+      },
+      {
+        "enqueue_us": 1.0965809999999998,
+        "completed_us": 3.1160530000000004
+      },
+      {
+        "enqueue_us": 1.092961,
+        "completed_us": 3.4014660000000005
+      },
+      {
+        "enqueue_us": 4.863391,
+        "completed_us": 8.154076
+      },
+      {
+        "enqueue_us": 1.049621,
+        "completed_us": 3.406596
+      },
+      {
+        "enqueue_us": 1.072711,
+        "completed_us": 3.314505
+      },
+      {
+        "enqueue_us": 4.633298,
+        "completed_us": 7.2438959999999994
+      },
+      {
+        "enqueue_us": 1.0383110000000002,
+        "completed_us": 3.729229
+      },
+      {
+        "enqueue_us": 1.0478420000000002,
+        "completed_us": 3.409096
+      },
+      {
+        "enqueue_us": 1.085262,
+        "completed_us": 3.227635
+      },
+      {
+        "enqueue_us": 3.7255589999999996,
+        "completed_us": 7.2434259999999995
+      },
+      {
+        "enqueue_us": 1.0928820000000001,
+        "completed_us": 3.389446
+      },
+      {
+        "enqueue_us": 1.104782,
+        "completed_us": 3.1275130000000004
+      },
+      {
+        "enqueue_us": 1.120972,
+        "completed_us": 3.2440339999999996
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 2,
+    "pair_position": 1,
+    "process_sequence": 17,
+    "process_wall_s": 3.350619512999401,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.117041,
+        "completed_us": 2.7868690000000003
+      },
+      {
+        "enqueue_us": 4.164644,
+        "completed_us": 5.955203
+      },
+      {
+        "enqueue_us": 1.051421,
+        "completed_us": 2.945671
+      },
+      {
+        "enqueue_us": 1.0983910000000001,
+        "completed_us": 2.5191260000000004
+      },
+      {
+        "enqueue_us": 1.117162,
+        "completed_us": 2.235074
+      },
+      {
+        "enqueue_us": 1.100792,
+        "completed_us": 2.389265
+      },
+      {
+        "enqueue_us": 4.893672,
+        "completed_us": 6.025004
+      },
+      {
+        "enqueue_us": 1.046391,
+        "completed_us": 2.956751
+      },
+      {
+        "enqueue_us": 1.081851,
+        "completed_us": 2.517857
+      },
+      {
+        "enqueue_us": 1.070441,
+        "completed_us": 2.2292530000000004
+      },
+      {
+        "enqueue_us": 1.0959919999999999,
+        "completed_us": 2.2347040000000002
+      },
+      {
+        "enqueue_us": 4.670059,
+        "completed_us": 5.6811300000000005
+      },
+      {
+        "enqueue_us": 1.0640910000000001,
+        "completed_us": 2.951031
+      },
+      {
+        "enqueue_us": 1.082831,
+        "completed_us": 2.229523
+      },
+      {
+        "enqueue_us": 1.1028120000000001,
+        "completed_us": 2.517747
+      },
+      {
+        "enqueue_us": 1.107732,
+        "completed_us": 2.230214
+      },
+      {
+        "enqueue_us": 1.121352,
+        "completed_us": 2.831109
+      },
+      {
+        "enqueue_us": 4.3154259999999995,
+        "completed_us": 5.905973
+      },
+      {
+        "enqueue_us": 1.0442909999999999,
+        "completed_us": 3.096993
+      },
+      {
+        "enqueue_us": 1.1016810000000001,
+        "completed_us": 2.5153760000000003
+      },
+      {
+        "enqueue_us": 1.1381320000000001,
+        "completed_us": 2.2294929999999997
+      },
+      {
+        "enqueue_us": 1.111052,
+        "completed_us": 2.560248
+      },
+      {
+        "enqueue_us": 4.0073419999999995,
+        "completed_us": 5.76863
+      },
+      {
+        "enqueue_us": 1.0647119999999999,
+        "completed_us": 3.114393
+      },
+      {
+        "enqueue_us": 1.089332,
+        "completed_us": 2.521837
+      },
+      {
+        "enqueue_us": 1.0976020000000002,
+        "completed_us": 2.230883
+      },
+      {
+        "enqueue_us": 1.1213919999999997,
+        "completed_us": 3.244335
+      },
+      {
+        "enqueue_us": 3.750039,
+        "completed_us": 5.661109000000001
+      },
+      {
+        "enqueue_us": 1.050762,
+        "completed_us": 2.955382
+      },
+      {
+        "enqueue_us": 1.086701,
+        "completed_us": 2.5233659999999998
+      },
+      {
+        "enqueue_us": 1.111242,
+        "completed_us": 2.2323139999999997
+      },
+      {
+        "enqueue_us": 1.1033320000000002,
+        "completed_us": 2.9589809999999996
+      },
+      {
+        "enqueue_us": 3.867161,
+        "completed_us": 5.783771
+      },
+      {
+        "enqueue_us": 1.0610909999999998,
+        "completed_us": 2.9881119999999997
+      },
+      {
+        "enqueue_us": 1.083711,
+        "completed_us": 2.518426
+      },
+      {
+        "enqueue_us": 1.088732,
+        "completed_us": 2.2325239999999997
+      },
+      {
+        "enqueue_us": 1.1137519999999999,
+        "completed_us": 2.386185
+      },
+      {
+        "enqueue_us": 4.70159,
+        "completed_us": 6.559279
+      },
+      {
+        "enqueue_us": 1.0313510000000001,
+        "completed_us": 3.132123
+      },
+      {
+        "enqueue_us": 1.0985019999999999,
+        "completed_us": 2.517567
+      },
+      {
+        "enqueue_us": 1.098021,
+        "completed_us": 2.237663
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 3,
+    "pair_position": 0,
+    "process_sequence": 18,
+    "process_wall_s": 3.313670400999399,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 6.755151,
+        "completed_us": 7.892823
+      },
+      {
+        "enqueue_us": 1.1330419999999999,
+        "completed_us": 3.2924249999999997
+      },
+      {
+        "enqueue_us": 1.241603,
+        "completed_us": 2.240683
+      },
+      {
+        "enqueue_us": 1.2098330000000002,
+        "completed_us": 2.3681650000000003
+      },
+      {
+        "enqueue_us": 1.2532140000000003,
+        "completed_us": 2.271594
+      },
+      {
+        "enqueue_us": 1.1698030000000001,
+        "completed_us": 3.304025
+      },
+      {
+        "enqueue_us": 5.370966999999999,
+        "completed_us": 6.880173
+      },
+      {
+        "enqueue_us": 1.1557920000000002,
+        "completed_us": 3.338795
+      },
+      {
+        "enqueue_us": 1.1867729999999999,
+        "completed_us": 2.376395
+      },
+      {
+        "enqueue_us": 5.113913999999999,
+        "completed_us": 6.4500079999999995
+      },
+      {
+        "enqueue_us": 1.118582,
+        "completed_us": 3.405446
+      },
+      {
+        "enqueue_us": 1.1473419999999999,
+        "completed_us": 2.223104
+      },
+      {
+        "enqueue_us": 1.1365520000000002,
+        "completed_us": 2.225943
+      },
+      {
+        "enqueue_us": 4.6194690000000005,
+        "completed_us": 5.920013
+      },
+      {
+        "enqueue_us": 1.091781,
+        "completed_us": 3.123093
+      },
+      {
+        "enqueue_us": 1.128952,
+        "completed_us": 2.509806
+      },
+      {
+        "enqueue_us": 1.158272,
+        "completed_us": 2.222524
+      },
+      {
+        "enqueue_us": 1.154462,
+        "completed_us": 2.2260329999999997
+      },
+      {
+        "enqueue_us": 1.192013,
+        "completed_us": 2.775499
+      },
+      {
+        "enqueue_us": 3.335426,
+        "completed_us": 5.538149000000001
+      },
+      {
+        "enqueue_us": 1.161912,
+        "completed_us": 3.450116
+      },
+      {
+        "enqueue_us": 1.198213,
+        "completed_us": 2.2274339999999997
+      },
+      {
+        "enqueue_us": 1.651427,
+        "completed_us": 2.230263
+      },
+      {
+        "enqueue_us": 1.188363,
+        "completed_us": 2.400976
+      },
+      {
+        "enqueue_us": 4.109393,
+        "completed_us": 5.893492
+      },
+      {
+        "enqueue_us": 1.107872,
+        "completed_us": 3.384976
+      },
+      {
+        "enqueue_us": 1.2341330000000001,
+        "completed_us": 2.223393
+      },
+      {
+        "enqueue_us": 1.248933,
+        "completed_us": 2.223044
+      },
+      {
+        "enqueue_us": 1.262233,
+        "completed_us": 2.3012140000000003
+      },
+      {
+        "enqueue_us": 1.288513,
+        "completed_us": 4.1965639999999995
+      },
+      {
+        "enqueue_us": 3.7569899999999996,
+        "completed_us": 5.717071
+      },
+      {
+        "enqueue_us": 1.133312,
+        "completed_us": 3.363055
+      },
+      {
+        "enqueue_us": 1.1538320000000002,
+        "completed_us": 2.235314
+      },
+      {
+        "enqueue_us": 1.167792,
+        "completed_us": 2.4477560000000005
+      },
+      {
+        "enqueue_us": 3.9211309999999995,
+        "completed_us": 5.8000810000000005
+      },
+      {
+        "enqueue_us": 1.0806109999999998,
+        "completed_us": 3.429206
+      },
+      {
+        "enqueue_us": 1.120872,
+        "completed_us": 2.222203
+      },
+      {
+        "enqueue_us": 1.166773,
+        "completed_us": 2.233414
+      },
+      {
+        "enqueue_us": 1.2820539999999998,
+        "completed_us": 3.005452
+      },
+      {
+        "enqueue_us": 3.158613,
+        "completed_us": 5.022873
+      },
+      {
+        "enqueue_us": 1.327274,
+        "completed_us": 3.3949059999999998
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 3,
+    "pair_position": 1,
+    "process_sequence": 19,
+    "process_wall_s": 3.3025927910020982,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.089181,
+        "completed_us": 3.092803
+      },
+      {
+        "enqueue_us": 1.135041,
+        "completed_us": 4.018582
+      },
+      {
+        "enqueue_us": 4.5595680000000005,
+        "completed_us": 8.621691
+      },
+      {
+        "enqueue_us": 1.086301,
+        "completed_us": 3.222714
+      },
+      {
+        "enqueue_us": 1.097452,
+        "completed_us": 3.136833
+      },
+      {
+        "enqueue_us": 6.0077940000000005,
+        "completed_us": 7.137365
+      },
+      {
+        "enqueue_us": 1.021611,
+        "completed_us": 4.8812120000000006
+      },
+      {
+        "enqueue_us": 1.083711,
+        "completed_us": 3.1305629999999995
+      },
+      {
+        "enqueue_us": 1.075651,
+        "completed_us": 3.241164
+      },
+      {
+        "enqueue_us": 5.9503829999999995,
+        "completed_us": 7.609331
+      },
+      {
+        "enqueue_us": 1.057491,
+        "completed_us": 4.623628000000001
+      },
+      {
+        "enqueue_us": 1.1017519999999998,
+        "completed_us": 3.650869
+      },
+      {
+        "enqueue_us": 5.014043000000001,
+        "completed_us": 8.857974
+      },
+      {
+        "enqueue_us": 1.111101,
+        "completed_us": 3.4592160000000005
+      },
+      {
+        "enqueue_us": 1.093492,
+        "completed_us": 3.76415
+      },
+      {
+        "enqueue_us": 4.72422,
+        "completed_us": 8.541780000000001
+      },
+      {
+        "enqueue_us": 1.0991520000000001,
+        "completed_us": 3.3827559999999997
+      },
+      {
+        "enqueue_us": 1.097851,
+        "completed_us": 3.1302830000000004
+      },
+      {
+        "enqueue_us": 1.118112,
+        "completed_us": 3.2489139999999996
+      },
+      {
+        "enqueue_us": 4.207925,
+        "completed_us": 8.094816
+      },
+      {
+        "enqueue_us": 1.0991009999999999,
+        "completed_us": 3.363915
+      },
+      {
+        "enqueue_us": 1.1025220000000002,
+        "completed_us": 3.1308130000000003
+      },
+      {
+        "enqueue_us": 1.104442,
+        "completed_us": 3.231384
+      },
+      {
+        "enqueue_us": 3.9068419999999997,
+        "completed_us": 8.091596
+      },
+      {
+        "enqueue_us": 1.1015720000000002,
+        "completed_us": 3.260144
+      },
+      {
+        "enqueue_us": 1.1126319999999998,
+        "completed_us": 3.359836
+      },
+      {
+        "enqueue_us": 4.388596,
+        "completed_us": 8.298948000000001
+      },
+      {
+        "enqueue_us": 1.059171,
+        "completed_us": 3.470616
+      },
+      {
+        "enqueue_us": 1.088912,
+        "completed_us": 3.1346930000000004
+      },
+      {
+        "enqueue_us": 1.116132,
+        "completed_us": 3.2401240000000002
+      },
+      {
+        "enqueue_us": 3.8348610000000005,
+        "completed_us": 8.057206
+      },
+      {
+        "enqueue_us": 1.1034009999999999,
+        "completed_us": 3.0990819999999997
+      },
+      {
+        "enqueue_us": 1.095412,
+        "completed_us": 3.135063
+      },
+      {
+        "enqueue_us": 1.107192,
+        "completed_us": 3.265585
+      },
+      {
+        "enqueue_us": 5.157854,
+        "completed_us": 9.085476
+      },
+      {
+        "enqueue_us": 1.1029010000000001,
+        "completed_us": 3.132913
+      },
+      {
+        "enqueue_us": 5.840222,
+        "completed_us": 7.089075
+      },
+      {
+        "enqueue_us": 1.055481,
+        "completed_us": 4.529488000000001
+      },
+      {
+        "enqueue_us": 1.0826209999999998,
+        "completed_us": 3.093592
+      },
+      {
+        "enqueue_us": 1.132702,
+        "completed_us": 3.2574549999999998
+      },
+      {
+        "enqueue_us": 5.847301000000001,
+        "completed_us": 9.178287000000001
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 3,
+    "pair_position": 0,
+    "process_sequence": 20,
+    "process_wall_s": 3.363705622999987,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.142772,
+        "completed_us": 3.134473
+      },
+      {
+        "enqueue_us": 1.1370419999999999,
+        "completed_us": 3.80214
+      },
+      {
+        "enqueue_us": 2.050022,
+        "completed_us": 6.856143
+      },
+      {
+        "enqueue_us": 1.1095910000000002,
+        "completed_us": 3.0932720000000002
+      },
+      {
+        "enqueue_us": 1.116142,
+        "completed_us": 3.1357440000000003
+      },
+      {
+        "enqueue_us": 4.700709,
+        "completed_us": 7.259336
+      },
+      {
+        "enqueue_us": 1.118742,
+        "completed_us": 3.931812
+      },
+      {
+        "enqueue_us": 1.130982,
+        "completed_us": 3.094382
+      },
+      {
+        "enqueue_us": 1.163953,
+        "completed_us": 3.1285229999999995
+      },
+      {
+        "enqueue_us": 1.1728629999999998,
+        "completed_us": 3.4766369999999998
+      },
+      {
+        "enqueue_us": 3.050352,
+        "completed_us": 5.989643
+      },
+      {
+        "enqueue_us": 1.065162,
+        "completed_us": 5.0144139999999995
+      },
+      {
+        "enqueue_us": 1.1130309999999999,
+        "completed_us": 3.1518829999999998
+      },
+      {
+        "enqueue_us": 3.5123670000000002,
+        "completed_us": 8.175536000000001
+      },
+      {
+        "enqueue_us": 1.101532,
+        "completed_us": 3.093003
+      },
+      {
+        "enqueue_us": 1.1076510000000002,
+        "completed_us": 3.095732
+      },
+      {
+        "enqueue_us": 1.131932,
+        "completed_us": 3.275975
+      },
+      {
+        "enqueue_us": 2.9661210000000002,
+        "completed_us": 7.5949800000000005
+      },
+      {
+        "enqueue_us": 1.129152,
+        "completed_us": 3.0953530000000002
+      },
+      {
+        "enqueue_us": 1.1370919999999998,
+        "completed_us": 3.130903
+      },
+      {
+        "enqueue_us": 1.139962,
+        "completed_us": 3.972092
+      },
+      {
+        "enqueue_us": 2.1706730000000003,
+        "completed_us": 5.046163000000001
+      },
+      {
+        "enqueue_us": 1.104652,
+        "completed_us": 4.976063
+      },
+      {
+        "enqueue_us": 1.141372,
+        "completed_us": 3.1314830000000002
+      },
+      {
+        "enqueue_us": 4.594748000000001,
+        "completed_us": 7.638611
+      },
+      {
+        "enqueue_us": 1.1213309999999999,
+        "completed_us": 3.925721
+      },
+      {
+        "enqueue_us": 1.1453319999999998,
+        "completed_us": 3.0949829999999996
+      },
+      {
+        "enqueue_us": 1.135392,
+        "completed_us": 3.140963
+      },
+      {
+        "enqueue_us": 3.3749460000000004,
+        "completed_us": 7.265337000000001
+      },
+      {
+        "enqueue_us": 1.0883010000000002,
+        "completed_us": 3.587308
+      },
+      {
+        "enqueue_us": 1.1026409999999998,
+        "completed_us": 3.0932820000000003
+      },
+      {
+        "enqueue_us": 1.142482,
+        "completed_us": 3.211654
+      },
+      {
+        "enqueue_us": 3.6502890000000003,
+        "completed_us": 7.416918
+      },
+      {
+        "enqueue_us": 1.121792,
+        "completed_us": 3.4913869999999996
+      },
+      {
+        "enqueue_us": 1.1445520000000002,
+        "completed_us": 3.093883
+      },
+      {
+        "enqueue_us": 4.441317,
+        "completed_us": 5.091674
+      },
+      {
+        "enqueue_us": 1.103972,
+        "completed_us": 4.867421
+      },
+      {
+        "enqueue_us": 1.128072,
+        "completed_us": 3.0945329999999998
+      },
+      {
+        "enqueue_us": 1.121712,
+        "completed_us": 3.097623
+      },
+      {
+        "enqueue_us": 1.132702,
+        "completed_us": 3.1488430000000003
+      },
+      {
+        "enqueue_us": 3.3965060000000005,
+        "completed_us": 7.60148
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 3,
+    "pair_position": 1,
+    "process_sequence": 21,
+    "process_wall_s": 3.355089028002112,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.0766120000000001,
+        "completed_us": 40.391677
+      },
+      {
+        "enqueue_us": 1.075421,
+        "completed_us": 38.602238
+      },
+      {
+        "enqueue_us": 1.349534,
+        "completed_us": 41.341376
+      },
+      {
+        "enqueue_us": 1.0927419999999999,
+        "completed_us": 40.312746000000004
+      },
+      {
+        "enqueue_us": 1.475436,
+        "completed_us": 42.088385
+      },
+      {
+        "enqueue_us": 1.100631,
+        "completed_us": 40.116244
+      },
+      {
+        "enqueue_us": 1.324874,
+        "completed_us": 40.889372
+      },
+      {
+        "enqueue_us": 1.104531,
+        "completed_us": 39.66241899999999
+      },
+      {
+        "enqueue_us": 1.0700509999999999,
+        "completed_us": 39.187393
+      },
+      {
+        "enqueue_us": 1.3938840000000001,
+        "completed_us": 42.749911
+      },
+      {
+        "enqueue_us": 1.105642,
+        "completed_us": 40.473307999999996
+      },
+      {
+        "enqueue_us": 1.396244,
+        "completed_us": 42.127535
+      },
+      {
+        "enqueue_us": 1.0958610000000002,
+        "completed_us": 39.016622000000005
+      },
+      {
+        "enqueue_us": 1.234153,
+        "completed_us": 40.74737
+      },
+      {
+        "enqueue_us": 1.102261,
+        "completed_us": 39.953441999999995
+      },
+      {
+        "enqueue_us": 1.070861,
+        "completed_us": 41.100874000000005
+      },
+      {
+        "enqueue_us": 1.1751019999999999,
+        "completed_us": 40.574737999999996
+      },
+      {
+        "enqueue_us": 1.0899219999999998,
+        "completed_us": 40.37018700000001
+      },
+      {
+        "enqueue_us": 1.4312649999999998,
+        "completed_us": 42.972014
+      },
+      {
+        "enqueue_us": 1.0986010000000002,
+        "completed_us": 38.924161
+      },
+      {
+        "enqueue_us": 1.365434,
+        "completed_us": 42.606919999999995
+      },
+      {
+        "enqueue_us": 1.0747109999999997,
+        "completed_us": 39.106203
+      },
+      {
+        "enqueue_us": 1.3177539999999999,
+        "completed_us": 40.744701
+      },
+      {
+        "enqueue_us": 1.1137110000000001,
+        "completed_us": 40.056383000000004
+      },
+      {
+        "enqueue_us": 1.1146120000000002,
+        "completed_us": 38.633868
+      },
+      {
+        "enqueue_us": 1.3720750000000002,
+        "completed_us": 42.35213699999999
+      },
+      {
+        "enqueue_us": 1.1083020000000001,
+        "completed_us": 39.02496300000001
+      },
+      {
+        "enqueue_us": 1.089401,
+        "completed_us": 40.628129
+      },
+      {
+        "enqueue_us": 1.110032,
+        "completed_us": 39.240854
+      },
+      {
+        "enqueue_us": 1.103562,
+        "completed_us": 38.495857
+      },
+      {
+        "enqueue_us": 1.362615,
+        "completed_us": 40.483328
+      },
+      {
+        "enqueue_us": 1.109082,
+        "completed_us": 39.109863000000004
+      },
+      {
+        "enqueue_us": 1.0706410000000002,
+        "completed_us": 38.341935
+      },
+      {
+        "enqueue_us": 1.373425,
+        "completed_us": 40.790361
+      },
+      {
+        "enqueue_us": 1.0608410000000001,
+        "completed_us": 37.922091
+      },
+      {
+        "enqueue_us": 1.072931,
+        "completed_us": 40.041063
+      },
+      {
+        "enqueue_us": 1.424435,
+        "completed_us": 40.599019
+      },
+      {
+        "enqueue_us": 1.0996510000000002,
+        "completed_us": 38.565277
+      },
+      {
+        "enqueue_us": 1.1197219999999999,
+        "completed_us": 40.256946000000006
+      },
+      {
+        "enqueue_us": 1.094221,
+        "completed_us": 39.110393
+      },
+      {
+        "enqueue_us": 1.1020710000000002,
+        "completed_us": 38.060961999999996
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 3,
+    "pair_position": 0,
+    "process_sequence": 22,
+    "process_wall_s": 4.833220090000395,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.113322,
+        "completed_us": 39.336345
+      },
+      {
+        "enqueue_us": 1.1375009999999999,
+        "completed_us": 38.029120999999996
+      },
+      {
+        "enqueue_us": 1.481516,
+        "completed_us": 40.005443
+      },
+      {
+        "enqueue_us": 1.119952,
+        "completed_us": 38.197924
+      },
+      {
+        "enqueue_us": 1.1568019999999999,
+        "completed_us": 38.608418
+      },
+      {
+        "enqueue_us": 1.4597449999999998,
+        "completed_us": 39.616308000000004
+      },
+      {
+        "enqueue_us": 1.1494929999999999,
+        "completed_us": 38.276644999999995
+      },
+      {
+        "enqueue_us": 1.1255620000000002,
+        "completed_us": 38.176562999999994
+      },
+      {
+        "enqueue_us": 1.4472260000000001,
+        "completed_us": 39.939352
+      },
+      {
+        "enqueue_us": 1.1235119999999998,
+        "completed_us": 38.108973
+      },
+      {
+        "enqueue_us": 1.154902,
+        "completed_us": 37.641608
+      },
+      {
+        "enqueue_us": 1.434475,
+        "completed_us": 39.237843999999996
+      },
+      {
+        "enqueue_us": 1.112042,
+        "completed_us": 38.410466
+      },
+      {
+        "enqueue_us": 1.117642,
+        "completed_us": 38.029672
+      },
+      {
+        "enqueue_us": 1.1858229999999998,
+        "completed_us": 39.796491
+      },
+      {
+        "enqueue_us": 1.210523,
+        "completed_us": 39.331735
+      },
+      {
+        "enqueue_us": 1.1153920000000002,
+        "completed_us": 37.941211
+      },
+      {
+        "enqueue_us": 1.3042539999999998,
+        "completed_us": 38.098553
+      },
+      {
+        "enqueue_us": 1.4976760000000002,
+        "completed_us": 39.989742
+      },
+      {
+        "enqueue_us": 1.1103420000000002,
+        "completed_us": 38.240894999999995
+      },
+      {
+        "enqueue_us": 1.1445120000000002,
+        "completed_us": 37.971061
+      },
+      {
+        "enqueue_us": 1.498856,
+        "completed_us": 39.74505
+      },
+      {
+        "enqueue_us": 1.107432,
+        "completed_us": 37.997870999999996
+      },
+      {
+        "enqueue_us": 1.1448219999999998,
+        "completed_us": 37.698519
+      },
+      {
+        "enqueue_us": 1.470405,
+        "completed_us": 39.996732
+      },
+      {
+        "enqueue_us": 1.1451619999999998,
+        "completed_us": 37.331675000000004
+      },
+      {
+        "enqueue_us": 1.1240320000000001,
+        "completed_us": 37.87015
+      },
+      {
+        "enqueue_us": 1.4781760000000002,
+        "completed_us": 39.014962
+      },
+      {
+        "enqueue_us": 1.121282,
+        "completed_us": 38.132013
+      },
+      {
+        "enqueue_us": 1.151102,
+        "completed_us": 37.946861
+      },
+      {
+        "enqueue_us": 1.159243,
+        "completed_us": 37.8249
+      },
+      {
+        "enqueue_us": 1.4848960000000002,
+        "completed_us": 39.334926
+      },
+      {
+        "enqueue_us": 1.121202,
+        "completed_us": 38.53256699999999
+      },
+      {
+        "enqueue_us": 1.118822,
+        "completed_us": 37.427715000000006
+      },
+      {
+        "enqueue_us": 1.478716,
+        "completed_us": 39.550728
+      },
+      {
+        "enqueue_us": 1.123972,
+        "completed_us": 37.701099
+      },
+      {
+        "enqueue_us": 1.114222,
+        "completed_us": 37.575077
+      },
+      {
+        "enqueue_us": 1.1248420000000001,
+        "completed_us": 39.377066
+      },
+      {
+        "enqueue_us": 1.118752,
+        "completed_us": 38.915841
+      },
+      {
+        "enqueue_us": 1.101492,
+        "completed_us": 38.265083999999995
+      },
+      {
+        "enqueue_us": 1.126483,
+        "completed_us": 39.487517999999994
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 3,
+    "pair_position": 1,
+    "process_sequence": 23,
+    "process_wall_s": 4.786045214998012,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.1756030000000002,
+        "completed_us": 3.143284
+      },
+      {
+        "enqueue_us": 1.113842,
+        "completed_us": 6.085204000000001
+      },
+      {
+        "enqueue_us": 1.1134819999999999,
+        "completed_us": 3.102993
+      },
+      {
+        "enqueue_us": 1.1165319999999999,
+        "completed_us": 3.3942759999999996
+      },
+      {
+        "enqueue_us": 1.133412,
+        "completed_us": 3.1366129999999997
+      },
+      {
+        "enqueue_us": 1.1750820000000002,
+        "completed_us": 5.105664
+      },
+      {
+        "enqueue_us": 1.0885209999999998,
+        "completed_us": 3.854311
+      },
+      {
+        "enqueue_us": 1.1232010000000001,
+        "completed_us": 3.1026320000000003
+      },
+      {
+        "enqueue_us": 1.1153520000000001,
+        "completed_us": 3.436607
+      },
+      {
+        "enqueue_us": 1.157832,
+        "completed_us": 5.188454000000001
+      },
+      {
+        "enqueue_us": 1.130052,
+        "completed_us": 3.838771
+      },
+      {
+        "enqueue_us": 1.136902,
+        "completed_us": 3.107813
+      },
+      {
+        "enqueue_us": 1.161682,
+        "completed_us": 3.404116
+      },
+      {
+        "enqueue_us": 1.171402,
+        "completed_us": 3.7241890000000004
+      },
+      {
+        "enqueue_us": 1.092922,
+        "completed_us": 5.63561
+      },
+      {
+        "enqueue_us": 1.110682,
+        "completed_us": 3.104013
+      },
+      {
+        "enqueue_us": 1.1378020000000002,
+        "completed_us": 3.399326
+      },
+      {
+        "enqueue_us": 1.158152,
+        "completed_us": 3.140673
+      },
+      {
+        "enqueue_us": 1.158012,
+        "completed_us": 4.534858
+      },
+      {
+        "enqueue_us": 1.068601,
+        "completed_us": 4.535298
+      },
+      {
+        "enqueue_us": 1.114271,
+        "completed_us": 3.103882
+      },
+      {
+        "enqueue_us": 1.124392,
+        "completed_us": 3.435257
+      },
+      {
+        "enqueue_us": 1.153602,
+        "completed_us": 3.356685
+      },
+      {
+        "enqueue_us": 1.1366219999999998,
+        "completed_us": 5.144475000000001
+      },
+      {
+        "enqueue_us": 1.086131,
+        "completed_us": 3.8727300000000002
+      },
+      {
+        "enqueue_us": 1.143463,
+        "completed_us": 3.396686
+      },
+      {
+        "enqueue_us": 1.133222,
+        "completed_us": 5.087894
+      },
+      {
+        "enqueue_us": 1.0890920000000002,
+        "completed_us": 3.903431
+      },
+      {
+        "enqueue_us": 1.111862,
+        "completed_us": 3.102573
+      },
+      {
+        "enqueue_us": 1.127692,
+        "completed_us": 3.3943760000000003
+      },
+      {
+        "enqueue_us": 1.159472,
+        "completed_us": 3.6953289999999996
+      },
+      {
+        "enqueue_us": 1.101402,
+        "completed_us": 5.581849
+      },
+      {
+        "enqueue_us": 1.1173520000000001,
+        "completed_us": 3.102253
+      },
+      {
+        "enqueue_us": 1.115142,
+        "completed_us": 3.102773
+      },
+      {
+        "enqueue_us": 1.149202,
+        "completed_us": 3.434396
+      },
+      {
+        "enqueue_us": 1.150142,
+        "completed_us": 5.358387
+      },
+      {
+        "enqueue_us": 1.0892709999999999,
+        "completed_us": 3.941251
+      },
+      {
+        "enqueue_us": 1.107852,
+        "completed_us": 3.1023330000000002
+      },
+      {
+        "enqueue_us": 1.1132819999999999,
+        "completed_us": 3.394826
+      },
+      {
+        "enqueue_us": 1.155382,
+        "completed_us": 4.0658129999999995
+      },
+      {
+        "enqueue_us": 1.095221,
+        "completed_us": 5.67088
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 4,
+    "pair_position": 0,
+    "process_sequence": 24,
+    "process_wall_s": 3.2984342859999742,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.181262,
+        "completed_us": 3.393895
+      },
+      {
+        "enqueue_us": 1.102222,
+        "completed_us": 3.145614
+      },
+      {
+        "enqueue_us": 1.111641,
+        "completed_us": 5.388057
+      },
+      {
+        "enqueue_us": 1.047801,
+        "completed_us": 4.0488420000000005
+      },
+      {
+        "enqueue_us": 1.0998320000000001,
+        "completed_us": 3.390886
+      },
+      {
+        "enqueue_us": 1.0788820000000001,
+        "completed_us": 3.1440230000000002
+      },
+      {
+        "enqueue_us": 1.1182220000000003,
+        "completed_us": 5.368926999999999
+      },
+      {
+        "enqueue_us": 1.0509009999999999,
+        "completed_us": 4.0339030000000005
+      },
+      {
+        "enqueue_us": 1.050571,
+        "completed_us": 3.1112230000000003
+      },
+      {
+        "enqueue_us": 1.076011,
+        "completed_us": 3.3866460000000003
+      },
+      {
+        "enqueue_us": 1.128262,
+        "completed_us": 3.3980059999999996
+      },
+      {
+        "enqueue_us": 1.082371,
+        "completed_us": 6.039013
+      },
+      {
+        "enqueue_us": 1.063662,
+        "completed_us": 3.1029730000000004
+      },
+      {
+        "enqueue_us": 1.1537819999999999,
+        "completed_us": 3.392216
+      },
+      {
+        "enqueue_us": 1.128902,
+        "completed_us": 3.141733
+      },
+      {
+        "enqueue_us": 1.0865619999999998,
+        "completed_us": 5.316446
+      },
+      {
+        "enqueue_us": 1.054722,
+        "completed_us": 4.004813
+      },
+      {
+        "enqueue_us": 1.1644919999999999,
+        "completed_us": 3.3851459999999998
+      },
+      {
+        "enqueue_us": 1.106151,
+        "completed_us": 3.142583
+      },
+      {
+        "enqueue_us": 1.129362,
+        "completed_us": 5.101594
+      },
+      {
+        "enqueue_us": 1.057351,
+        "completed_us": 4.046022
+      },
+      {
+        "enqueue_us": 1.099002,
+        "completed_us": 3.4024060000000005
+      },
+      {
+        "enqueue_us": 1.0970920000000002,
+        "completed_us": 3.147924
+      },
+      {
+        "enqueue_us": 1.126892,
+        "completed_us": 3.264984
+      },
+      {
+        "enqueue_us": 1.118392,
+        "completed_us": 5.442457999999999
+      },
+      {
+        "enqueue_us": 1.045461,
+        "completed_us": 4.591907999999999
+      },
+      {
+        "enqueue_us": 1.081162,
+        "completed_us": 3.146904
+      },
+      {
+        "enqueue_us": 1.088231,
+        "completed_us": 3.2605440000000003
+      },
+      {
+        "enqueue_us": 1.123452,
+        "completed_us": 3.106673
+      },
+      {
+        "enqueue_us": 1.084731,
+        "completed_us": 5.354837000000001
+      },
+      {
+        "enqueue_us": 1.201162,
+        "completed_us": 4.221983999999999
+      },
+      {
+        "enqueue_us": 1.0941119999999998,
+        "completed_us": 3.136923
+      },
+      {
+        "enqueue_us": 1.135772,
+        "completed_us": 5.364437
+      },
+      {
+        "enqueue_us": 1.066251,
+        "completed_us": 4.002322
+      },
+      {
+        "enqueue_us": 1.190693,
+        "completed_us": 3.4018960000000003
+      },
+      {
+        "enqueue_us": 1.092072,
+        "completed_us": 3.147014
+      },
+      {
+        "enqueue_us": 1.114591,
+        "completed_us": 5.7407200000000005
+      },
+      {
+        "enqueue_us": 1.0453310000000002,
+        "completed_us": 4.031523000000001
+      },
+      {
+        "enqueue_us": 1.1778520000000001,
+        "completed_us": 3.415456
+      },
+      {
+        "enqueue_us": 1.0760809999999998,
+        "completed_us": 3.1460030000000003
+      },
+      {
+        "enqueue_us": 1.135642,
+        "completed_us": 4.463756999999999
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 4,
+    "pair_position": 1,
+    "process_sequence": 25,
+    "process_wall_s": 3.2989910889991734,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.129213,
+        "completed_us": 39.773001
+      },
+      {
+        "enqueue_us": 1.172802,
+        "completed_us": 39.521828
+      },
+      {
+        "enqueue_us": 1.1552719999999999,
+        "completed_us": 42.112365
+      },
+      {
+        "enqueue_us": 1.144662,
+        "completed_us": 38.999773
+      },
+      {
+        "enqueue_us": 1.1627919999999998,
+        "completed_us": 42.869223
+      },
+      {
+        "enqueue_us": 1.145222,
+        "completed_us": 39.861011
+      },
+      {
+        "enqueue_us": 1.136512,
+        "completed_us": 40.60811
+      },
+      {
+        "enqueue_us": 1.125452,
+        "completed_us": 40.083254000000004
+      },
+      {
+        "enqueue_us": 1.157902,
+        "completed_us": 38.683178999999996
+      },
+      {
+        "enqueue_us": 1.1596520000000001,
+        "completed_us": 42.118415
+      },
+      {
+        "enqueue_us": 1.1228019999999999,
+        "completed_us": 38.967002
+      },
+      {
+        "enqueue_us": 1.1672220000000002,
+        "completed_us": 39.206585
+      },
+      {
+        "enqueue_us": 1.122301,
+        "completed_us": 40.68861
+      },
+      {
+        "enqueue_us": 1.157492,
+        "completed_us": 38.874801
+      },
+      {
+        "enqueue_us": 1.155752,
+        "completed_us": 41.15293500000001
+      },
+      {
+        "enqueue_us": 1.119162,
+        "completed_us": 38.506977
+      },
+      {
+        "enqueue_us": 1.128592,
+        "completed_us": 39.382407
+      },
+      {
+        "enqueue_us": 1.120611,
+        "completed_us": 38.365695
+      },
+      {
+        "enqueue_us": 1.142152,
+        "completed_us": 37.971351999999996
+      },
+      {
+        "enqueue_us": 1.135662,
+        "completed_us": 38.002822
+      },
+      {
+        "enqueue_us": 1.1698220000000001,
+        "completed_us": 40.67588
+      },
+      {
+        "enqueue_us": 1.115922,
+        "completed_us": 37.944250999999994
+      },
+      {
+        "enqueue_us": 1.146452,
+        "completed_us": 37.84265
+      },
+      {
+        "enqueue_us": 1.1683819999999998,
+        "completed_us": 40.938133
+      },
+      {
+        "enqueue_us": 1.1510019999999999,
+        "completed_us": 38.214784
+      },
+      {
+        "enqueue_us": 1.140042,
+        "completed_us": 38.330675
+      },
+      {
+        "enqueue_us": 1.1589829999999999,
+        "completed_us": 40.904003
+      },
+      {
+        "enqueue_us": 1.114762,
+        "completed_us": 38.472857
+      },
+      {
+        "enqueue_us": 1.131472,
+        "completed_us": 39.191504
+      },
+      {
+        "enqueue_us": 1.127082,
+        "completed_us": 40.371607
+      },
+      {
+        "enqueue_us": 1.130682,
+        "completed_us": 40.469518
+      },
+      {
+        "enqueue_us": 1.139212,
+        "completed_us": 40.95671299999999
+      },
+      {
+        "enqueue_us": 1.145992,
+        "completed_us": 39.008573
+      },
+      {
+        "enqueue_us": 1.145972,
+        "completed_us": 40.260104999999996
+      },
+      {
+        "enqueue_us": 1.1410619999999998,
+        "completed_us": 39.190005
+      },
+      {
+        "enqueue_us": 1.568096,
+        "completed_us": 38.746239
+      },
+      {
+        "enqueue_us": 1.164183,
+        "completed_us": 39.931633000000005
+      },
+      {
+        "enqueue_us": 1.139132,
+        "completed_us": 38.755579999999995
+      },
+      {
+        "enqueue_us": 1.5367460000000002,
+        "completed_us": 38.190563
+      },
+      {
+        "enqueue_us": 1.1717929999999999,
+        "completed_us": 40.502839
+      },
+      {
+        "enqueue_us": 1.155702,
+        "completed_us": 38.05508199999999
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 4,
+    "pair_position": 0,
+    "process_sequence": 26,
+    "process_wall_s": 4.804067348002718,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.085272,
+        "completed_us": 40.710771
+      },
+      {
+        "enqueue_us": 1.049801,
+        "completed_us": 40.053824
+      },
+      {
+        "enqueue_us": 1.103981,
+        "completed_us": 39.217814
+      },
+      {
+        "enqueue_us": 1.0925319999999998,
+        "completed_us": 40.488878
+      },
+      {
+        "enqueue_us": 1.0750410000000001,
+        "completed_us": 39.965121999999994
+      },
+      {
+        "enqueue_us": 1.0688609999999998,
+        "completed_us": 40.516089
+      },
+      {
+        "enqueue_us": 1.0482909999999999,
+        "completed_us": 39.533167999999996
+      },
+      {
+        "enqueue_us": 1.0997610000000002,
+        "completed_us": 38.854461
+      },
+      {
+        "enqueue_us": 1.096371,
+        "completed_us": 41.260996
+      },
+      {
+        "enqueue_us": 1.079312,
+        "completed_us": 39.802930999999994
+      },
+      {
+        "enqueue_us": 1.091822,
+        "completed_us": 39.654029
+      },
+      {
+        "enqueue_us": 1.0822620000000003,
+        "completed_us": 39.027713
+      },
+      {
+        "enqueue_us": 1.0433709999999998,
+        "completed_us": 38.72756
+      },
+      {
+        "enqueue_us": 1.110942,
+        "completed_us": 39.368095999999994
+      },
+      {
+        "enqueue_us": 1.047161,
+        "completed_us": 38.832411
+      },
+      {
+        "enqueue_us": 1.0520010000000002,
+        "completed_us": 38.212784
+      },
+      {
+        "enqueue_us": 1.1013920000000001,
+        "completed_us": 40.057953999999995
+      },
+      {
+        "enqueue_us": 1.042821,
+        "completed_us": 39.059563000000004
+      },
+      {
+        "enqueue_us": 1.052251,
+        "completed_us": 38.607268000000005
+      },
+      {
+        "enqueue_us": 1.111052,
+        "completed_us": 41.374277
+      },
+      {
+        "enqueue_us": 1.0455519999999998,
+        "completed_us": 38.422217
+      },
+      {
+        "enqueue_us": 1.0873309999999998,
+        "completed_us": 38.75495
+      },
+      {
+        "enqueue_us": 1.096941,
+        "completed_us": 41.568559
+      },
+      {
+        "enqueue_us": 1.047131,
+        "completed_us": 39.038873
+      },
+      {
+        "enqueue_us": 1.0957919999999999,
+        "completed_us": 41.106595
+      },
+      {
+        "enqueue_us": 1.046391,
+        "completed_us": 39.882142
+      },
+      {
+        "enqueue_us": 1.054471,
+        "completed_us": 39.388296000000004
+      },
+      {
+        "enqueue_us": 1.083372,
+        "completed_us": 40.864803
+      },
+      {
+        "enqueue_us": 1.03886,
+        "completed_us": 38.700659
+      },
+      {
+        "enqueue_us": 1.0901210000000001,
+        "completed_us": 40.030583
+      },
+      {
+        "enqueue_us": 1.071102,
+        "completed_us": 39.04381299999999
+      },
+      {
+        "enqueue_us": 1.0783319999999998,
+        "completed_us": 38.71689
+      },
+      {
+        "enqueue_us": 1.105041,
+        "completed_us": 41.467538
+      },
+      {
+        "enqueue_us": 1.079472,
+        "completed_us": 37.808150000000005
+      },
+      {
+        "enqueue_us": 1.0706710000000002,
+        "completed_us": 38.479987
+      },
+      {
+        "enqueue_us": 1.0917120000000002,
+        "completed_us": 39.654
+      },
+      {
+        "enqueue_us": 1.03994,
+        "completed_us": 38.82186
+      },
+      {
+        "enqueue_us": 1.057351,
+        "completed_us": 39.594029
+      },
+      {
+        "enqueue_us": 1.081821,
+        "completed_us": 40.471708
+      },
+      {
+        "enqueue_us": 1.0706509999999998,
+        "completed_us": 40.167195
+      },
+      {
+        "enqueue_us": 1.088671,
+        "completed_us": 42.085604999999994
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 4,
+    "pair_position": 1,
+    "process_sequence": 27,
+    "process_wall_s": 4.810064905999752,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.1421430000000001,
+        "completed_us": 2.234604
+      },
+      {
+        "enqueue_us": 1.134752,
+        "completed_us": 2.2345440000000005
+      },
+      {
+        "enqueue_us": 1.151952,
+        "completed_us": 2.525226
+      },
+      {
+        "enqueue_us": 5.424548000000001,
+        "completed_us": 6.4544690000000005
+      },
+      {
+        "enqueue_us": 1.1218020000000002,
+        "completed_us": 2.751659
+      },
+      {
+        "enqueue_us": 1.1349420000000001,
+        "completed_us": 2.2345339999999996
+      },
+      {
+        "enqueue_us": 1.133941,
+        "completed_us": 2.233563
+      },
+      {
+        "enqueue_us": 1.1607919999999998,
+        "completed_us": 2.5322169999999997
+      },
+      {
+        "enqueue_us": 5.0455630000000005,
+        "completed_us": 5.968043000000001
+      },
+      {
+        "enqueue_us": 1.1268120000000001,
+        "completed_us": 2.81949
+      },
+      {
+        "enqueue_us": 1.136692,
+        "completed_us": 2.2340530000000003
+      },
+      {
+        "enqueue_us": 1.136593,
+        "completed_us": 2.234604
+      },
+      {
+        "enqueue_us": 1.1542620000000001,
+        "completed_us": 2.234844
+      },
+      {
+        "enqueue_us": 1.1473119999999999,
+        "completed_us": 2.543627
+      },
+      {
+        "enqueue_us": 4.090783,
+        "completed_us": 5.921011999999999
+      },
+      {
+        "enqueue_us": 1.102092,
+        "completed_us": 2.8368999999999995
+      },
+      {
+        "enqueue_us": 1.129002,
+        "completed_us": 2.235314
+      },
+      {
+        "enqueue_us": 1.125632,
+        "completed_us": 2.234423
+      },
+      {
+        "enqueue_us": 1.1250120000000001,
+        "completed_us": 2.5246969999999997
+      },
+      {
+        "enqueue_us": 5.039994,
+        "completed_us": 6.350927
+      },
+      {
+        "enqueue_us": 1.288834,
+        "completed_us": 2.854071
+      },
+      {
+        "enqueue_us": 1.120602,
+        "completed_us": 2.2350030000000003
+      },
+      {
+        "enqueue_us": 1.124522,
+        "completed_us": 2.234324
+      },
+      {
+        "enqueue_us": 1.155332,
+        "completed_us": 2.532467
+      },
+      {
+        "enqueue_us": 5.588589,
+        "completed_us": 6.756151
+      },
+      {
+        "enqueue_us": 1.0946319999999998,
+        "completed_us": 2.84967
+      },
+      {
+        "enqueue_us": 1.1240620000000001,
+        "completed_us": 2.234194
+      },
+      {
+        "enqueue_us": 1.1231119999999999,
+        "completed_us": 2.2340940000000002
+      },
+      {
+        "enqueue_us": 1.1273909999999998,
+        "completed_us": 2.525776
+      },
+      {
+        "enqueue_us": 1.152343,
+        "completed_us": 2.413876
+      },
+      {
+        "enqueue_us": 4.503348,
+        "completed_us": 6.231345999999999
+      },
+      {
+        "enqueue_us": 1.101321,
+        "completed_us": 2.83432
+      },
+      {
+        "enqueue_us": 1.118622,
+        "completed_us": 2.2338940000000003
+      },
+      {
+        "enqueue_us": 1.160092,
+        "completed_us": 2.5248359999999996
+      },
+      {
+        "enqueue_us": 2.744169,
+        "completed_us": 2.7606390000000003
+      },
+      {
+        "enqueue_us": 3.9499519999999997,
+        "completed_us": 5.798782
+      },
+      {
+        "enqueue_us": 1.0982809999999998,
+        "completed_us": 2.82781
+      },
+      {
+        "enqueue_us": 1.117262,
+        "completed_us": 2.2435229999999997
+      },
+      {
+        "enqueue_us": 1.131052,
+        "completed_us": 2.234284
+      },
+      {
+        "enqueue_us": 1.182603,
+        "completed_us": 2.689058
+      },
+      {
+        "enqueue_us": 4.74088,
+        "completed_us": 6.616969
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 4,
+    "pair_position": 0,
+    "process_sequence": 28,
+    "process_wall_s": 3.2938613400001486,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.090332,
+        "completed_us": 2.228884
+      },
+      {
+        "enqueue_us": 1.1298119999999998,
+        "completed_us": 2.228213
+      },
+      {
+        "enqueue_us": 1.117922,
+        "completed_us": 2.9089609999999997
+      },
+      {
+        "enqueue_us": 5.086384,
+        "completed_us": 6.305556999999999
+      },
+      {
+        "enqueue_us": 1.078591,
+        "completed_us": 3.022312
+      },
+      {
+        "enqueue_us": 1.135362,
+        "completed_us": 2.234613
+      },
+      {
+        "enqueue_us": 1.1272719999999998,
+        "completed_us": 2.228474
+      },
+      {
+        "enqueue_us": 1.1325619999999998,
+        "completed_us": 2.9374610000000003
+      },
+      {
+        "enqueue_us": 4.494638,
+        "completed_us": 6.355917000000001
+      },
+      {
+        "enqueue_us": 1.043941,
+        "completed_us": 3.019542
+      },
+      {
+        "enqueue_us": 1.0966120000000001,
+        "completed_us": 2.228634
+      },
+      {
+        "enqueue_us": 1.138142,
+        "completed_us": 2.229993
+      },
+      {
+        "enqueue_us": 1.1131019999999998,
+        "completed_us": 2.9643120000000005
+      },
+      {
+        "enqueue_us": 4.361135999999999,
+        "completed_us": 6.330587
+      },
+      {
+        "enqueue_us": 1.081841,
+        "completed_us": 3.0003109999999995
+      },
+      {
+        "enqueue_us": 1.130893,
+        "completed_us": 2.2281039999999996
+      },
+      {
+        "enqueue_us": 1.148372,
+        "completed_us": 2.2284840000000004
+      },
+      {
+        "enqueue_us": 1.1348120000000002,
+        "completed_us": 3.698659
+      },
+      {
+        "enqueue_us": 4.224695,
+        "completed_us": 6.081804
+      },
+      {
+        "enqueue_us": 1.034451,
+        "completed_us": 3.011502
+      },
+      {
+        "enqueue_us": 1.078881,
+        "completed_us": 2.2289139999999996
+      },
+      {
+        "enqueue_us": 1.099481,
+        "completed_us": 2.227623
+      },
+      {
+        "enqueue_us": 2.1506730000000003,
+        "completed_us": 2.80008
+      },
+      {
+        "enqueue_us": 3.832801,
+        "completed_us": 6.61148
+      },
+      {
+        "enqueue_us": 1.091911,
+        "completed_us": 2.228344
+      },
+      {
+        "enqueue_us": 1.086541,
+        "completed_us": 2.228173
+      },
+      {
+        "enqueue_us": 1.1023420000000002,
+        "completed_us": 2.2297640000000003
+      },
+      {
+        "enqueue_us": 1.104381,
+        "completed_us": 2.801079
+      },
+      {
+        "enqueue_us": 6.016424,
+        "completed_us": 7.108426000000001
+      },
+      {
+        "enqueue_us": 1.121041,
+        "completed_us": 2.228113
+      },
+      {
+        "enqueue_us": 1.115762,
+        "completed_us": 2.228334
+      },
+      {
+        "enqueue_us": 1.1418719999999998,
+        "completed_us": 2.228934
+      },
+      {
+        "enqueue_us": 1.122711,
+        "completed_us": 3.325765
+      },
+      {
+        "enqueue_us": 4.395376000000001,
+        "completed_us": 6.2345060000000005
+      },
+      {
+        "enqueue_us": 1.049731,
+        "completed_us": 3.0119610000000003
+      },
+      {
+        "enqueue_us": 1.0925719999999999,
+        "completed_us": 2.228644
+      },
+      {
+        "enqueue_us": 1.1076320000000002,
+        "completed_us": 2.228334
+      },
+      {
+        "enqueue_us": 2.059531,
+        "completed_us": 2.536816
+      },
+      {
+        "enqueue_us": 3.552348,
+        "completed_us": 6.3854880000000005
+      },
+      {
+        "enqueue_us": 1.093222,
+        "completed_us": 2.227764
+      },
+      {
+        "enqueue_us": 1.1062809999999998,
+        "completed_us": 2.2281530000000003
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 4,
+    "pair_position": 1,
+    "process_sequence": 29,
+    "process_wall_s": 3.305349947997456,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.074941,
+        "completed_us": 39.833830999999996
+      },
+      {
+        "enqueue_us": 2.671058,
+        "completed_us": 41.749502
+      },
+      {
+        "enqueue_us": 1.123931,
+        "completed_us": 38.337146000000004
+      },
+      {
+        "enqueue_us": 1.065951,
+        "completed_us": 40.190305
+      },
+      {
+        "enqueue_us": 1.0560910000000001,
+        "completed_us": 39.116594
+      },
+      {
+        "enqueue_us": 1.156452,
+        "completed_us": 38.78745000000001
+      },
+      {
+        "enqueue_us": 4.4606069999999995,
+        "completed_us": 41.30743700000001
+      },
+      {
+        "enqueue_us": 1.058011,
+        "completed_us": 38.302755
+      },
+      {
+        "enqueue_us": 1.104032,
+        "completed_us": 40.836172
+      },
+      {
+        "enqueue_us": 2.83652,
+        "completed_us": 40.820032
+      },
+      {
+        "enqueue_us": 1.0930609999999998,
+        "completed_us": 38.638558
+      },
+      {
+        "enqueue_us": 5.0046930000000005,
+        "completed_us": 42.086725
+      },
+      {
+        "enqueue_us": 1.0609009999999999,
+        "completed_us": 38.328286
+      },
+      {
+        "enqueue_us": 1.078001,
+        "completed_us": 40.407878000000004
+      },
+      {
+        "enqueue_us": 1.0585010000000001,
+        "completed_us": 40.435657
+      },
+      {
+        "enqueue_us": 1.069922,
+        "completed_us": 39.71468
+      },
+      {
+        "enqueue_us": 2.632008,
+        "completed_us": 40.120813999999996
+      },
+      {
+        "enqueue_us": 1.0678409999999998,
+        "completed_us": 40.984633
+      },
+      {
+        "enqueue_us": 6.771582,
+        "completed_us": 40.916503
+      },
+      {
+        "enqueue_us": 1.0504920000000002,
+        "completed_us": 40.387447
+      },
+      {
+        "enqueue_us": 1.122412,
+        "completed_us": 38.979242
+      },
+      {
+        "enqueue_us": 4.938972,
+        "completed_us": 41.742442
+      },
+      {
+        "enqueue_us": 1.082252,
+        "completed_us": 39.519808
+      },
+      {
+        "enqueue_us": 5.223826,
+        "completed_us": 42.07490500000001
+      },
+      {
+        "enqueue_us": 1.0853119999999998,
+        "completed_us": 38.741750999999994
+      },
+      {
+        "enqueue_us": 5.773451,
+        "completed_us": 40.428157
+      },
+      {
+        "enqueue_us": 1.050072,
+        "completed_us": 39.92738299999999
+      },
+      {
+        "enqueue_us": 1.1053119999999999,
+        "completed_us": 39.611339
+      },
+      {
+        "enqueue_us": 2.541786,
+        "completed_us": 41.562219
+      },
+      {
+        "enqueue_us": 1.051432,
+        "completed_us": 39.539519
+      },
+      {
+        "enqueue_us": 4.466407,
+        "completed_us": 42.53094
+      },
+      {
+        "enqueue_us": 2.779179,
+        "completed_us": 42.038214999999994
+      },
+      {
+        "enqueue_us": 3.8154809999999997,
+        "completed_us": 43.174807
+      },
+      {
+        "enqueue_us": 1.072961,
+        "completed_us": 39.521938
+      },
+      {
+        "enqueue_us": 5.095263,
+        "completed_us": 42.55805
+      },
+      {
+        "enqueue_us": 1.106572,
+        "completed_us": 39.027742999999994
+      },
+      {
+        "enqueue_us": 5.462058,
+        "completed_us": 42.594731
+      },
+      {
+        "enqueue_us": 1.0488909999999998,
+        "completed_us": 38.76605
+      },
+      {
+        "enqueue_us": 1.102702,
+        "completed_us": 40.810862
+      },
+      {
+        "enqueue_us": 1.095832,
+        "completed_us": 40.841862
+      },
+      {
+        "enqueue_us": 1.101472,
+        "completed_us": 39.276906000000004
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 5,
+    "pair_position": 0,
+    "process_sequence": 30,
+    "process_wall_s": 4.865983879000851,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.200423,
+        "completed_us": 39.929133
+      },
+      {
+        "enqueue_us": 1.3847939999999999,
+        "completed_us": 39.351096000000005
+      },
+      {
+        "enqueue_us": 1.458946,
+        "completed_us": 41.234967
+      },
+      {
+        "enqueue_us": 1.1525420000000002,
+        "completed_us": 40.63516
+      },
+      {
+        "enqueue_us": 1.455386,
+        "completed_us": 41.863113
+      },
+      {
+        "enqueue_us": 1.3185239999999998,
+        "completed_us": 39.504318
+      },
+      {
+        "enqueue_us": 1.187653,
+        "completed_us": 40.76544199999999
+      },
+      {
+        "enqueue_us": 1.3045039999999999,
+        "completed_us": 41.368328
+      },
+      {
+        "enqueue_us": 1.158272,
+        "completed_us": 41.51136999999999
+      },
+      {
+        "enqueue_us": 1.5236360000000002,
+        "completed_us": 41.401328
+      },
+      {
+        "enqueue_us": 1.135182,
+        "completed_us": 39.488178
+      },
+      {
+        "enqueue_us": 1.4625050000000002,
+        "completed_us": 41.654881
+      },
+      {
+        "enqueue_us": 1.145042,
+        "completed_us": 38.953661999999994
+      },
+      {
+        "enqueue_us": 1.456405,
+        "completed_us": 40.997854
+      },
+      {
+        "enqueue_us": 1.112722,
+        "completed_us": 39.419787
+      },
+      {
+        "enqueue_us": 1.214382,
+        "completed_us": 39.947892
+      },
+      {
+        "enqueue_us": 1.156473,
+        "completed_us": 41.377688
+      },
+      {
+        "enqueue_us": 1.125912,
+        "completed_us": 39.486158
+      },
+      {
+        "enqueue_us": 1.474696,
+        "completed_us": 42.223847
+      },
+      {
+        "enqueue_us": 1.138773,
+        "completed_us": 39.562649
+      },
+      {
+        "enqueue_us": 1.502616,
+        "completed_us": 40.867033
+      },
+      {
+        "enqueue_us": 1.136462,
+        "completed_us": 40.106224000000005
+      },
+      {
+        "enqueue_us": 1.150722,
+        "completed_us": 39.718990000000005
+      },
+      {
+        "enqueue_us": 1.379755,
+        "completed_us": 41.689551
+      },
+      {
+        "enqueue_us": 1.150662,
+        "completed_us": 39.220675
+      },
+      {
+        "enqueue_us": 1.1518419999999998,
+        "completed_us": 41.93441299999999
+      },
+      {
+        "enqueue_us": 1.1462130000000001,
+        "completed_us": 37.600839
+      },
+      {
+        "enqueue_us": 1.1415620000000002,
+        "completed_us": 41.232406000000005
+      },
+      {
+        "enqueue_us": 1.224153,
+        "completed_us": 42.323218000000004
+      },
+      {
+        "enqueue_us": 1.1263519999999998,
+        "completed_us": 41.339748
+      },
+      {
+        "enqueue_us": 1.130532,
+        "completed_us": 39.74978
+      },
+      {
+        "enqueue_us": 1.1588530000000001,
+        "completed_us": 39.69091
+      },
+      {
+        "enqueue_us": 1.485355,
+        "completed_us": 42.216156
+      },
+      {
+        "enqueue_us": 1.1326109999999998,
+        "completed_us": 41.538849
+      },
+      {
+        "enqueue_us": 1.483175,
+        "completed_us": 41.962154000000005
+      },
+      {
+        "enqueue_us": 1.1163919999999998,
+        "completed_us": 39.606889
+      },
+      {
+        "enqueue_us": 1.581057,
+        "completed_us": 41.715812
+      },
+      {
+        "enqueue_us": 1.145252,
+        "completed_us": 38.768010000000004
+      },
+      {
+        "enqueue_us": 1.177812,
+        "completed_us": 42.418559
+      },
+      {
+        "enqueue_us": 1.126972,
+        "completed_us": 39.843122
+      },
+      {
+        "enqueue_us": 1.132232,
+        "completed_us": 39.338485999999996
+      }
+    ],
+    "initial_rel_l2": 2.0171240677679327e-06,
+    "final_rel_l2": 2.0171240677679327e-06,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 5,
+    "pair_position": 1,
+    "process_sequence": 31,
+    "process_wall_s": 4.877792547998979,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1024",
+      "1024",
+      "1024",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.0469209999999998,
+        "completed_us": 3.3321150000000004
+      },
+      {
+        "enqueue_us": 1.1246120000000002,
+        "completed_us": 2.228624
+      },
+      {
+        "enqueue_us": 1.0981310000000002,
+        "completed_us": 2.229073
+      },
+      {
+        "enqueue_us": 1.113902,
+        "completed_us": 2.519107
+      },
+      {
+        "enqueue_us": 1.151402,
+        "completed_us": 2.402005
+      },
+      {
+        "enqueue_us": 1.1370019999999998,
+        "completed_us": 5.148805
+      },
+      {
+        "enqueue_us": 1.0248810000000002,
+        "completed_us": 3.705739
+      },
+      {
+        "enqueue_us": 1.091312,
+        "completed_us": 2.2292739999999998
+      },
+      {
+        "enqueue_us": 1.0921010000000002,
+        "completed_us": 2.229663
+      },
+      {
+        "enqueue_us": 1.096952,
+        "completed_us": 2.528087
+      },
+      {
+        "enqueue_us": 1.1268120000000001,
+        "completed_us": 4.225875
+      },
+      {
+        "enqueue_us": 1.050951,
+        "completed_us": 3.451216
+      },
+      {
+        "enqueue_us": 1.070692,
+        "completed_us": 2.229444
+      },
+      {
+        "enqueue_us": 1.0728309999999999,
+        "completed_us": 2.229134
+      },
+      {
+        "enqueue_us": 1.098061,
+        "completed_us": 2.2320629999999997
+      },
+      {
+        "enqueue_us": 1.121112,
+        "completed_us": 2.642878
+      },
+      {
+        "enqueue_us": 1.149982,
+        "completed_us": 4.2777259999999995
+      },
+      {
+        "enqueue_us": 1.068981,
+        "completed_us": 3.257894
+      },
+      {
+        "enqueue_us": 1.346534,
+        "completed_us": 2.227764
+      },
+      {
+        "enqueue_us": 1.1118020000000002,
+        "completed_us": 2.230853
+      },
+      {
+        "enqueue_us": 1.125912,
+        "completed_us": 2.520707
+      },
+      {
+        "enqueue_us": 1.4127750000000001,
+        "completed_us": 2.2298240000000003
+      },
+      {
+        "enqueue_us": 1.271463,
+        "completed_us": 3.406746
+      },
+      {
+        "enqueue_us": 1.188992,
+        "completed_us": 4.335795
+      },
+      {
+        "enqueue_us": 1.124322,
+        "completed_us": 2.83171
+      },
+      {
+        "enqueue_us": 1.1804630000000003,
+        "completed_us": 3.076863
+      },
+      {
+        "enqueue_us": 1.1858529999999998,
+        "completed_us": 2.5292169999999996
+      },
+      {
+        "enqueue_us": 1.311134,
+        "completed_us": 2.325974
+      },
+      {
+        "enqueue_us": 1.2118129999999998,
+        "completed_us": 2.233194
+      },
+      {
+        "enqueue_us": 1.215603,
+        "completed_us": 4.4041369999999995
+      },
+      {
+        "enqueue_us": 1.078171,
+        "completed_us": 3.294415
+      },
+      {
+        "enqueue_us": 1.1906020000000002,
+        "completed_us": 2.231183
+      },
+      {
+        "enqueue_us": 1.3554549999999999,
+        "completed_us": 2.517627
+      },
+      {
+        "enqueue_us": 1.691578,
+        "completed_us": 2.238884
+      },
+      {
+        "enqueue_us": 1.132812,
+        "completed_us": 4.198844
+      },
+      {
+        "enqueue_us": 1.0340010000000002,
+        "completed_us": 3.2295439999999997
+      },
+      {
+        "enqueue_us": 1.086852,
+        "completed_us": 2.230504
+      },
+      {
+        "enqueue_us": 1.1655920000000002,
+        "completed_us": 2.519327
+      },
+      {
+        "enqueue_us": 1.2043320000000002,
+        "completed_us": 2.411205
+      },
+      {
+        "enqueue_us": 1.148212,
+        "completed_us": 5.147625
+      },
+      {
+        "enqueue_us": 1.060981,
+        "completed_us": 3.511017
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 5,
+    "pair_position": 0,
+    "process_sequence": 32,
+    "process_wall_s": 3.3062706509990676,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.105732,
+        "completed_us": 4.562068
+      },
+      {
+        "enqueue_us": 1.128412,
+        "completed_us": 2.228784
+      },
+      {
+        "enqueue_us": 1.1215719999999998,
+        "completed_us": 2.2295439999999997
+      },
+      {
+        "enqueue_us": 1.141742,
+        "completed_us": 2.2293629999999998
+      },
+      {
+        "enqueue_us": 1.1283720000000002,
+        "completed_us": 2.629178
+      },
+      {
+        "enqueue_us": 1.2055429999999998,
+        "completed_us": 4.1148940000000005
+      },
+      {
+        "enqueue_us": 1.1235620000000002,
+        "completed_us": 3.210834
+      },
+      {
+        "enqueue_us": 1.1318620000000001,
+        "completed_us": 2.227703
+      },
+      {
+        "enqueue_us": 1.1322420000000002,
+        "completed_us": 2.2269740000000002
+      },
+      {
+        "enqueue_us": 1.158942,
+        "completed_us": 2.2284140000000003
+      },
+      {
+        "enqueue_us": 1.152852,
+        "completed_us": 2.530956
+      },
+      {
+        "enqueue_us": 1.157562,
+        "completed_us": 4.179105
+      },
+      {
+        "enqueue_us": 1.0979210000000001,
+        "completed_us": 3.1812530000000003
+      },
+      {
+        "enqueue_us": 1.116572,
+        "completed_us": 2.2293939999999997
+      },
+      {
+        "enqueue_us": 1.116612,
+        "completed_us": 2.231473
+      },
+      {
+        "enqueue_us": 1.1427620000000003,
+        "completed_us": 2.2289540000000003
+      },
+      {
+        "enqueue_us": 1.1481320000000002,
+        "completed_us": 2.516527
+      },
+      {
+        "enqueue_us": 1.165972,
+        "completed_us": 4.130433999999999
+      },
+      {
+        "enqueue_us": 1.118691,
+        "completed_us": 3.4357159999999998
+      },
+      {
+        "enqueue_us": 1.121262,
+        "completed_us": 2.229924
+      },
+      {
+        "enqueue_us": 1.129251,
+        "completed_us": 2.229603
+      },
+      {
+        "enqueue_us": 1.1293019999999998,
+        "completed_us": 2.228194
+      },
+      {
+        "enqueue_us": 1.142952,
+        "completed_us": 2.516106
+      },
+      {
+        "enqueue_us": 1.1578030000000001,
+        "completed_us": 4.314366
+      },
+      {
+        "enqueue_us": 1.168302,
+        "completed_us": 3.488947
+      },
+      {
+        "enqueue_us": 1.136152,
+        "completed_us": 2.2278939999999996
+      },
+      {
+        "enqueue_us": 1.129231,
+        "completed_us": 2.2279430000000002
+      },
+      {
+        "enqueue_us": 1.165333,
+        "completed_us": 2.230254
+      },
+      {
+        "enqueue_us": 1.176102,
+        "completed_us": 2.550567
+      },
+      {
+        "enqueue_us": 1.163222,
+        "completed_us": 4.248085
+      },
+      {
+        "enqueue_us": 1.1507319999999999,
+        "completed_us": 3.3291549999999996
+      },
+      {
+        "enqueue_us": 1.1645519999999998,
+        "completed_us": 2.2280830000000003
+      },
+      {
+        "enqueue_us": 1.1365329999999998,
+        "completed_us": 2.2275639999999997
+      },
+      {
+        "enqueue_us": 1.1570829999999999,
+        "completed_us": 2.228224
+      },
+      {
+        "enqueue_us": 1.151722,
+        "completed_us": 2.6249680000000004
+      },
+      {
+        "enqueue_us": 1.153932,
+        "completed_us": 4.110132999999999
+      },
+      {
+        "enqueue_us": 1.121872,
+        "completed_us": 3.1072930000000003
+      },
+      {
+        "enqueue_us": 1.1430719999999999,
+        "completed_us": 2.2274439999999998
+      },
+      {
+        "enqueue_us": 1.133222,
+        "completed_us": 2.227363
+      },
+      {
+        "enqueue_us": 1.152212,
+        "completed_us": 2.2272239999999996
+      },
+      {
+        "enqueue_us": 1.1547919999999998,
+        "completed_us": 2.517506
+      }
+    ],
+    "initial_rel_l2": 7.35138739956983e-08,
+    "final_rel_l2": 7.35138739956983e-08,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 5,
+    "pair_position": 1,
+    "process_sequence": 33,
+    "process_wall_s": 3.2546839930000715,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "1",
+      "16",
+      "16",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 0,
+    "rounds": [
+      {
+        "enqueue_us": 1.056001,
+        "completed_us": 4.448587000000001
+      },
+      {
+        "enqueue_us": 1.102441,
+        "completed_us": 3.082413
+      },
+      {
+        "enqueue_us": 1.109641,
+        "completed_us": 3.3700349999999997
+      },
+      {
+        "enqueue_us": 1.1297519999999999,
+        "completed_us": 3.8234209999999997
+      },
+      {
+        "enqueue_us": 1.080261,
+        "completed_us": 5.190394
+      },
+      {
+        "enqueue_us": 1.130643,
+        "completed_us": 3.085224
+      },
+      {
+        "enqueue_us": 1.1746219999999998,
+        "completed_us": 3.382765
+      },
+      {
+        "enqueue_us": 1.119202,
+        "completed_us": 3.6967290000000004
+      },
+      {
+        "enqueue_us": 1.0518219999999998,
+        "completed_us": 4.7692309999999996
+      },
+      {
+        "enqueue_us": 1.067421,
+        "completed_us": 3.9938320000000003
+      },
+      {
+        "enqueue_us": 1.098832,
+        "completed_us": 3.384426
+      },
+      {
+        "enqueue_us": 1.134922,
+        "completed_us": 3.2346440000000003
+      },
+      {
+        "enqueue_us": 1.106432,
+        "completed_us": 5.019303
+      },
+      {
+        "enqueue_us": 1.0514109999999999,
+        "completed_us": 3.8093509999999995
+      },
+      {
+        "enqueue_us": 1.133702,
+        "completed_us": 3.086153
+      },
+      {
+        "enqueue_us": 1.1041309999999998,
+        "completed_us": 3.381775
+      },
+      {
+        "enqueue_us": 1.123822,
+        "completed_us": 4.334656
+      },
+      {
+        "enqueue_us": 1.105132,
+        "completed_us": 4.440947
+      },
+      {
+        "enqueue_us": 1.104982,
+        "completed_us": 3.085973
+      },
+      {
+        "enqueue_us": 1.1197620000000001,
+        "completed_us": 3.375686
+      },
+      {
+        "enqueue_us": 1.3645440000000002,
+        "completed_us": 3.353625
+      },
+      {
+        "enqueue_us": 1.6325370000000001,
+        "completed_us": 3.8473410000000006
+      },
+      {
+        "enqueue_us": 1.079372,
+        "completed_us": 5.315546
+      },
+      {
+        "enqueue_us": 1.330575,
+        "completed_us": 3.0898129999999995
+      },
+      {
+        "enqueue_us": 1.1063519999999998,
+        "completed_us": 3.368036
+      },
+      {
+        "enqueue_us": 1.1413820000000001,
+        "completed_us": 3.8696910000000004
+      },
+      {
+        "enqueue_us": 1.0838709999999998,
+        "completed_us": 4.435787
+      },
+      {
+        "enqueue_us": 1.1235620000000002,
+        "completed_us": 4.025982
+      },
+      {
+        "enqueue_us": 1.2013429999999998,
+        "completed_us": 3.381686
+      },
+      {
+        "enqueue_us": 1.1650019999999999,
+        "completed_us": 3.121643
+      },
+      {
+        "enqueue_us": 1.1202919999999998,
+        "completed_us": 5.086914
+      },
+      {
+        "enqueue_us": 1.0886419999999999,
+        "completed_us": 3.81888
+      },
+      {
+        "enqueue_us": 1.0943120000000002,
+        "completed_us": 3.3742160000000005
+      },
+      {
+        "enqueue_us": 1.339214,
+        "completed_us": 3.73373
+      },
+      {
+        "enqueue_us": 1.101432,
+        "completed_us": 5.373747000000001
+      },
+      {
+        "enqueue_us": 1.142552,
+        "completed_us": 3.513257
+      },
+      {
+        "enqueue_us": 1.1240320000000001,
+        "completed_us": 3.085403
+      },
+      {
+        "enqueue_us": 1.1412419999999999,
+        "completed_us": 3.403516
+      },
+      {
+        "enqueue_us": 1.1407520000000002,
+        "completed_us": 4.863880999999999
+      },
+      {
+        "enqueue_us": 1.128382,
+        "completed_us": 3.981492
+      },
+      {
+        "enqueue_us": 1.092202,
+        "completed_us": 3.236525
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "after",
+    "trial": 5,
+    "pair_position": 0,
+    "process_sequence": 34,
+    "process_wall_s": 3.296780193999439,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "policy": "deferred",
+    "calls_per_round": 1000,
+    "audit_calls": 1000,
+    "audit_rust_allocations": 2000,
+    "rounds": [
+      {
+        "enqueue_us": 1.080492,
+        "completed_us": 4.68629
+      },
+      {
+        "enqueue_us": 1.100482,
+        "completed_us": 3.79229
+      },
+      {
+        "enqueue_us": 1.1293220000000002,
+        "completed_us": 3.093853
+      },
+      {
+        "enqueue_us": 1.142362,
+        "completed_us": 3.385306
+      },
+      {
+        "enqueue_us": 1.1430319999999998,
+        "completed_us": 5.309656
+      },
+      {
+        "enqueue_us": 1.090762,
+        "completed_us": 3.76464
+      },
+      {
+        "enqueue_us": 1.1421620000000001,
+        "completed_us": 3.092683
+      },
+      {
+        "enqueue_us": 1.126012,
+        "completed_us": 3.404596
+      },
+      {
+        "enqueue_us": 1.150782,
+        "completed_us": 4.798341000000001
+      },
+      {
+        "enqueue_us": 1.099191,
+        "completed_us": 4.140702999999999
+      },
+      {
+        "enqueue_us": 1.111052,
+        "completed_us": 3.0924630000000004
+      },
+      {
+        "enqueue_us": 1.115732,
+        "completed_us": 3.094013
+      },
+      {
+        "enqueue_us": 1.184763,
+        "completed_us": 3.4984569999999997
+      },
+      {
+        "enqueue_us": 1.125322,
+        "completed_us": 5.436408
+      },
+      {
+        "enqueue_us": 1.125852,
+        "completed_us": 3.0925819999999997
+      },
+      {
+        "enqueue_us": 1.138032,
+        "completed_us": 3.093473
+      },
+      {
+        "enqueue_us": 1.1468530000000001,
+        "completed_us": 3.0923230000000004
+      },
+      {
+        "enqueue_us": 1.133732,
+        "completed_us": 5.141764
+      },
+      {
+        "enqueue_us": 1.101072,
+        "completed_us": 3.72527
+      },
+      {
+        "enqueue_us": 1.117952,
+        "completed_us": 3.093273
+      },
+      {
+        "enqueue_us": 1.1170909999999998,
+        "completed_us": 3.092422
+      },
+      {
+        "enqueue_us": 1.1690030000000002,
+        "completed_us": 4.8812619999999995
+      },
+      {
+        "enqueue_us": 1.081262,
+        "completed_us": 4.0350530000000004
+      },
+      {
+        "enqueue_us": 1.1348520000000002,
+        "completed_us": 3.0920829999999997
+      },
+      {
+        "enqueue_us": 1.108451,
+        "completed_us": 3.093372
+      },
+      {
+        "enqueue_us": 1.144623,
+        "completed_us": 3.378576
+      },
+      {
+        "enqueue_us": 1.1503720000000002,
+        "completed_us": 4.828932
+      },
+      {
+        "enqueue_us": 1.0975810000000001,
+        "completed_us": 3.9029809999999996
+      },
+      {
+        "enqueue_us": 1.103842,
+        "completed_us": 3.102932
+      },
+      {
+        "enqueue_us": 1.151043,
+        "completed_us": 3.385607
+      },
+      {
+        "enqueue_us": 1.173562,
+        "completed_us": 3.092752
+      },
+      {
+        "enqueue_us": 1.1505919999999998,
+        "completed_us": 4.922972000000001
+      },
+      {
+        "enqueue_us": 1.089022,
+        "completed_us": 3.9119119999999996
+      },
+      {
+        "enqueue_us": 1.1420320000000002,
+        "completed_us": 3.096953
+      },
+      {
+        "enqueue_us": 1.131941,
+        "completed_us": 3.385946
+      },
+      {
+        "enqueue_us": 1.1787919999999998,
+        "completed_us": 4.775849999999999
+      },
+      {
+        "enqueue_us": 1.136272,
+        "completed_us": 4.041823
+      },
+      {
+        "enqueue_us": 1.130142,
+        "completed_us": 3.092823
+      },
+      {
+        "enqueue_us": 1.153092,
+        "completed_us": 3.378766
+      },
+      {
+        "enqueue_us": 1.1646320000000001,
+        "completed_us": 3.094312
+      },
+      {
+        "enqueue_us": 1.207433,
+        "completed_us": 3.331586
+      }
+    ],
+    "initial_rel_l2": 3.7940168201107414e-07,
+    "final_rel_l2": 3.7940168201107414e-07,
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "variant": "before",
+    "trial": 5,
+    "pair_position": 1,
+    "process_sequence": 35,
+    "process_wall_s": 3.2908739570011676,
+    "command": [
+      "/usr/bin/taskset",
+      "--cpu-list",
+      "0",
+      "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+      "256",
+      "256",
+      "256",
+      "deferred"
+    ]
+  }
+]

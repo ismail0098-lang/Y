@@ -45,6 +45,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "common/pinned.rs"]
 mod pinned;
+#[path = "common/ptxas.rs"]
+mod assembler;
+#[path = "common/verification.rs"]
+mod verification;
 
 /// Two tests calling the same helper for the same arch would otherwise share a
 /// directory and `remove_dir_all` each other's output mid-run - the `.ptx` race
@@ -105,12 +109,7 @@ fn repo() -> PathBuf {
 }
 
 fn ptxas() -> Option<PathBuf> {
-    for c in ["ptxas", "/opt/cuda/bin/ptxas", "/usr/local/cuda/bin/ptxas"] {
-        if Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
-            return Some(PathBuf::from(c));
-        }
-    }
-    None
+    assembler::ptxas()
 }
 
 /// Assemble `ptx` for `arch`; `Ok(())` or the first line of ptxas's complaint.
@@ -379,8 +378,7 @@ fn no_source_file_hardcodes_a_target_above_the_floor() {
 #[test]
 fn fp8_refuses_below_ada_and_still_works_on_it() {
     let src = repo().join("tests/gemm_fp8_256.ysu");
-    if !src.exists() {
-        eprintln!("SKIP: no FP8 fixture");
+    if !verification::prerequisite_available(src.is_file(), "FP8 source fixture for architecture refusal checks") {
         return;
     }
     // A profile is what fixes the target, so writing one is how a card is
@@ -396,6 +394,10 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
         pinned::pin(&dir, cc);
         let local_src = dir.join("gemm_fp8_256.ysu");
         std::fs::copy(&src, &local_src).unwrap();
+        let artifact = local_src.with_extension("ptx");
+        if artifact.exists() {
+            std::fs::remove_file(&artifact).expect("remove prior FP8 artifact");
+        }
 
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&local_src)
@@ -408,9 +410,11 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        let wrote_ptx = artifact.is_file();
         let _ = std::fs::remove_dir_all(&dir);
 
         if want_refusal {
+            assert!(!wrote_ptx, "refused FP8 fixture published an artifact:\n{text}");
             assert!(
                 !out.status.success(),
                 "at sm_{} an FP8 kernel was ACCEPTED. The emitted module cannot load on \
@@ -426,6 +430,7 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
                 text
             );
         } else {
+            assert!(wrote_ptx, "supported FP8 fixture published no artifact:\n{text}");
             assert!(
                 out.status.success(),
                 "at sm_{} FP8 must still compile - refusing everywhere is sound and \
@@ -454,8 +459,8 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
 /// optional GUI surface and is now dropped when the library is absent.
 #[test]
 fn the_llvm_backend_works_from_a_foreign_directory() {
-    if Command::new("clang").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
-        eprintln!("SKIP: no clang");
+    let have_clang = Command::new("clang").arg("--version").output().is_ok_and(|output| output.status.success());
+    if !verification::prerequisite_available(have_clang, "clang for the foreign-directory compiler check") {
         return;
     }
     let dir = std::env::temp_dir().join(format!("y_foreign_cwd_{}", std::process::id()));
@@ -638,8 +643,14 @@ fn emitted_module_for(arch: &str) -> String {
         .current_dir(&dir)
         .output()
         .expect("run Y");
+    assert!(
+        out.status.success(),
+        "plain kernel compilation failed for {arch}:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let ptx = std::fs::read_to_string(dir.join("plain.ptx"))
-        .unwrap_or_else(|_| String::from_utf8_lossy(&out.stdout).to_string());
+        .expect("successful plain kernel compilation must publish PTX");
     let _ = std::fs::remove_dir_all(&dir);
     ptx
 }
@@ -931,10 +942,13 @@ fn an_architecture_specific_target_does_not_travel() {
     );
 
     for later in ["sm_100", "sm_120"] {
-        if assembles(&tool, &plain, later, &format!("travel_plain_{later}")).is_err() {
+        if let Err(error) = assembles(&tool, &plain, later, &format!("travel_plain_{later}")) {
             // This assembler may simply not know the arch; skip rather than
             // assert something about the local toolchain.
-            eprintln!("skipping {later}: not supported by this ptxas");
+            verification::prerequisite_available(
+                false,
+                &format!("PTXAS support for the documented {later} portability target: {error}"),
+            );
             continue;
         }
         assert!(

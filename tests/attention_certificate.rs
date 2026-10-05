@@ -284,7 +284,7 @@ fn the_certificate_states_its_obligation_and_evaluates_its_model() {
         "the certificate does not name the length it was emitted for"
     );
     assert!(
-        text.contains("seq_len_Z * (2 ^ 28 - 1) * 127 < 2 ^ 63"),
+        text.contains("seq_len_Z * 2 ^ 28 * 127 < 2 ^ 63"),
         "the obligation is not stated in the certificate, so a reader auditing \
          the artifact cannot see what it claims"
     );

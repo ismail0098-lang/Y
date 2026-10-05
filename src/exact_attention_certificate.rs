@@ -23,11 +23,11 @@
 //!
 //! **The obligation bites, and that is the point of emitting it.** The kernel
 //! reduces into a 64-bit accumulator over `red.global.add.u64`, so exactness
-//! needs `S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize` arithmetic
+//! needs `S * 2^28 * 127 < 2^63`. Y decides that in `usize` arithmetic
 //! ([`crate::exact_attention::MAX_EXACT_SEQ_LEN`]); the certificate states it
 //! over `Z` and hands it to `coqc`, which has no `usize`. Verified at the edge
-//! before this module was written: the certificate is **accepted at 270549122
-//! and refused at 270549123**, one unit wide, which is the same boundary the
+//! after including the exactly-one weight: **accepted at 270549121
+//! and refused at 270549122**, one unit wide, which is the same boundary the
 //! emitter refuses at and derived by a different tool from a different
 //! representation.
 //!
@@ -258,10 +258,11 @@ Definition head_dim_Z : Z := {hd}.
 (** *** THE COMPILATION-SPECIFIC OBLIGATION.
 
     The kernel reduces into a 64-bit accumulator, and a weight is at most
-    `2^28 - 1` against a `V` of at most 127 in magnitude.  Past this the sum
-    WRAPS, which is a wrong answer rather than an imprecise one. *)
+    `2^28` (attained at score delta zero) against a `V` of at most 127 in
+    magnitude. Past this the sum WRAPS, which is a wrong answer rather than
+    an imprecise one. *)
 Theorem the_accumulator_does_not_wrap :
-  seq_len_Z * (2 ^ 28 - 1) * 127 < 2 ^ 63.
+  seq_len_Z * 2 ^ 28 * 127 < 2 ^ 63.
 Proof. unfold seq_len_Z. lia. Qed.
 
 (** The two spellings of the length are the same number.  Without this the

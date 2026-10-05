@@ -1,0 +1,15 @@
+{
+  "original_emitter_restored": true,
+  "sha256": {
+    "target/gemm-scheduling-2026-09-25/before_ptx_emitter.rs": "bb219378c40c2ef25141b9091835d3d224bc69ebc70d3733b24ad7286f3b145e",
+    "target/gemm-scheduling-2026-09-25/candidate_ptx_emitter.rs": "b0897d16dd1b2a2d70b0f10b8e5dec2d9395a40e183d03a5c037f5f8620ef5f6",
+    "target/gemm-scheduling-2026-09-25/candidate2_ptx_emitter.rs": "95b4192a91ac221b5099651758524ab7593a966c8d56039543dc94d12131d7bc",
+    "target/gemm-scheduling-2026-09-25/candidate2_exporter": "27f32a49de6e54f551a239963445c713425033d6a30da0ebd7ab89cd5e80437f",
+    "examples/gemm_kernel_compare.rs": "02529e8d04dedc947694802798f3ace60caa2c254673fe8787605ac153f1f96c",
+    "tools/benchmark_gemm_vendor.py": "03bea6ebc4e1c406e629756a95b81d95b81e1cc6df8423cfea118bc49ee0477f",
+    "tests/gemm_compute_schedule_gpu.rs": "bc48d677535fe14453f18fdcdecee68a424011b48a18c7b99741c89936f8f11b",
+    "target/release/Y": "3fafd2e732f3807143d48372dbb8d7af567d72c03dbc7e312a7975f17a4f51db",
+    "target/release/liby.so": "34f2efcc60bde53c299654a2da042b4e1c595a1c496f83f70165899d11b82409",
+    "target/release/examples/gemm_kernel_compare": "ad6d00977d9c9a5688b2bd43c29ffeb82f4d9015d1fe6875a0a5995d2755ebc5"
+  }
+}

@@ -24,10 +24,8 @@ not listed below.  A refusal makes the rung answer `unknown`, which is the
 safe answer.
 
 Everything is built in the CONTEXT OF THE TERM IT IS GIVEN, and the import-time
-self-check runs in a private one: z3 reuses freed node ids and `mulmode`/
-`fpmode` order commutative operands by id, so an import that allocates in the
-main context reorders operands in unrelated kernels' terms (measured once
-already in this directory, through `memorder`'s self-check).
+self-check runs in a private one so its temporary allocations do not affect
+unrelated obligations' solver state and allocation history.
 """
 from z3 import *
 
@@ -42,6 +40,7 @@ class Encoder:
         self.side = []          # range and wrap constraints, all must hold
         self.memo = {}
         self.vars = {}
+        self.bools = {}
         self.funcs = {}
         self.n = 0
         # EVERY node whose id is used as a memo key is kept alive here.  z3
@@ -139,11 +138,15 @@ class Encoder:
             self.memo[key] = r
         return r
 
-    def ranged(self, name, w):
-        v = self.vars.get(name)
+    def ranged(self, t):
+        # SMT permits overloads, and integer/string symbols can print alike.
+        # They are independent inputs; only DECLARATION identity preserves
+        # that distinction. Generated Int names must also remain unique.
+        name, w, key = str(t), t.size(), t.decl()
+        v = self.vars.get(key)
         if v is None:
-            v = Int(f'_iv_{name}', self.ctx)
-            self.vars[name] = v
+            v = Int(f'_iv_{len(self.vars)}_{name}_{w}', self.ctx)
+            self.vars[key] = v
             self.note(v, (1 << w) - 1)
             self.side += [v >= 0, v < self.I(1 << w)]
         return v
@@ -160,21 +163,25 @@ class Encoder:
         return r
 
     def _bv(self, t):
+        if not is_bv(t):
+            raise Unsupported(f'non-bitvector term of sort {t.sort()}')
         w = t.size()
         M = 1 << w
         if is_bv_value(t):
             return self.I(t.as_long())
+        if not is_app(t):
+            raise Unsupported(f'non-application bitvector term {t.sexpr()[:60]}')
         k = t.decl().kind()
         ch = t.children()
         if k == Z3_OP_UNINTERPRETED:
             if not ch:
-                return self.ranged(str(t), w)
+                return self.ranged(t)
             return self.uf(t, ch)
         if k == Z3_OP_SELECT:
             arr, idx = ch
-            if arr.decl().kind() != Z3_OP_UNINTERPRETED or arr.children():
+            if not is_const(arr) or arr.decl().kind() != Z3_OP_UNINTERPRETED:
                 raise Unsupported(f'select from a non-bare array {arr.sexpr()[:60]}')
-            return self.uf(t, [idx], name='sel_' + str(arr))
+            return self.uf(t, [idx], name='sel_' + str(arr), source=arr.decl())
         if k == Z3_OP_ITE:
             a, b = self.bv(ch[1]), self.bv(ch[2])
             return self.note(If(self.bool(ch[0]), a, b), max(self.bound(a), self.bound(b)))
@@ -249,10 +256,15 @@ class Encoder:
             raise Unsupported('a bitwise AND other than a low-bit mask')
         raise Unsupported(f'bitvector operator {t.decl().name()}')
 
-    def uf(self, t, args, name=None):
+    def uf(self, t, args, name=None, source=None):
         name = name or t.decl().name()
         doms = tuple(a.sort() for a in args)
-        key = (name, doms)
+        # A declaration includes its domain AND range sorts. Different source
+        # widths all become Int here, so a name/domain key (or reusing one Int
+        # function name for distinct keys) would silently merge overloads.
+        # Bare-array selects also retain the ARRAY declaration: an ordinary
+        # source function named sel_X must not become a read of array X.
+        key = (source if source is not None else t.decl(), doms, t.sort())
         f = self.funcs.get(key)
         if f is None:
             isorts = []
@@ -260,7 +272,7 @@ class Encoder:
                 if s.kind() == Z3_BV_SORT: isorts.append(IntSort(self.ctx))
                 elif s.kind() == Z3_BOOL_SORT: isorts.append(BoolSort(self.ctx))
                 else: raise Unsupported(f'uninterpreted argument sort {s}')
-            f = Function(f'_if_{name}', *isorts, IntSort(self.ctx))
+            f = Function(f'_if_{name}_{len(self.funcs)}', *isorts, IntSort(self.ctx))
             self.funcs[key] = f
         ia = [self.bv(a) if a.sort().kind() == Z3_BV_SORT else self.bool(a) for a in args]
         v = f(*ia)
@@ -277,8 +289,12 @@ class Encoder:
         return r
 
     def _bool(self, t):
+        if not is_bool(t):
+            raise Unsupported(f'non-boolean term of sort {t.sort()}')
         if is_true(t): return BoolVal(True, self.ctx)
         if is_false(t): return BoolVal(False, self.ctx)
+        if not is_app(t):
+            raise Unsupported(f'non-application boolean term {t.sexpr()[:60]}')
         k = t.decl().kind(); ch = t.children()
         if k == Z3_OP_AND: return And([self.bool(c) for c in ch])
         if k == Z3_OP_OR: return Or([self.bool(c) for c in ch])
@@ -305,7 +321,10 @@ class Encoder:
             sv = [If(self.bv(c) >= H, self.bv(c) - M, self.bv(c)) for c in ch]
             return S[k](sv[0], sv[1])
         if k == Z3_OP_UNINTERPRETED and not ch:
-            return Bool(f'_ib_{t}', self.ctx)
+            key = t.decl()
+            if key not in self.bools:
+                self.bools[key] = Bool(f'_ib_{len(self.bools)}', self.ctx)
+            return self.bools[key]
         raise Unsupported(f'boolean operator {t.decl().name()}')
 
 
@@ -333,7 +352,27 @@ def check(formulas, budget_s, want_model=False, rewrite=True):
         # the model of every INPUT, as bitvector values, so a caller can check a
         # counterexample against the bitvector formula it came from
         m = s.model() if r == 'sat' else None
-        return r, ({n: m.eval(v).as_long() for n, v in enc.vars.items()} if m else None)
+        if m is None:
+            return r, None
+        names = [str(decl()) for decl in enc.vars]
+        # Preserve ordinary input names, qualifying overloads. Reserve all
+        # unique source names first so a user name cannot capture a generated
+        # label; even identically printed declarations retain separate values.
+        used = {name for name in names if names.count(name) == 1}
+        values = {}
+        for decl, v in enc.vars.items():
+            name = str(decl())
+            if names.count(name) == 1:
+                label = name
+            else:
+                base = f'{name}:BV{decl.range().size()}'
+                label, suffix = base, 0
+                while label in used:
+                    suffix += 1
+                    label = f'{base}#{suffix}'
+                used.add(label)
+            values[label] = m.eval(v, model_completion=True).as_long()
+        return r, values
     return r
 
 

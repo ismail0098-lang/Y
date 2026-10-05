@@ -86,18 +86,18 @@ run 'R0 CONTROL: two self-check cases reordered (no-op)'
 
 M "R1 read_through ignores the stores (the original model)" <<'P'
 s=open('memorder.py').read()
-a="    if not stores:\n        return base\n    if not (is_bv(addr)"
+a="    if not stores:\n        return base\n    widths = "
 assert s.count(a)==1
-open('memorder.py','w').write(s.replace(a,"    return base\n    if not (is_bv(addr)"))
+open('memorder.py','w').write(s.replace(a,"    return base\n    widths = "))
 P
 run 'R1 read_through ignores the stores (the original model)'
 
 M "R1b COMPOUND: store-blind read AND the private self-check removed" <<'P'
 s=open('memorder.py').read()
-a="    if not stores:\n        return base\n    if not (is_bv(addr)"
+a="    if not stores:\n        return base\n    widths = "
 b="    _private_self_check()\n"
 assert s.count(a)==1 and s.count(b)==1
-s=s.replace(a,"    return base\n    if not (is_bv(addr)").replace(b,"")
+s=s.replace(a,"    return base\n    widths = ").replace(b,"")
 open('memorder.py','w').write(s)
 P
 run 'R1b COMPOUND: store-blind read AND the private self-check removed'

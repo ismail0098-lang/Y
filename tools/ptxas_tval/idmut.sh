@@ -28,8 +28,8 @@ printf '%-62s %-8s %s\n' MUTATION IMPORT 'int nsc rw d0 bias tw tws a1 a1t'
 
 ./restore.sh >/dev/null
 python3 - <<'P'
-s=open('tval.py').read(); a="    proved=[]; first={}\n"
-assert s.count(a)==1; open('tval.py','w').write(s.replace(a,"    first={}; proved=[]\n"))
+s=open('tval.py').read(); a="    proved=[]; unspecified_stores={}\n"
+assert s.count(a)==1; open('tval.py','w').write(s.replace(a,"    unspecified_stores={}; proved=[]\n"))
 P
 row "C0 CONTROL: two independent initialisations reordered"
 
@@ -106,8 +106,8 @@ row "M9 PTX division by zero back to z3's convention"
 
 ./restore.sh >/dev/null
 python3 - <<'P'
-s=open('tval.py').read(); a="            if u.get_id() in first:\n"
-assert s.count(a)==1; open('tval.py','w').write(s.replace(a,"            if False:\n"))
+s=open('tval.py').read(); a="            for s0, g0, c0 in previous:\n"
+assert s.count(a)==1; open('tval.py','w').write(s.replace(a,"            for s0, g0, c0 in []:\n"))
 P
 row "M10 the one-unspecified-value consistency check removed"
 
@@ -127,7 +127,7 @@ row "M12 no fact is ever relevant"
 
 ./restore.sh >/dev/null
 python3 - <<'P'
-s=open('tval.py').read(); a="            proved.append(Implies(And(extra), sd == pd) if extra else sd == pd)\n"
+s=open('tval.py').read(); a="            proved.append(Implies(And([guardD] + extra), sd == pd))\n"
 assert s.count(a)==1; open('tval.py','w').write(s.replace(a,"            pass\n"))
 P
 row "M13 a proved store is not a fact for later stores"

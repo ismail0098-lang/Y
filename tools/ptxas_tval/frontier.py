@@ -808,7 +808,14 @@ def isolation_control():
     Non-monotone at BOTH commits, and 60 and 120 swapped.  The contamination is
     z3 node-id order, so any single count is a fact about today's construction
     history, not about the hazard.  The control tries PREAMBLES in order and uses
-    the first that contaminates; only if none does is it vacuous."""
+    the first that contaminates.
+
+    SINCE THE OPERANDS ARE ORDERED BY VALUE, NONE DOES. `mulmode.ordered` and
+    `fpmode` order a commutative call's operands by an `If` on their values, not
+    by node id, which removes the hazard at its source - confirmed by putting the
+    id ordering back, which makes a 5-round preamble contaminate again. So the
+    control now passes when nothing contaminates, and fails only if a
+    contaminating preamble also defeats the isolated census."""
     import subprocess
     src = r"""
 import os, sys, glob, tempfile, shutil, contextlib, io
@@ -854,10 +861,18 @@ print('VERDICT', inline, '|', isolated)
         print(f'  control: after a {n}-round preamble the in-process census says {inline} for '
               f'exact_pv at -O1 and the isolated one still validates it (tried {", ".join(tried)})')
         return 0
-    print(f'FAIL: the in-process census still validates exact_pv after every preamble tried '
-          f'({", ".join(tried)}), so this control is vacuous -- re-read why `structural` runs '
-          'in its own process')
-    return 1
+    # NO PREAMBLE CONTAMINATES, and that is now the expected answer rather than a
+    # vacuous control. The contamination was commutative operands ordered by z3
+    # node ID; `mulmode.ordered` and `fpmode`'s FADD/FMAX now order them by VALUE
+    # (an `If` on `ULE`), so no construction history can reorder a term.
+    # Measured: putting the id ordering back makes a 5-round preamble turn the
+    # in-process verdict UNPROVED again while the isolated one still validates.
+    # The process boundary stays as defence, and this control still demands the
+    # isolated census survive whenever some preamble does contaminate.
+    print(f'  control: no preamble contaminates the in-process census ({", ".join(tried)}): '
+          'commutative operands are ordered by value, not node id. The boundary in '
+          '`structural` stays as defence')
+    return 0
 
 
 # Tried in order; the first that contaminates is used.  Not one count, because the

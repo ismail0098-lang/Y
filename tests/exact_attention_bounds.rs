@@ -30,17 +30,30 @@ use y::exact_attention::{attention_ptx, score_delta_span, temperature_fixed_poin
 /// value, summed, must stay inside a signed 64-bit accumulator.
 #[test]
 fn the_sequence_bound_is_the_accumulator_width() {
-    let max_term = ((1u128 << 28) - 1) * 127;
-    let derived = ((1u128 << 63) / max_term) as usize;
+    // Equal scores produce this maximum through the real exp implementation.
+    // Deriving the bound from `2^28 - 1` in both compiler and proof missed it.
+    let max_weight = y::fixed_exp::exp2_neg_q16_16(0) as u128;
+    assert_eq!(max_weight, 1u128 << 28);
+    let max_term = max_weight * 127;
+    let derived = (((1u128 << 63) - 1) / max_term) as usize;
     assert_eq!(
         MAX_EXACT_SEQ_LEN, derived,
-        "MAX_EXACT_SEQ_LEN must be `2^63 / ((2^28 - 1) * 127)`; if the weight \
+        "MAX_EXACT_SEQ_LEN must be `(2^63 - 1) / (exp(0) * 127)`; if the weight \
          scale or V's width changes, this constant has to move with it"
     );
-    // And it must actually be safe at the limit, with a term to spare.
+    // The largest accepted shape is safe; the next equal-score shape wraps.
     assert!(
         (MAX_EXACT_SEQ_LEN as u128) * max_term < (1u128 << 63),
         "the largest accepted sequence already overflows the accumulator"
+    );
+    assert!(
+        ((MAX_EXACT_SEQ_LEN + 1) as u128) * max_term >= (1u128 << 63),
+        "one more equal-score term must exceed the signed accumulator"
+    );
+    assert_eq!(MAX_EXACT_SEQ_LEN, 270_549_121);
+    assert!(
+        attention_ptx(1, 270_549_122).is_err(),
+        "the previously accepted overflow must be refused"
     );
 }
 

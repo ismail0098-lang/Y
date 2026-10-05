@@ -30,12 +30,17 @@
 //! 3. Nothing is `Admitted`. `coqc` accepts an admitted lemma happily and
 //!    prints a warning that no exit code reflects.
 //!
-//! Skipped with a printed notice when `coqc` is absent, like the `ptxas`,
-//! `solcjs` and `z3` gates. That is a real hole - CI without Rocq is not
-//! checking this - and it is stated rather than hidden.
+//! Local Cargo runs print a skip when `coqc` is absent. With
+//! `Y_VERIFICATION_STRICT=1`, missing Rocq fails this gate.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+#[path = "common/verification.rs"]
+mod verification;
+
+#[path = "common/coq.rs"]
+mod coq;
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -125,8 +130,7 @@ fn compile_all_proofs() -> Vec<(String, bool, String)> {
 
 #[test]
 fn every_coq_proof_still_checks_and_rests_on_no_axioms() {
-    if !have_coqc() {
-        eprintln!("skipping: no coqc on PATH - the proofs are NOT being checked");
+    if !verification::prerequisite_available(have_coqc(), "coqc on PATH to check every Coq proof") {
         return;
     }
     let results = compile_all_proofs();
@@ -137,39 +141,18 @@ fn every_coq_proof_still_checks_and_rests_on_no_axioms() {
     );
 
     for (name, ok, output) in &results {
-        assert!(
-            ok,
-            "`coqc proofs/{name}` failed. The proofs are documented commands and \
-             the repo's only machine-checked artifacts.\n{output}"
-        );
-
         // `Print Assumptions` prints either `Closed under the global context` or
         // an `Axioms:` section listing what the proof leans on. Count what the
         // SOURCE asks for rather than hardcoding a number here, so deleting a
         // `Print Assumptions` line is caught by the content control below and
         // cannot silently shrink what this check covers.
         let src = std::fs::read_to_string(proofs_dir().join(name)).expect("read a proof");
-        let asked = src
-            .lines()
-            .filter(|l| l.trim_start().starts_with("Print Assumptions"))
+        let asked = coq_tokens(&src)
+            .windows(2)
+            .filter(|tokens| tokens[0] == "Print" && tokens[1] == "Assumptions")
             .count();
-        assert!(
-            asked >= 1,
-            "proofs/{name} has no `Print Assumptions`, so nothing checks what it \
-             rests on"
-        );
-        let closed = output.matches("Closed under the global context").count();
-        assert_eq!(
-            closed, asked,
-            "proofs/{name}: the source asks for {asked} `Print Assumptions` and \
-             {closed} reported `Closed under the global context`. Output:\n{output}"
-        );
-        assert!(
-            !output.contains("Axioms:"),
-            "proofs/{name} now depends on an axiom. These theorems are supposed \
-             to hold unconditionally - an assumption here means each is weaker \
-             than its statement reads.\nOutput:\n{output}"
-        );
+        coq::check_coq_output(*ok, output, asked)
+            .unwrap_or_else(|error| panic!("proofs/{name}: {error}"));
     }
 }
 
@@ -187,9 +170,20 @@ fn strip_coq_comments(src: &str) -> String {
     let b: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len());
     let mut depth = 0usize;
+    let mut in_string = false;
     let mut i = 0usize;
     while i < b.len() {
-        if b[i] == '(' && i + 1 < b.len() && b[i + 1] == '*' {
+        if depth == 0 && b[i] == '"' {
+            out.push(b[i]);
+            i += 1;
+            // Rocq escapes a quote inside a string by doubling it.
+            if in_string && i < b.len() && b[i] == '"' {
+                out.push(b[i]);
+                i += 1;
+            } else {
+                in_string = !in_string;
+            }
+        } else if !in_string && b[i] == '(' && i + 1 < b.len() && b[i + 1] == '*' {
             depth += 1;
             out.push(' ');
             out.push(' ');
@@ -207,6 +201,39 @@ fn strip_coq_comments(src: &str) -> String {
         }
     }
     out
+}
+
+/// Active identifiers and punctuation, excluding nested comments and strings.
+/// Neither a quoted diagnostic nor documentation can supply a proof command.
+fn coq_tokens(src: &str) -> Vec<String> {
+    let stripped = strip_coq_comments(src);
+    let mut chars = stripped.chars().peekable();
+    let mut tokens = Vec::new();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if c.is_alphanumeric() || c == '_' || c == '\'' {
+            let mut token = String::from(c);
+            while let Some(&next) = chars.peek() {
+                if !(next.is_alphanumeric() || next == '_' || next == '\'') {
+                    break;
+                }
+                token.push(chars.next().unwrap());
+            }
+            tokens.push(token);
+        } else if !c.is_whitespace() {
+            tokens.push(String::from(c));
+        }
+    }
+    tokens
 }
 
 /// `coqc` accepts an admitted lemma and exits 0. Only the source says.
@@ -283,6 +310,17 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // fact about an index SHAPE that nothing says this kernel has.
                 "Print Assumptions the_output_index_is_the_mathematical_one",
                 "Print Assumptions every_output_element_is_written_by_one_thread",
+            ],
+        ),
+        (
+            "ExactPvLaunchContract.v",
+            &[
+                "Print Assumptions checked_shape_licenses_every_live_index",
+                "Print Assumptions checked_shape_licenses_the_output_index",
+                "Print Assumptions checked_shape_instantiates_the_source_dot_product",
+                "Print Assumptions geometry_covers_the_output_rectangle",
+                "Print Assumptions geometry_output_coordinates_are_unique",
+                "Print Assumptions disjoint_live_byte_spans_never_alias",
             ],
         ),
         (
@@ -1020,9 +1058,18 @@ fn each_proof_still_proves_the_thing_it_exists_for() {
 /// `proofs/ExactGemmAllocation.v`. The count is deliberately not restated - it
 /// is derived from the directory, and a number here would go stale silently.)
 fn names_something_real(src: &str, needle: &str) -> bool {
-    // `Print Assumptions foo` IS the site it names; match it literally.
+    let tokens = coq_tokens(src);
+    // Match the whole command and identifier. Substring matching accepted
+    // commented-out commands and `foo_bar` as a control for `foo`.
+    let printed_name = needle.strip_prefix("Print Assumptions ").unwrap_or(needle);
+    let printed = tokens.windows(4).any(|command| {
+        command[0] == "Print"
+            && command[1] == "Assumptions"
+            && command[2] == printed_name
+            && command[3] == "."
+    });
     if needle.starts_with("Print Assumptions ") {
-        return src.contains(needle);
+        return printed;
     }
     const KEYWORDS: [&str; 9] = [
         "Theorem", "Lemma", "Corollary", "Definition", "Fixpoint", "Example",
@@ -1030,18 +1077,52 @@ fn names_something_real(src: &str, needle: &str) -> bool {
     ];
     // ...and a bare name is also satisfied by its own `Print Assumptions`,
     // which cannot survive the theorem being deleted.
-    if src.contains(&format!("Print Assumptions {needle}")) {
+    if printed {
         return true;
     }
-    KEYWORDS.iter().any(|kw| {
-        src.match_indices(&format!("{kw} {needle}")).any(|(i, m)| {
-            // The declaration must start a line, and the name must end there:
-            // `Lemma foo_bar` must not satisfy a needle of `foo`.
-            let starts_line = i == 0 || src.as_bytes()[i - 1] == b'\n';
-            let after = src.as_bytes().get(i + m.len()).copied().unwrap_or(b' ');
-            starts_line && !(after.is_ascii_alphanumeric() || after == b'_' || after == b'\'')
-        })
+    tokens.windows(2).any(|declaration| {
+        KEYWORDS.contains(&declaration[0].as_str()) && declaration[1] == needle
     })
+}
+
+#[test]
+fn proof_content_controls_ignore_comments_and_require_whole_names() {
+    let commented = "(*\nLemma required : True. Proof. exact I. Qed.\n\
+                     (* nested documentation *)\nPrint Assumptions required.\n*)";
+    for needle in ["required", "Print Assumptions required"] {
+        assert!(!names_something_real(commented, needle));
+        assert!(!names_something_real(
+            "Lemma required_else : True. Proof. exact I. Qed.\n\
+             Print Assumptions required_else.",
+            needle
+        ));
+        assert!(!names_something_real(
+            "Goal True. Proof. idtac \"Print Assumptions required.\". exact I. Qed.",
+            needle
+        ));
+        assert!(names_something_real(
+            "  Lemma\nrequired : True. Proof. exact I. Qed. Print\nAssumptions required.",
+            needle
+        ));
+    }
+    assert!(!names_something_real("Lemma required' : True.", "required"));
+    assert!(!names_something_real(
+        "Print Assumptions required'.",
+        "Print Assumptions required"
+    ));
+}
+
+#[test]
+fn assumption_command_count_ignores_comments_and_handles_coq_whitespace() {
+    let src = "(* Print Assumptions hidden.\nPrint Assumptions also_hidden. *)\n\
+               Print (* nested (* comment *) *) Assumptions first.\n\
+               Print\nAssumptions second. Print Assumptions third.\n\
+               Goal True. Proof. idtac \"(* \"\"Print Assumptions quoted.\"\"\". exact I. Qed.";
+    let asked = coq_tokens(src)
+        .windows(2)
+        .filter(|tokens| tokens[0] == "Print" && tokens[1] == "Assumptions")
+        .count();
+    assert_eq!(asked, 3);
 }
 
 /// A new `.v` file must arrive with a content control, or it gets the two weak

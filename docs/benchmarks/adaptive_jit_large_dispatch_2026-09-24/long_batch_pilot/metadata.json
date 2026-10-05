@@ -1,0 +1,158 @@
+{
+  "started_utc": "2026-09-24T20:49:25.506628+00:00",
+  "arguments": {
+    "before": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before",
+    "after": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after",
+    "output": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-large-dispatch-results-2026-09-24",
+    "trials": 4,
+    "policy": "deferred",
+    "shapes": [
+      [
+        2048,
+        2048,
+        2048
+      ],
+      [
+        4096,
+        4096,
+        4096
+      ]
+    ]
+  },
+  "shapes": [
+    [
+      2048,
+      2048,
+      2048
+    ],
+    [
+      4096,
+      4096,
+      4096
+    ]
+  ],
+  "python": "3.14.7 (main, Aug 13 2026, 07:40:04) [GCC 16.2.1 20260810]",
+  "platform": "Linux-7.2.7-1-cachyos-x86_64-with-glibc2.44",
+  "worker_affinity": {
+    "cpu": 0,
+    "inherited_allowed_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "taskset": "/usr/bin/taskset"
+  },
+  "binary_sha256": {
+    "before": "0e1e76714e29135a1daa1b0ace894207ac0045e4e6de59b1ea62681e72540053",
+    "after": "d7bf40c534bbf773469699ee50d874a64d49e2ca36a9cb893a5020b794f97f28"
+  },
+  "changed_captured_sources": [
+    "src/adaptive_jit.rs",
+    "src/cuda_runtime.rs"
+  ],
+  "preserved_sources": {
+    "before": {
+      "path": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/before_sources.json",
+      "sha256": "371b80dcce6be0978868c2fe24d384a040c42033bdcac68d4f3b008c9d6b023f",
+      "contents": {
+        "created_utc": "2026-09-24T20:31:26.602821+00:00",
+        "sources": {
+          "src/adaptive_jit.rs": "07ef93b31b14769cead2ee1df670c5bedcdd507a5240ed34fa75759f1b1c2b91",
+          "src/cuda_runtime.rs": "91232bf7402b35fab678e34b6a878fa3ec97f0fd9112524e3cbaca185781c8bc",
+          "src/empirical_autotune.rs": "45fbb627060fdd13015e07698a4e5b324e8302855a720017fc6a36fcb213d0a4",
+          "src/ptx_emitter.rs": "bb219378c40c2ef25141b9091835d3d224bc69ebc70d3733b24ad7286f3b145e",
+          "examples/adaptive_jit_dispatch_bench.rs": "d869d16509acd53e961d563b3af194ba5b392358d28c9f516c0ee425a0a778d4",
+          "Cargo.lock": "6b1e890c1e7210118adce3008ac742133487884d26bf4bb40e8eeb59d5e01f38"
+        },
+        "binary_sha256": "0e1e76714e29135a1daa1b0ace894207ac0045e4e6de59b1ea62681e72540053"
+      }
+    },
+    "after": {
+      "path": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-dispatch-2026-09-24/after_sources.json",
+      "sha256": "8e4e6483dc88940e85c8264da9df4a8c31428eb6ef263360b1177a64f9b0da7e",
+      "contents": {
+        "created_utc": "2026-09-24T20:34:07.651098+00:00",
+        "sources": {
+          "src/adaptive_jit.rs": "0b98a05c28abd3bb1baf7db0e08f327eb05de677e122f8ee7da337bfb72f6df4",
+          "src/cuda_runtime.rs": "1c3cf4a6381a2c76936f5170d7302d48bd071618edd3622a3bbdca243eb3c13b",
+          "src/empirical_autotune.rs": "45fbb627060fdd13015e07698a4e5b324e8302855a720017fc6a36fcb213d0a4",
+          "src/ptx_emitter.rs": "bb219378c40c2ef25141b9091835d3d224bc69ebc70d3733b24ad7286f3b145e",
+          "examples/adaptive_jit_dispatch_bench.rs": "d869d16509acd53e961d563b3af194ba5b392358d28c9f516c0ee425a0a778d4",
+          "Cargo.lock": "6b1e890c1e7210118adce3008ac742133487884d26bf4bb40e8eeb59d5e01f38"
+        },
+        "binary_sha256": "d7bf40c534bbf773469699ee50d874a64d49e2ca36a9cb893a5020b794f97f28"
+      }
+    }
+  },
+  "runner_sha256": "d27094bd3ca19964347c3a2b6e9c3259d1560971063fcbca80917e2019c62f14",
+  "rustc": {
+    "command": [
+      "rustc",
+      "-Vv"
+    ],
+    "returncode": 0,
+    "stdout": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "stderr": ""
+  },
+  "cpu": {
+    "command": [
+      "lscpu"
+    ],
+    "returncode": 0,
+    "stdout": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  32\nOn-line CPU(s) list:                     0-31\nVendor ID:                               AuthenticAMD\nModel name:                              AMD Ryzen 9 9950X 16-Core Processor\nCPU family:                              26\nModel:                                   68\nThread(s) per core:                      2\nCore(s) per socket:                      16\nSocket(s):                               1\nStepping:                                0\nMicrocode version:                       0xb404023\nFrequency boost:                         enabled\nCPU(s) scaling MHz:                      75%\nCPU max MHz:                             5756.4521\nCPU min MHz:                             624.1940\nBogoMIPS:                                8599.99\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good amd_lbr_v2 nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpuid_fault cpb cat_l3 cdp_l3 hw_pstate ssbd mba perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk avx_vnni avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif x2avic v_spec_ctrl vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid bus_lock_detect movdiri movdir64b overflow_recov succor smca fsrm avx512_vp2intersect flush_l1d amd_lbr_pmc_freeze\nVirtualization:                          AMD-V\nL1d cache:                               768 KiB (16 instances)\nL1i cache:                               512 KiB (16 instances)\nL2 cache:                                16 MiB (16 instances)\nL3 cache:                                64 MiB (2 instances)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-31\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Mitigation; IBPB on VMEXIT only\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP always-on; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Mitigation; IBPB on VMEXIT",
+    "stderr": ""
+  },
+  "gpu_before": {
+    "command": [
+      "nvidia-smi",
+      "--query-gpu=name,uuid,driver_version,memory.total,clocks.sm,clocks.mem,pstate,temperature.gpu,power.draw,utilization.gpu",
+      "--format=csv"
+    ],
+    "returncode": 0,
+    "stdout": "name, uuid, driver_version, memory.total [MiB], clocks.current.sm [MHz], clocks.current.memory [MHz], pstate, temperature.gpu, power.draw [W], utilization.gpu [%]\nNVIDIA GeForce RTX 4070 Ti SUPER, GPU-9384484c-35de-96f0-53e2-c3d9f2dfa644, 615.71.09, 16376 MiB, 720 MHz, 5001 MHz, P3, 55, 33.40 W, 37 %",
+    "stderr": ""
+  },
+  "gpu_processes_before": {
+    "command": [
+      "nvidia-smi"
+    ],
+    "returncode": 0,
+    "stdout": "Thu Sep 24 23:49:25 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 615.71.09              KMD Version: 615.71.09     CUDA UMD Version: 13.4     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:01:00.0  On |                  N/A |\n| 32%   55C    P3             33W /  285W |    3785MiB /  16376MiB |     37%      Default |\n|                                         |                        |                  N/A |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|    0   N/A  N/A            1837    C+G   /usr/bin/kwin_wayland                    22MiB |\n|    0   N/A  N/A            1895      G   /usr/bin/Xwayland                         4MiB |\n|    0   N/A  N/A            1944      G   /usr/bin/plasmashell                    283MiB |\n|    0   N/A  N/A            2413      G   ...rack-uuid=3190708988185955192        717MiB |\n|    0   N/A  N/A            2510      G   ...rack-uuid=3190708988185955192        128MiB |\n|    0   N/A  N/A           16908      G   ...rack-uuid=3190708988185955192        174MiB |\n|    0   N/A  N/A          103762      G   /usr/bin/krunner                         10MiB |\n|    0   N/A  N/A          121335      G   ...share/Steam/ubuntu12_32/steam          6MiB |\n|    0   N/A  N/A          121550      G   ./steamwebhelper                        143MiB |\n|    0   N/A  N/A          121579      G   ...am/ubuntu12_64/steamwebhelper        178MiB |\n|    0   N/A  N/A          150702    C+G   /proc/self/exe                         1493MiB |\n+-----------------------------------------------------------------------------------------+",
+    "stderr": ""
+  },
+  "environment": {},
+  "gpu_exclusive": false,
+  "gpu_clocks_locked": false,
+  "stopped_utc": "2026-09-24T20:55:21.286369+00:00",
+  "status": "stopped_early_for_batch_duration",
+  "reason": "4096-cubed workers took 93-95 seconds because each used 41000 timed launches. Completed pilot observations retained separately. Main comparison will use identical 100-call, 15-round workers built with byte-identical pre/post runtime sources."
+}

@@ -15,7 +15,9 @@ kernel let_alias(Out: GlobalMemory<I32>, N: I32) {
 
     let mut k: I32 = tid;
     @invariant(k >= 0)
-    while k < N {
+    // `k < 1048576` keeps `k + bsz` inside I32: the invariant verifier
+    // models machine arithmetic, and `k < N` alone admits k = 2^31 - 2.
+    while k < N && k < 1048576 {
         k = k + bsz;
     }
 

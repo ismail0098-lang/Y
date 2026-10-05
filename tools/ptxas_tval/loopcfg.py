@@ -21,6 +21,7 @@ BOTTOM, so the two are not the same expression and are related, not compared
 syntactically.
 """
 import re
+import ptxsource
 
 # ---------------- loop-nest SHAPE ----------------
 #
@@ -104,7 +105,7 @@ PTX_ENTRY = re.compile(r'^\s*(?:\.(?:visible|weak|extern)\s+)*\.entry\s+([\w$]+)
 
 def ptx_entry_points(path):
     """Every `.entry` in the module, in file order."""
-    return PTX_ENTRY.findall(open(path).read())
+    return PTX_ENTRY.findall(ptxsource.read(path))
 
 
 def ptx_unclassified_branches(raw):
@@ -142,7 +143,7 @@ def ptx_back_edges(path):
             f'which one is under test is undefined  (refusing, not guessing)')
     raw = []
     depth = 0
-    for line in open(path):
+    for line in ptxsource.read(path).splitlines():
         s = line.strip()
         if s.startswith('//') or not s: continue
         if s == '{': depth += 1; continue
@@ -151,6 +152,8 @@ def ptx_back_edges(path):
         if s.startswith('.'): continue          # .reg / .maxnreg / .loc are not instructions
         if s.endswith(';'): raw.append(('i', s[:-1].strip()))
         elif PTX_LABEL.match(s): raw.append(('l', PTX_LABEL.match(s).group(1)))
+        else:
+            raise Exception(f'UNMODELLED PTX source line {s!r}  (refusing, not guessing)')
     lab = {t: i for i, (k, t) in enumerate(raw) if k == 'l'}
     backs = []
     for i, (k, t) in enumerate(raw):
@@ -210,7 +213,7 @@ def ptx_regions(path):
     }
 
 # ---------------- SASS ----------------
-SASS_INSN = re.compile(r'^\s*/\*([0-9a-f]+)\*/\s+(.*?);\s*$')
+SASS_INSN = re.compile(r'^\s*/\*([0-9a-fA-F]+)\*/\s+(.*?);\s*$')
 SASS_LBL  = re.compile(r'^(\.L_\w+):')
 SASS_BRA  = re.compile(r'^(?:@(!?)P(\d+)\s+)?BRA\s+`\((\.L_\w+)\)$')
 
@@ -225,7 +228,153 @@ SASS_SECTION = re.compile(r'^\s*\.text\.([\w$.]+):', re.M)
 
 def sass_sections(path):
     """Every `.text.<name>` section in the disassembly, in file order."""
-    return SASS_SECTION.findall(open(path).read())
+    with open(path) as source:
+        return SASS_SECTION.findall(source.read())
+
+
+def sass_instructions(path):
+    """Parse every PC-tagged instruction, refusing incomplete disassembly.
+
+    Region validators must consume the same instruction language as the full
+    executor. An unmatched instruction is not metadata and cannot disappear
+    before the opcode and control-flow checks.
+    """
+    with open(path) as source:
+        text = source.read()
+    ins, lab, pending = [], {}, []
+    for line in text.splitlines():
+        label = re.fullmatch(r'\s*(\.L_\w+):\s*', line)
+        if label:
+            if label.group(1) in lab or label.group(1) in pending:
+                raise Exception('UNMODELLED SASS duplicate label '
+                                f'{label.group(1)!r}  (refusing, not guessing)')
+            pending.append(label.group(1))
+            continue
+        tag = re.match(r'^\s*/\*([^*]*)\*/(.*)$', line)
+        candidate = tag is not None and (
+            re.fullmatch(r'[0-9a-fA-F]+', tag.group(1)) is not None
+            or bool(tag.group(2).strip()))
+        # A missing */ must not turn an instruction into ignored metadata.
+        # Ordinary complete prose comments remain comments; an incomplete PC
+        # prefix followed by an opcode, predicate, or end of line is malformed.
+        if tag is None and re.match(
+                r'^\s*/\*\s*(?:[0-9]|[a-fA-F]+(?:\s|[*/]|$))', line):
+            candidate = True
+        match = SASS_INSN.fullmatch(line)
+        if match is None:
+            if candidate:
+                raise Exception(f'UNMODELLED SASS instruction line {line.strip()!r}: '
+                                'expected a hexadecimal PC, instruction, and semicolon '
+                                '(refusing, not guessing)')
+            continue
+        address, instruction = int(match.group(1), 16), match.group(2).strip()
+        if not instruction or (ins and address <= ins[-1][0]):
+            raise Exception('UNMODELLED SASS instruction addresses must increase '
+                            'strictly and instructions must be nonempty '
+                            '(refusing, not guessing)')
+        for name in pending:
+            lab[name] = address
+        pending.clear()
+        ins.append((address, instruction))
+    if not ins:
+        raise Exception('UNMODELLED SASS disassembly contains no instructions '
+                        '(refusing, not guessing)')
+    return ins, lab
+
+
+def _reachable_sass(ins, lab):
+    """Conservative reachability: both edges of a predicate may execute.
+
+    Only an unconditional EXIT or BRA eliminates fallthrough. No predicate
+    value is guessed, so a self-branch may be removed only when the ordinary
+    control-flow graph proves it unreachable from the entry instruction.
+    """
+    positions = {address: i for i, (address, _) in enumerate(ins)}
+    reached, todo = set(), [ins[0][0]]
+    while todo:
+        address = todo.pop()
+        if address in reached:
+            continue
+        reached.add(address)
+        i = positions[address]
+        instruction = ins[i][1]
+        branch = SASS_BRA.fullmatch(instruction)
+        if branch:
+            target = lab.get(branch.group(3))
+            if target is None or target not in positions:
+                raise Exception(f'UNMODELLED SASS branch target {branch.group(3)!r} '
+                                '(refusing, not guessing)')
+            todo.append(target)
+            if branch.group(2) is None:
+                continue
+        if instruction == 'EXIT':
+            continue
+        if i + 1 < len(ins):
+            todo.append(ins[i + 1][0])
+    return reached
+
+
+def require_ptx_guard_only(lines):
+    """A split header may compute predicates, but cannot change value state.
+
+    The loop validators currently extract only the header's exit predicate.
+    Until header execution is composed into the body and exit state, allowing
+    a register write here would validate a translation that omitted it.
+    Return the predicates written so callers can also reject their consumption
+    outside the guard calculation.
+    """
+    written, parsed = set(), []
+    comparison = r'setp\.(?:lt|le|gt|ge|eq|ne)\.(?:u32|s32|b32|u64|s64|b64)'
+    for line in lines:
+        match = re.fullmatch(r'(?:' + comparison + r'|and\.pred)\s+(%p\d+),\s*([^,]+),\s*([^,]+)', line)
+        if match is None:
+            raise Exception(f'UNMODELLED PTX loop header effect {line!r}: '
+                            'only unpredicated predicate calculations are modelled '
+                            '(refusing, not guessing)')
+        written.add(int(match.group(1)[2:]))
+        parsed.append((line, match))
+    # Header predicates are calculated afresh, including the final exit test.
+    # A source reading a header-written predicate before its local definition
+    # depends on the previous visit's state, which these summaries do not carry.
+    defined = set()
+    for line, match in parsed:
+        reads = {int(i) for source in match.group(2, 3)
+                 for i in re.findall(r'%p(\d+)\b', source)}
+        missing = (reads & written) - defined
+        if missing:
+            raise Exception(f'UNMODELLED PTX loop header predicate read before '
+                            f'definition in {line!r}: '
+                            f'{", ".join("%p" + str(i) for i in sorted(missing))} '
+                            '(refusing, not guessing)')
+        defined.add(int(match.group(1)[2:]))
+    return written
+
+
+def require_thread_local(ptx_path, sass_path):
+    """Refuse effects whose state is not carried by the loop relation.
+
+    The straight-line shared-memory checker is not an induction invariant for
+    a loop, and reconvergence cannot be discarded when cross-thread behavior
+    is observable. These operations require their own composition proof.
+    """
+    raw, _, _ = ptx_back_edges(ptx_path)
+    ptx_effect = re.compile(r'^(?:(?:ld|st)\.shared\b|(?:bar|barrier|membar|atom|red|shfl|vote|match|mma|wmma)\b|cp\.async\b)')
+    for kind, text in raw:
+        if kind != 'i':
+            continue
+        instruction = re.sub(r'^@!?%[\w$]+\s+', '', text)
+        if ptx_effect.match(instruction):
+            raise Exception(f'UNMODELLED PTX loop cross-thread effect {text!r}: '
+                            'shared/barrier state is not carried by the loop relation '
+                            '(refusing, not guessing)')
+    ins, _ = sass_instructions(sass_path)
+    sass_effect = re.compile(r'^(?:BAR|MEMBAR|SHFL|VOTE|LDS|STS|LDSM|ATOM|RED|MATCH|LDGSTS|BSSY|BSYNC|WARPSYNC)\b')
+    for _, text in ins:
+        instruction = re.sub(r'^@!?U?P\w+\s+', '', text)
+        if sass_effect.match(instruction):
+            raise Exception(f'UNMODELLED SASS loop cross-thread/reconvergence effect {text!r}: '
+                            'shared/barrier state is not carried by the loop relation '
+                            '(refusing, not guessing)')
 
 
 def sass_back_edges(path):
@@ -238,16 +387,16 @@ def sass_back_edges(path):
             f'this disassembly holds {len(secs)} .text sections ({", ".join(secs)}); '
             f'each restarts addressing at 0, so their labels and addresses collide '
             f'(refusing, not guessing)')
-    text = open(path).read()
-    lab = {m.group(1): int(m.group(2), 16)
-           for m in re.finditer(r'(\.L_\w+):\s*\n\s*/\*([0-9a-f]+)\*/', text)}
-    ins = []
-    for line in text.splitlines():
-        m = SASS_INSN.match(line)
-        if m: ins.append((int(m.group(1), 16), m.group(2).strip()))
-    # nvcc's trailing `.L_x: BRA .L_x` self-loop after EXIT is dead code
-    trap = {a for a, t in ins
-            if (m := SASS_BRA.fullmatch(t)) and lab.get(m.group(3)) == a}
+    ins, lab = sass_instructions(path)
+    reached = _reachable_sass(ins, lab)
+    self_branches = {a for a, t in ins
+                     if (m := SASS_BRA.fullmatch(t)) and lab.get(m.group(3)) == a}
+    if self_branches & reached:
+        address = min(self_branches & reached)
+        raise Exception(f'UNMODELLED SASS reachable self-branch at 0x{address:x}: '
+                        'only unreachable trailing traps may be omitted '
+                        '(refusing, not guessing)')
+    trap = self_branches - reached
     backs = []
     for a, t in ins:
         if a in trap: continue

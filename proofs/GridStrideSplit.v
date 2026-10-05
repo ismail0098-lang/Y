@@ -333,17 +333,17 @@ Proof. vm_compute. split; discriminate. Qed.
 (** ** The accumulator bound                                           *)
 (* ------------------------------------------------------------------ *)
 
-(** `MAX_EXACT_SEQ_LEN` in `src/exact_attention.rs`. A weight is Q0.28 so
-    `p < 2^28`; `V` is int8 so `|v| <= 127`; the accumulator is 64-bit two's
-    complement. Past this the sum WRAPS, which is a wrong answer and not an
+(** `MAX_EXACT_SEQ_LEN` in `src/exact_attention.rs`. A weight is Q0.28 with
+    `p <= 2^28`, attained at score delta zero; the input contract is
+    `|v| <= 127`. The accumulator is 64-bit two's complement. Past this the sum WRAPS, which is a wrong answer and not an
     imprecise one - and it is untestable on a device, since it needs 2.7e8
     keys. The boundary is one unit wide, which is the property a sampled test
     cannot see. *)
-Definition MAX_EXACT_SEQ_LEN : Z := (2 ^ 63) / ((2 ^ 28 - 1) * 127).
+Definition MAX_EXACT_SEQ_LEN : Z := (2 ^ 63 - 1) / (2 ^ 28 * 127).
 
 Theorem the_bound_is_one_unit_wide :
-  MAX_EXACT_SEQ_LEN * ((2 ^ 28 - 1) * 127) < 2 ^ 63
-  /\ (MAX_EXACT_SEQ_LEN + 1) * ((2 ^ 28 - 1) * 127) >= 2 ^ 63.
+  MAX_EXACT_SEQ_LEN * (2 ^ 28 * 127) < 2 ^ 63
+  /\ (MAX_EXACT_SEQ_LEN + 1) * (2 ^ 28 * 127) >= 2 ^ 63.
 Proof. split; vm_compute; [ reflexivity | discriminate ]. Qed.
 
 (* ------------------------------------------------------------------ *)

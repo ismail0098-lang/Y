@@ -269,7 +269,8 @@ def standing_rows(text):
         subj_var, arms_txt = case.groups()
         arms = []
         for am in re.finditer(r"^\s*([^)\n]+)\)\s*(.*?);;", arms_txt, re.M):
-            g = re.search(r"grep -q '([^']*)'", am.group(2))
+            # `grep -q` or `grep -Eq`: any flag cluster that includes `q`.
+            g = re.search(r"grep -[A-Za-z]*q[A-Za-z]* '([^']*)'", am.group(2))
             arms.append(([p.strip() for p in am.group(1).split("|")], g.group(1) if g else None))
         literal = re.search(r"python3 (\w+)\.py", body)
         for item in items:

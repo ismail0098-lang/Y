@@ -1,0 +1,101 @@
+{
+  "started_utc": "2026-09-24T19:53:38.126309+00:00",
+  "arguments": {
+    "output": "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/target/adaptive-jit-screening-2026-09-24",
+    "repeats": 3,
+    "calls": 100000,
+    "shapes": [
+      [
+        256,
+        256,
+        256,
+        1
+      ],
+      [
+        512,
+        512,
+        512,
+        1
+      ],
+      [
+        1024,
+        1024,
+        1024,
+        1
+      ],
+      [
+        1,
+        4096,
+        4096,
+        6
+      ]
+    ]
+  },
+  "python": "3.14.7 (main, Aug 13 2026, 07:40:04) [GCC 16.2.1 20260810]",
+  "rustc": {
+    "command": [
+      "rustc",
+      "-Vv"
+    ],
+    "returncode": 0,
+    "stdout": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "stderr": ""
+  },
+  "git_head": {
+    "command": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "returncode": 0,
+    "stdout": "4e670e15d3157e893c7ce0eb56a7f81ecc7717b8",
+    "stderr": ""
+  },
+  "git_status": {
+    "command": [
+      "git",
+      "status",
+      "--short"
+    ],
+    "returncode": 0,
+    "stdout": "M Cargo.lock\n M Cargo.toml\n M README.md\n M c_src/shadowplay_gui.h\n M docs/ptxas_translation_validation.md\n M src/cuda_runtime.rs\n M src/empirical_autotune.rs\n M src/lib.rs\n M src/llvm_emitter.rs\n M tests/exact_pv_proof.rs\n M tests/ptx_exact_pv.rs\n M tests/shadowplay_builds.rs\n M tools/exact_pv_bridge.py\n M tools/ptx_bridge.py\n M tools/ptxas_tval/README.md\n?? CODEX_SESSION_HANDOFF.md\n?? c_src/shadowplay_capture.h\n?? c_src/y_adaptive_jit.h\n?? docs/adaptive_jit.md\n?? docs/benchmarks/\n?? examples/\n?? src/adaptive_jit.rs\n?? src/adaptive_jit/\n?? src/adaptive_jit_ffi.rs\n?? src/verified_exact_pv.rs\n?? tests/adaptive_jit_benchmark.py\n?? tests/adaptive_jit_ffi_gpu.rs\n?? tests/adaptive_jit_gpu.rs\n?? tests/adaptive_jit_python.py\n?? tests/adaptive_jit_screening_gpu.rs\n?? tests/exact_pv_artifact_binding.rs\n?? tests/shadowplay_capture.rs\n?? tests/verified_exact_pv_artifact.py\n?? tools/adaptive_jit.py\n?? tools/benchmark_adaptive_jit.py\n?? tools/ptxas_tval/exact_pv_artifact.py",
+    "stderr": ""
+  },
+  "gpu_before": {
+    "command": [
+      "nvidia-smi",
+      "--query-gpu=name,uuid,driver_version,memory.total,clocks.sm,clocks.mem,pstate,temperature.gpu,power.draw,utilization.gpu",
+      "--format=csv"
+    ],
+    "returncode": 0,
+    "stdout": "name, uuid, driver_version, memory.total [MiB], clocks.current.sm [MHz], clocks.current.memory [MHz], pstate, temperature.gpu, power.draw [W], utilization.gpu [%]\nNVIDIA GeForce RTX 4070 Ti SUPER, GPU-9384484c-35de-96f0-53e2-c3d9f2dfa644, 615.71.09, 16376 MiB, 840 MHz, 5001 MHz, P3, 56, 33.56 W, 35 %",
+    "stderr": ""
+  },
+  "source_sha256": {
+    "Cargo.toml": "74d38388cf65e97fdfa45ac0a6b3a27a9e1ac5fa96d58163c34b49f87b78f04a",
+    "Cargo.lock": "6b1e890c1e7210118adce3008ac742133487884d26bf4bb40e8eeb59d5e01f38",
+    "examples/adaptive_jit_bench.rs": "f0f7f4e08bf735128ee0eb5348d1522840e20d47cde80ce0d36f5dfc4ef64464",
+    "tools/benchmark_adaptive_jit.py": "6ee3fa1f2b9ef29abe568be5ce620b4e3738c10b40e95e15347819e32bbb1678",
+    "src/adaptive_jit.rs": "07ef93b31b14769cead2ee1df670c5bedcdd507a5240ed34fa75759f1b1c2b91",
+    "src/adaptive_jit/cache.rs": "f5efe53dce4dc99472eedd018cc63b00f1f0294dfb3c57390d99653b4ffbeb9f",
+    "src/cuda_runtime.rs": "91232bf7402b35fab678e34b6a878fa3ec97f0fd9112524e3cbaca185781c8bc",
+    "src/empirical_autotune.rs": "45fbb627060fdd13015e07698a4e5b324e8302855a720017fc6a36fcb213d0a4",
+    "src/autotuner.rs": "94daf4cdeae4f2aefcae4ad297b373d87c4d10110558646b61677bea78024e0b",
+    "src/ptx_emitter.rs": "bb219378c40c2ef25141b9091835d3d224bc69ebc70d3733b24ad7286f3b145e",
+    "src/sentinel.rs": "ced6b7e78de1680f5659e1779c6343b4e6e22cc812a979708570c62b9830e215"
+  },
+  "environment": {},
+  "worker_sha256": "60db0acc7c338f2e5d940f16fc6337f7112ad8229cc602570b83f65769ae0283",
+  "status": "complete",
+  "finished_utc": "2026-09-24T19:58:03.630589+00:00",
+  "gpu_after": {
+    "command": [
+      "nvidia-smi",
+      "--query-gpu=name,uuid,driver_version,memory.total,clocks.sm,clocks.mem,pstate,temperature.gpu,power.draw,utilization.gpu",
+      "--format=csv"
+    ],
+    "returncode": 0,
+    "stdout": "name, uuid, driver_version, memory.total [MiB], clocks.current.sm [MHz], clocks.current.memory [MHz], pstate, temperature.gpu, power.draw [W], utilization.gpu [%]\nNVIDIA GeForce RTX 4070 Ti SUPER, GPU-9384484c-35de-96f0-53e2-c3d9f2dfa644, 615.71.09, 16376 MiB, 2760 MHz, 10501 MHz, P2, 66, 182.61 W, 100 %",
+    "stderr": ""
+  }
+}

@@ -16,6 +16,7 @@ dependencies = [
  "ark-snark",
  "ark-std 0.5.0",
  "revm",
+ "sha2 0.10.9",
  "y-gpu",
 ]
 

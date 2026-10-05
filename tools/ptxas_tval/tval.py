@@ -15,7 +15,7 @@ proof); they differ only in completeness.
 """
 import sys, time, random, collections
 from z3 import *
-import sassexec, ptxexec, mulmode, params, batch, conc, memorder, intenc
+import sassexec, ptxexec, mulmode, params, batch, conc, memorder, intenc, smem, domain
 
 def build(ptxf, sassf, mode, layout, sf, inv, sinv, lrep=None):
     mul = mulmode.MODES[mode]()
@@ -53,6 +53,7 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
 
 
 def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
+    domain.require_matching_targets(ptxf, sassf)
     t_start = time.time(); nobl = 0
     mul0 = mulmode.MODES['wide']()
     _, layout = params.parse(ptxf)
@@ -66,22 +67,42 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     # every read-back -- including ptxas's correct `mem/lsls`.
     if len(P0.loads)!=len(S0.loads) or len(P0.stores)!=len(S0.stores):
         return 'UNPROVED', f'load/store counts {len(P0.loads)}/{len(S0.loads)} {len(P0.stores)}/{len(S0.stores)}', 0
-    pre0=[ULT(sym0['tid_x'],BitVecVal(1024,32)), ULT(sym0['ctaid_x'],BitVecVal(1<<24,32))]
-    def same(a,b,to=20):
-        s=Solver(); s.set('timeout',to*1000); s.add(pre0); s.add(a!=b); return str(s.check())=='unsat'
+    pre0=domain.launch_preconditions(sym0)
+    verdict, shared_detail, shared_n = smem.validate_effects(P0, S0, sym0['bar'], pre0, B2)
+    if verdict != 'VALIDATED': return verdict, shared_detail, shared_n
+    nobl += shared_n
+    def comparison(a,b,to=20):
+        s=Solver(); s.set('timeout',to*1000); s.add(pre0); s.add(a!=b); return str(s.check())
+    def address_failure(kind, answers, reason):
+        # A row with no proved candidate only establishes the targeted SAT
+        # control if EVERY candidate was checked SAT. An UNKNOWN answer must
+        # remain uncertainty, including when another candidate was SAT.
+        for i, row in enumerate(answers):
+            if row and all(answer == 'sat' for answer in row):
+                return f'{kind} {i} address: sat'
+        return f'{kind} {reason} address'
     # Pairing by PROVED address equality; several accesses at one address form a
     # group rather than a refusal -- see memorder.pair_by_address.  One obligation
     # counted per access, exactly as before.
-    lhits=[]
+    lhits=[]; lanswers=[]
     for i in range(len(P0.loads)):
-        lhits.append([j for j in range(len(S0.loads)) if same(P0.loads[i][0],S0.loads[j][0])]); nobl+=1
+        row = [comparison(P0.loads[i][0], S0.loads[j][0]) for j in range(len(S0.loads))]
+        lanswers.append(row)
+        lhits.append([j for j, answer in enumerate(row) if answer == 'unsat']); nobl+=1
     lperm, lrep = memorder.pair_by_address(lhits)
-    if lperm is None: return 'UNPROVED', f'load {lrep} address', nobl
-    shits=[]
+    if lperm is None: return 'UNPROVED', address_failure('load', lanswers, lrep), nobl
+    # An unused loaded word still belongs to the physical access. Abstracting
+    # only the words consumed downstream used to hide scalar/vector changes.
+    for i, j in enumerate(lperm):
+        wp, ws = 8*P0.load_widths[i], 8*S0.load_widths[j]
+        if wp != ws: return 'UNPROVED', f'load {i} width: ptx {wp} bits, sass {ws} bits', nobl
+    shits=[]; sanswers=[]
     for i in range(len(P0.stores)):
-        shits.append([j for j in range(len(S0.stores)) if same(P0.stores[i][0],S0.stores[j][0])]); nobl+=1
+        row = [comparison(P0.stores[i][0], S0.stores[j][0]) for j in range(len(S0.stores))]
+        sanswers.append(row)
+        shits.append([j for j, answer in enumerate(row) if answer == 'unsat']); nobl+=1
     sperm, _ = memorder.pair_by_address(shits)
-    if sperm is None: return 'UNPROVED', f'store {_} address', nobl
+    if sperm is None: return 'UNPROVED', address_failure('store', sanswers, _), nobl
     # A store's width is its value's.  Two stores paired by address with
     # different widths do not leave the same bytes, and comparing their values
     # would be a z3 sort error rather than an answer.
@@ -89,10 +110,12 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
         wp, ws = P0.stores[i][1].size(), S0.stores[sperm[i]][1].size()
         if wp != ws: return 'UNPROVED', f'store {i} width: ptx {wp} bits, sass {ws} bits', nobl
     for i in range(len(P0.loads)):
-        if not same(P0.loads[i][1], S0.loads[lperm[i]][1]): return 'UNPROVED', f'load {i} guard', nobl
+        answer = comparison(P0.loads[i][1], S0.loads[lperm[i]][1])
+        if answer != 'unsat': return 'UNPROVED', f'load {i} guard: {answer}', nobl
         nobl+=1
     for i in range(len(P0.stores)):
-        if not same(P0.stores[i][2], S0.stores[sperm[i]][2]): return 'UNPROVED', f'store {i} guard', nobl
+        answer = comparison(P0.stores[i][2], S0.stores[sperm[i]][2])
+        if answer != 'unsat': return 'UNPROVED', f'store {i} guard: {answer}', nobl
         nobl+=1
     # The pairing above is BY ADDRESS and in any order, so two stores the SASS
     # performs in the opposite order were accepted however they overlap.  One
@@ -122,7 +145,6 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     # value is observable.  Asking for unconditional agreement asks for
     # something the compiler never promised, and the counterexamples are all
     # of that shape.
-    pre=[ULT(symW['tid_x'],BitVecVal(1024,32)), ULT(symW['ctaid_x'],BitVecVal(1<<24,32))]
     # A kernel that stores NOTHING is not a validation success, it is a kernel
     # with no obligations -- and the whole point of the `fma/plain` control is
     # that a validator which always says VALIDATED reports every row alike.
@@ -133,7 +155,6 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
                 f'this kernel stores nothing (ptx {len(Pw.stores)}, sass '
                 f'{len(Sw.stores)}) -- there is nothing to prove equal, '
                 f'{time.time()-t_start:.1f}s', 0)
-    pre.append(Sw.stores[0][2])
 
     # Propose the pairing by simulation (proposes; proves nothing).  Match on
     # the 32-bit VALUE, not on (value, carry): the two programs agree on every
@@ -157,16 +178,18 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     prop=[(j, by[tuple(v)][0]) for j,v in enumerate(sigS) if tuple(v) in by]
     log(f'  partial-sum pairs proposed: {len(prop)} / {len(Sd.wide)}')
 
-    # Every obligation is stated UNDER THE GUARD: out of range both programs
-    # store nothing and their intermediates are free to differ.
-    pre=[ULT(symW['tid_x'],BitVecVal(1024,32)), ULT(symW['ctaid_x'],BitVecVal(1<<24,32)),
-         Sw.stores[0][2]]
+    # Reusable intermediate equalities must hold whenever ANY store executes.
+    # The first store's predicate alone excludes executions observed by later
+    # stores. Keep each arithmetic representation's guard in its own vocabulary.
+    launch_domain = domain.launch_preconditions(symW)
+    pre = launch_domain + [simplify(Or([g for _, _, g in Sw.stores]))]
+    preD = launch_domain + [simplify(Or([g for _, _, g in Sd.stores]))]
     # Measured facts the SASS executor recorded (divest.py): each build has its
     # own, because each build has its own terms.  Using them is sound -- they
     # hold of the real execution -- and IGNORING them would be sound too, only
     # incomplete; so a validator that does not pass them on is merely weaker.
-    def ask(a, b, budget, facts=()):
-        s=Solver(); s.set('timeout',budget*1000); s.add(pre); s.add(list(facts)); s.add(a!=b); return str(s.check())
+    def ask(a, b, budget, facts=(), conditions=None):
+        s=Solver(); s.set('timeout',budget*1000); s.add(pre if conditions is None else conditions); s.add(list(facts)); s.add(a!=b); return str(s.check())
     def relevant(facts, *terms):
         # Only the facts about an estimate the obligation MENTIONS.  An
         # irrelevant fact cannot change the answer and it can cost it: the
@@ -185,7 +208,7 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
         # The last rung, and only on `unknown`: the same formula, translated
         # EXACTLY into integer arithmetic (intenc.py).  An untranslatable one
         # stays `unknown`.
-        return intenc.check(pre + list(facts) + [a != b], budget)
+        return intenc.check(preD + list(facts) + [a != b], budget)
     subW=[[],[]]; subD=[[],[]]; nv=0; okw=0; okd=0; okc=0
     t0=time.time()
     todo = list(prop); rnd_pass = 0
@@ -198,7 +221,7 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             if r!='unsat':
                 sd=substitute(Sd.wide[j][2], *subD[0]) if subD[0] else Sd.wide[j][2]
                 pd=substitute(Pd.wide[i][2], *subD[1]) if subD[1] else Pd.wide[i][2]
-                r = ask(sd, pd, B2); nobl+=1; how='direct'
+                r = ask(sd, pd, B2, conditions=preD); nobl+=1; how='direct'
             if r!='unsat': again.append((j,i)); continue
             V=BitVec(f'V{nv}',32); nv+=1
             subW[0].append((Sw.wide[j][2],V)); subW[1].append((Pw.wide[i][2],V))
@@ -229,8 +252,10 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             if x.eq(u): return True
             st.extend(x.children())
         return False
-    proved=[]; first={}
+    proved=[]; unspecified_stores={}
     for k in range(len(Pd.stores)):
+        guardW = Sw.stores[sperm[k]][2]
+        guardD = Sd.stores[sperm[k]][2]
         sw=substitute(Sw.stores[sperm[k]][1], *subW[0]) if subW[0] else Sw.stores[sperm[k]][1]
         pw=substitute(Pw.stores[k][1],       *subW[1]) if subW[1] else Pw.stores[k][1]
         sd=substitute(Sd.stores[sperm[k]][1], *subD[0]) if subD[0] else Sd.stores[sperm[k]][1]
@@ -245,23 +270,22 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
         extra = [Not(Or([c for _, c in un]))] if un else []
         bad = None
         for u, c in un:
-            sv=Solver(); sv.set('timeout',B1*1000); sv.add(pre); sv.add(c); sv.add(pd != u); nobl+=1
+            sv=Solver(); sv.set('timeout',B1*1000); sv.add(preD); sv.add(guardD, c); sv.add(pd != u); nobl+=1
             if str(sv.check()) != 'unsat':
                 bad = f'store {k}: stores a value computed FROM an unspecified division, not the value itself'
                 continue
             # ONE unspecified value, however many stores carry it: the spec lets
             # it be anything, not a different thing at each store.
-            if u.get_id() in first:
-                s0 = first[u.get_id()]
-                sv=Solver(); sv.set('timeout',B2*1000); sv.add(pre); sv.add(c); sv.add(sd != s0); nobl+=1
+            previous = unspecified_stores.setdefault(u.get_id(), [])
+            for s0, g0, c0 in previous:
+                sv=Solver(); sv.set('timeout',B2*1000); sv.add(preD); sv.add(guardD, c, g0, c0); sv.add(sd != s0); nobl+=1
                 if str(sv.check()) != 'unsat':
                     bad = f'store {k}: the SASS stores a different value than another store of the same unspecified division'
-            else:
-                first[u.get_id()] = sd
+            previous.append((sd, guardD, c))
         if bad: allok=False; log('  '+bad); continue
-        r=ask(sw,pw,B1,relevant(Sw.assume,sw,pw)+extra); nobl+=1
+        r=ask(sw,pw,B1,relevant(Sw.assume,sw,pw)+extra+[guardW]); nobl+=1
         if r!='unsat':
-            facts=relevant(Sd.assume+proved,sd,pd)+extra
+            facts=relevant(Sd.assume+proved,sd,pd)+extra+[guardD]
             # An obligation about a division estimate goes to Int FIRST: over
             # bitvectors its tail was `unknown` on six posings at up to 1200 s,
             # so the direct rung there is a timeout spent for nothing.
@@ -269,7 +293,7 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
                 r=ask_int(sd,pd,B2,facts); nobl+=1
                 if r=='unsat': nint[0]+=1
             if r!='unsat':
-                r=ask(sd,pd,B2,relevant(Sd.assume,sd,pd)+extra); nobl+=1
+                r=ask(sd,pd,B2,relevant(Sd.assume,sd,pd)+extra+[guardD], conditions=preD); nobl+=1
                 if r=='unknown':
                     r=ask_int(sd,pd,B2,facts); nobl+=1
                     if r=='unsat': nint[0]+=1
@@ -278,7 +302,7 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             # A PROVED store equality is a fact for the stores after it -- stated
             # under the same side condition it was proved under.  The remainder
             # of a division is `n - d*q` for the quotient just proved.
-            proved.append(Implies(And(extra), sd == pd) if extra else sd == pd)
+            proved.append(Implies(And([guardD] + extra), sd == pd))
     dt=time.time()-t_start
     xi = f', {nint[0]} over Int' if nint[0] else ''
     return ('VALIDATED' if allok else 'UNPROVED'), f'{len(Pd.stores)} stores, {len(Pd.loads)} loads{xi}, {dt:.1f}s', nobl

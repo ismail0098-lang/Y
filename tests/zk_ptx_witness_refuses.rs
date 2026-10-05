@@ -35,6 +35,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "common/pinned.rs"]
 mod pinned;
+#[path = "common/ptxas.rs"]
+mod assembler;
 
 /// Per-case directory: two tests sharing one path is the `.ptx` race this repo
 /// has now hit in five files.
@@ -160,6 +162,7 @@ fn the_lowered_subset_still_emits() {
             label,
             r.text
         );
+        assert!(r.wrote_ptx, "{label}: successful witness compilation published no PTX");
     }
 }
 
@@ -215,15 +218,5 @@ fn the_emitted_witness_kernel_assembles() {
 }
 
 fn which_ptxas() -> Option<PathBuf> {
-    for p in ["/opt/cuda/bin/ptxas", "/usr/local/cuda/bin/ptxas", "/usr/bin/ptxas"] {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|d| d.join("ptxas"))
-            .find(|c| c.exists())
-    })
+    assembler::ptxas()
 }

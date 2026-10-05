@@ -55,6 +55,7 @@ MORE THAN ONE SHARED SYMBOL IS REFUSED: guessing the second base would alias two
 arrays onto each other and validate a kernel that swaps them.
 """
 from z3 import *
+import ptxsource
 
 W = 32
 SMEM_SORT = ArraySort(BitVecSort(W), BitVecSort(W))
@@ -135,9 +136,84 @@ def word(byte_addr):
     return LShR(_win(byte_addr), 2)
 
 
-def require_aligned(byte_addr):
-    """The obligation that a shared access is 4-byte aligned."""
-    return Extract(1, 0, _win(byte_addr)) == BitVecVal(0, 2)
+def require_aligned(byte_addr, nbytes=4, guard=None):
+    """Natural alignment for the entire access, wherever it executes.
+
+    Four-byte alignment is enough for a scalar word, but not for 64/128-bit
+    accesses: PTX requires alignment to the TOTAL access size. The word model
+    cannot guess what an unaligned vector operation would do. A skipped access
+    makes no alignment demand on its otherwise unused address.
+    """
+    if (not is_bv(byte_addr) or byte_addr.size() not in (32, 64)
+            or type(nbytes) is not int or nbytes not in (4, 8, 16)
+            or (guard is not None and not is_bool(guard))):
+        raise Exception('UNMODELLED SHARED ALIGNMENT: expected a 32/64-bit address, '
+                        'access width of 4/8/16 bytes and optional Boolean guard '
+                        '(refusing, not guessing)')
+    bits = nbytes.bit_length() - 1
+    aligned = Extract(bits - 1, 0, _win(byte_addr)) == BitVecVal(0, bits, byte_addr.ctx)
+    return aligned if guard is None else Implies(guard, aligned)
+
+
+def require_full_barrier(op, operands, side):
+    """The barrier model covers full-block arrivals at a static barrier ID.
+
+    A counted barrier may release one subgroup while others have not arrived;
+    treating it as the same H_k as a full-block barrier forgets this behavior.
+    """
+    import re
+    forms = {'ptx': ('bar.sync', 'barrier.sync', 'barrier.sync.aligned'),
+             'sass': ('BAR.SYNC', 'BAR.SYNC.DEFER_BLOCKING')}
+    supported = op in forms[side] and len(operands) == 1
+    if supported:
+        literal = operands[0].strip()
+        supported = re.fullmatch(r'(?:0[xX][0-9a-fA-F]+|[0-9]+)', literal) is not None
+        if supported:
+            number = int(literal, 16 if literal.lower().startswith('0x') else 10)
+            supported = 0 <= number < 16
+    if not supported:
+        raise Exception(f'UNMODELLED {side.upper()} BARRIER {op} '
+                        f'{", ".join(operands)}: only full-block barriers with a '
+                        'static ID are modelled  (refusing, not guessing)')
+
+
+def validate_effects(ptx, sass, barriers, pre, budget):
+    """Check shared effects on every validator path, including direct callers.
+
+    Comparing global stores alone misses shared writes observed by another
+    thread, dropped barriers, and unaligned accesses rounded by the word model.
+    Return no obligations for kernels without any shared-memory effects.
+    """
+    if not (ptx.smem_ops or sass.smem_ops or
+            barriers.ptx_count or barriers.sass_count):
+        return 'VALIDATED', '', 0
+    if not barriers.agree():
+        return 'UNPROVED', (f'barrier counts differ: ptx {barriers.ptx_count}, '
+                            f'sass {barriers.sass_count}'), 0
+
+    def check(claim):
+        solver = Solver(); solver.set('timeout', budget * 1000)
+        solver.add(pre); solver.add(Not(claim))
+        return str(solver.check())
+
+    n = 0
+    for claim in ptx.align_obs + sass.align_obs:
+        result = check(claim)
+        if result != 'unsat':
+            return 'UNPROVED', (f'a shared access is not provably 4-byte aligned '
+                                f'or naturally aligned for its access width [{result}]'), n
+        n += 1
+    snapshots = [(f'entering barrier {k}', ptx.smem_snaps[k], sass.smem_snaps[k])
+                 for k in range(barriers.ptx_count)]
+    snapshots.append(('at exit', ptx.smem, sass.smem))
+    for where, left, right in snapshots:
+        result = check(left == right)
+        if result != 'unsat':
+            detail = ('REFUTED (sat)' if result == 'sat' else
+                      f'solver said {result} -- a WALL, not a mismatch')
+            return 'UNPROVED', f'shared memory {where}: {detail}', n
+        n += 1
+    return 'VALIDATED', f'{barriers.ptx_count} barrier(s)', n
 
 
 def refuse_subword(op):
@@ -154,7 +230,7 @@ def layout(ptx_path):
     """
     import re
     decls = []
-    for ln in open(ptx_path):
+    for ln in ptxsource.read(ptx_path).splitlines():
         # FOUR FORMS OCCUR IN THIS CORPUS AND THE UNSIZED ONE IS THE COMMONEST.
         #   .shared .align 16 .b32 __y_smem_0[2048]       static, word-typed
         #   .shared .align 4  .b8  smem_fp8_A[8192]       static, byte-typed

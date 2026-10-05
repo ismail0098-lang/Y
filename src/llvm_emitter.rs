@@ -139,6 +139,7 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
             "TokenKind_Unknown",
             "cleanup_shadowplay_gui",
             "get_broadcast_state",
+            "get_capture_failure_count",
             "get_codec_state",
             "get_file_format_state",
             "get_indicator_state",
@@ -149,10 +150,12 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
             "get_recording_state",
             "get_replay_duration",
             "get_replay_duration_idx",
+            "get_voice_recording_state",
             "init_shadowplay_gui",
             "is_overlay_visible",
             "print",
             "print_int",
+            "print_microphone_label",
             "println",
             "str_to_i64",
             "update_shadowplay_gui",
@@ -1622,6 +1625,8 @@ impl LlvmEmitter {
         // prelude, and so every module this backend emits, is unchanged.
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
         self.wln("declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)");
+        self.wln("declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)");
+        self.wln("declare { i64, i1 } @llvm.uadd.with.overflow.i64(i64, i64)");
         self.wln("");
 
         // Emit all collected string constants at module scope
@@ -2243,17 +2248,39 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         // the packed AVX-512 kernel. The recogniser is strict and the scalar
         // lowering below is correct, so a near-miss costs speed, not an answer.
         let certificates_before = self.exact_gemm_certificates.len();
+        let fast_start = self.output.len();
         if let Some(shape) = self.try_emit_gemm_kernel(k) {
+            // Keep the original AST as an executable fallback. A recognised
+            // shape does not establish that its three caller-owned buffers
+            // are independent or that its span arithmetic cannot overflow.
+            let fast_ir = self.output.split_off(fast_start);
+            self.emit_alloca_for_block(&k.body);
+            let scalar = self.fresh_label("gemm.scalar");
+            let fast = self.fresh_label("gemm.fast");
+            let done = self.fresh_label("gemm.return");
+            self.emit_gemm_buffer_dispatch(&shape, &fast, &scalar, &done);
+            writeln!(&mut self.output, "{fast}:").unwrap();
+            self.output.push_str(&fast_ir);
+            writeln!(&mut self.output, "  br label %{done}").unwrap();
+            writeln!(&mut self.output, "{scalar}:").unwrap();
+            self.block_terminated = false;
+            self.emit_block_body(&k.body, "void");
+            if !self.block_terminated {
+                writeln!(&mut self.output, "  br label %{done}").unwrap();
+            }
+            writeln!(&mut self.output, "{done}:").unwrap();
             self.needs_gemm_module = true;
-            // What runs is not the kernel's body, and `ydb verify` has to
-            // say so: the body's lines become no code.
+            // What runs is decided when the program runs, and `ydb verify`
+            // has to say so: the substituted GEMM when the buffers are
+            // disjoint, the body as written otherwise.
             if let Some(d) = self.debug.as_mut() {
                 let exact = self.exact_gemm_certificates.len() > certificates_before;
                 let (status, detail) = if exact {
                     (
                         crate::guarantees::Status::Proved,
-                        "this kernel is REPLACED by Y's exact vpdpwssd GEMM, and its body's lines \
-become no code. proofs/ExactGemmWhole.v proves the substituted kernel holds this nest's \
+                        "this kernel runs Y's exact vpdpwssd GEMM in place of its body when its \
+three buffers do not overlap and their extents fit in 64 bits - checked when the program runs; \
+otherwise the body runs as written. proofs/ExactGemmWhole.v proves the substituted kernel holds this nest's \
 dot products exactly, for every shape - provided every operand lies within the @bounds on \
 its operand `let`, which nothing checks when the program runs. `Y --emit-llvm` writes the \
 certificate that instantiates the proof for this nest. Everything below the LLVM IR - clang, \
@@ -2263,8 +2290,9 @@ the assembler, the processor - is trusted"
                 } else {
                     (
                         crate::guarantees::Status::Tested,
-                        "this kernel is REPLACED by Y's packed, threaded f32 GEMM, and its body's \
-lines become no code. It is NOT bit-identical to the nest as written: f32 addition is not \
+                        "this kernel runs Y's packed, threaded f32 GEMM in place of its body when its \
+three buffers do not overlap and their extents fit in 64 bits - checked when the program runs; \
+otherwise the body runs as written. The GEMM is NOT bit-identical to the nest as written: f32 addition is not \
 associative, so a tiled reduction rounds differently. It is tested against the nest \
 (tests/gemm_substitution_differential.rs), not proved; Y_NO_GEMM_RECOGNISER=1 compiles the \
 nest as written"
@@ -2310,6 +2338,101 @@ nest as written"
         }
         self.wln("}");
         self.wln("");
+    }
+
+    /// Select a packed GEMM only when the live buffer ranges are disjoint.
+    /// The source permits aliases; LLVM's packed routines do not. Invalid
+    /// strides or overflowing span/end arithmetic go to the original body.
+    fn emit_gemm_buffer_dispatch(
+        &mut self,
+        shape: &crate::cpu_gemm::GemmShape,
+        fast: &str,
+        scalar: &str,
+        done: &str,
+    ) {
+        let mut values = Vec::new();
+        for name in [&shape.m, &shape.n, &shape.k, &shape.lda, &shape.ldb, &shape.ldc] {
+            let ty = self.locals.get(name).expect("recognised GEMM header").clone();
+            let value = self.emit_load(&format!("%{name}"), &ty);
+            values.push(self.emit_coerce(&value, &ty, "i64"));
+        }
+        let m_empty = self.fresh_tmp();
+        let n_empty = self.fresh_tmp();
+        let empty = self.fresh_tmp();
+        let check_k = self.fresh_label("gemm.alias_check_k");
+        let ranges = self.fresh_label("gemm.alias_ranges");
+        let k_empty = self.fresh_tmp();
+        writeln!(&mut self.output, "  {m_empty} = icmp sle i64 {}, 0", values[0]).unwrap();
+        writeln!(&mut self.output, "  {n_empty} = icmp sle i64 {}, 0", values[1]).unwrap();
+        writeln!(&mut self.output, "  {empty} = or i1 {m_empty}, {n_empty}").unwrap();
+        writeln!(&mut self.output, "  br i1 {empty}, label %{done}, label %{check_k}").unwrap();
+        writeln!(&mut self.output, "{check_k}:").unwrap();
+        writeln!(&mut self.output, "  {k_empty} = icmp sle i64 {}, 0", values[2]).unwrap();
+        // An empty contraction still writes C. Its scalar body never reads
+        // A/B, so no input pointer/range condition is relevant to this case.
+        writeln!(&mut self.output, "  br i1 {k_empty}, label %{scalar}, label %{ranges}").unwrap();
+        writeln!(&mut self.output, "{ranges}:").unwrap();
+
+        let mut requirements = Vec::new();
+        let mut buffers = Vec::new();
+        for (name, rows, cols, stride) in [
+            (&shape.a, &values[0], &values[2], &values[3]),
+            (&shape.b, &values[2], &values[1], &values[4]),
+            (&shape.c, &values[0], &values[1], &values[5]),
+        ] {
+            let valid_stride = self.fresh_tmp();
+            writeln!(&mut self.output, "  {valid_stride} = icmp sge i64 {stride}, {cols}").unwrap();
+            requirements.push(valid_stride);
+            let prior_rows = self.fresh_tmp();
+            writeln!(&mut self.output, "  {prior_rows} = sub i64 {rows}, 1").unwrap();
+            let prefix = self.emit_gemm_checked_uint("umul", &prior_rows, stride, &mut requirements);
+            let elements = self.emit_gemm_checked_uint("uadd", &prefix, cols, &mut requirements);
+            let elem_ty = self.mem_elem_types.get(name).expect("recognised GEMM buffer");
+            let bytes_per_element = match elem_ty.as_str() {
+                "i16" => "2", "i64" => "8", "float" => "4",
+                _ => unreachable!("unrecognised GEMM element type"),
+            };
+            let bytes = self.emit_gemm_checked_uint("umul", &elements, bytes_per_element, &mut requirements);
+            let signed_size = self.fresh_tmp();
+            writeln!(&mut self.output, "  {signed_size} = icmp ule i64 {bytes}, 9223372036854775807").unwrap();
+            requirements.push(signed_size);
+            let pointer = self.emit_load(&format!("%{name}"), "ptr");
+            let address = self.fresh_tmp();
+            writeln!(&mut self.output, "  {address} = ptrtoint ptr {pointer} to i64").unwrap();
+            let end = self.emit_gemm_checked_uint("uadd", &address, &bytes, &mut requirements);
+            buffers.push((address, end));
+        }
+        for (left, right) in [(0, 1), (0, 2), (1, 2)] {
+            let before = self.fresh_tmp();
+            let after = self.fresh_tmp();
+            let separate = self.fresh_tmp();
+            writeln!(&mut self.output, "  {before} = icmp ule i64 {}, {}", buffers[left].1, buffers[right].0).unwrap();
+            writeln!(&mut self.output, "  {after} = icmp ule i64 {}, {}", buffers[right].1, buffers[left].0).unwrap();
+            writeln!(&mut self.output, "  {separate} = or i1 {before}, {after}").unwrap();
+            requirements.push(separate);
+        }
+        let mut safe = "true".to_string();
+        for requirement in requirements {
+            let both = self.fresh_tmp();
+            writeln!(&mut self.output, "  {both} = and i1 {safe}, {requirement}").unwrap();
+            safe = both;
+        }
+        writeln!(&mut self.output, "  br i1 {safe}, label %{fast}, label %{scalar}").unwrap();
+    }
+
+    fn emit_gemm_checked_uint(
+        &mut self, operation: &str, lhs: &str, rhs: &str, requirements: &mut Vec<String>,
+    ) -> String {
+        let pair = self.fresh_tmp();
+        let value = self.fresh_tmp();
+        let overflow = self.fresh_tmp();
+        let fits = self.fresh_tmp();
+        writeln!(&mut self.output, "  {pair} = call {{ i64, i1 }} @llvm.{operation}.with.overflow.i64(i64 {lhs}, i64 {rhs})").unwrap();
+        writeln!(&mut self.output, "  {value} = extractvalue {{ i64, i1 }} {pair}, 0").unwrap();
+        writeln!(&mut self.output, "  {overflow} = extractvalue {{ i64, i1 }} {pair}, 1").unwrap();
+        writeln!(&mut self.output, "  {fits} = xor i1 {overflow}, true").unwrap();
+        requirements.push(fits);
+        value
     }
 
     /// Emit a call to the exact `vpdpwssd` GEMM for a recognised, licensed nest.
@@ -2639,6 +2762,50 @@ nest as written"
             ptrs.push(tmp);
         }
 
+        // The source has signed ascending loops. Nonpositive M/N perform no
+        // stores; nonpositive K with positive M/N writes the initial +0.0
+        // accumulator without reading A/B. Keep those cases out of the packed
+        // kernel, whose scheduling and allocation arithmetic needs positive
+        // extents. In particular, a negative N is not a memset byte count.
+        let m_empty = self.fresh_tmp();
+        let n_empty = self.fresh_tmp();
+        let empty = self.fresh_tmp();
+        let k_empty = self.fresh_tmp();
+        let check_k = self.fresh_label("gemm.check_k");
+        let zero = self.fresh_label("gemm.zero");
+        let zero_cond = self.fresh_label("gemm.zero_cond");
+        let zero_body = self.fresh_label("gemm.zero_body");
+        let compute = self.fresh_label("gemm.compute");
+        let done = self.fresh_label("gemm.done");
+        writeln!(&mut self.output, "  {m_empty} = icmp sle i64 {}, 0", ext[0]).unwrap();
+        writeln!(&mut self.output, "  {n_empty} = icmp sle i64 {}, 0", ext[1]).unwrap();
+        writeln!(&mut self.output, "  {empty} = or i1 {m_empty}, {n_empty}").unwrap();
+        writeln!(&mut self.output, "  br i1 {empty}, label %{done}, label %{check_k}").unwrap();
+        writeln!(&mut self.output, "{check_k}:").unwrap();
+        writeln!(&mut self.output, "  {k_empty} = icmp sle i64 {}, 0", ext[2]).unwrap();
+        writeln!(&mut self.output, "  br i1 {k_empty}, label %{zero}, label %{compute}").unwrap();
+
+        writeln!(&mut self.output, "{zero}:").unwrap();
+        let row_bytes = self.fresh_tmp();
+        let row = self.fresh_tmp();
+        let next_row = self.fresh_tmp();
+        let more = self.fresh_tmp();
+        let offset = self.fresh_tmp();
+        let row_ptr = self.fresh_tmp();
+        writeln!(&mut self.output, "  {row_bytes} = mul i64 {}, 4", ext[1]).unwrap();
+        writeln!(&mut self.output, "  br label %{zero_cond}").unwrap();
+        writeln!(&mut self.output, "{zero_cond}:").unwrap();
+        writeln!(&mut self.output, "  {row} = phi i64 [ 0, %{zero} ], [ {next_row}, %{zero_body} ]").unwrap();
+        writeln!(&mut self.output, "  {more} = icmp slt i64 {row}, {}", ext[0]).unwrap();
+        writeln!(&mut self.output, "  br i1 {more}, label %{zero_body}, label %{done}").unwrap();
+        writeln!(&mut self.output, "{zero_body}:").unwrap();
+        writeln!(&mut self.output, "  {offset} = mul i64 {row}, {}", ext[5]).unwrap();
+        writeln!(&mut self.output, "  {row_ptr} = getelementptr float, ptr {}, i64 {offset}", ptrs[2]).unwrap();
+        writeln!(&mut self.output, "  call void @llvm.memset.p0.i64(ptr {row_ptr}, i8 0, i64 {row_bytes}, i1 false)").unwrap();
+        writeln!(&mut self.output, "  {next_row} = add i64 {row}, 1").unwrap();
+        writeln!(&mut self.output, "  br label %{zero_cond}").unwrap();
+
+        writeln!(&mut self.output, "{compute}:").unwrap();
         writeln!(
             &mut self.output,
             "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
@@ -2655,6 +2822,8 @@ nest as written"
             ext[5]
         )
         .unwrap();
+        writeln!(&mut self.output, "  br label %{done}").unwrap();
+        writeln!(&mut self.output, "{done}:").unwrap();
         Some(shape)
     }
 
@@ -3050,8 +3219,18 @@ representation, and whether that is lossless depends on the expression.",
                 span,
                 ..
             } => {
-                let s = self.emit_expr(start, None, None);
-                let e = self.emit_expr(end, None, None);
+                // Source induction variables are I32. Safe-loop verification
+                // proves each header value fits that range before lowering;
+                // a wider or narrower operand still needs an explicit LLVM
+                // conversion rather than using its register at the wrong type.
+                let s_value = self.emit_expr(start, None, None);
+                let s_ty = self.infer_type(start);
+                let s_unsigned = self.expr_is_unsigned(start);
+                let s = self.emit_coerce_from(&s_value, &s_ty, "i32", s_unsigned);
+                let e_value = self.emit_expr(end, None, None);
+                let e_ty = self.infer_type(end);
+                let e_unsigned = self.expr_is_unsigned(end);
+                let e = self.emit_coerce_from(&e_value, &e_ty, "i32", e_unsigned);
                 let cond_lbl = self.fresh_label("for.cond");
                 let body_lbl = self.fresh_label("for.body");
                 let end_lbl = self.fresh_label("for.end");
@@ -3099,7 +3278,10 @@ representation, and whether that is lossless depends on the expression.",
 
                 // Increment
                 let step_val = if let Some(st) = step {
-                    self.emit_expr(st, None, None)
+                    let value = self.emit_expr(st, None, None);
+                    let ty = self.infer_type(st);
+                    let unsigned = self.expr_is_unsigned(st);
+                    self.emit_coerce_from(&value, &ty, "i32", unsigned)
                 } else {
                     "1".into()
                 };

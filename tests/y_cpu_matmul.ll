@@ -34,6 +34,8 @@ declare void @println(ptr)
 declare void @print_int(i64)
 declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)
 declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
+declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)
+declare { i64, i1 } @llvm.uadd.with.overflow.i64(i64, i64)
 
 @.fmt.sn = private unnamed_addr constant [4 x i8] c"%s\0A\00"
 @.fmt.s = private unnamed_addr constant [3 x i8] c"%s\00"
@@ -56,6 +58,127 @@ entry:
   %K = alloca i32
   store i32 %K.arg, ptr %K
   %.y_oob_sink = alloca [8 x i8], align 8
+  %i = alloca i32
+  %j = alloca i32
+  %sum = alloca float
+  %k = alloca i32
+  %a_val = alloca float
+  %b_val = alloca float
+  %_t26 = load i32, ptr %M
+  %_t27 = sext i32 %_t26 to i64
+  %_t28 = load i32, ptr %N
+  %_t29 = sext i32 %_t28 to i64
+  %_t30 = load i32, ptr %K
+  %_t31 = sext i32 %_t30 to i64
+  %_t32 = load i32, ptr %K
+  %_t33 = sext i32 %_t32 to i64
+  %_t34 = load i32, ptr %N
+  %_t35 = sext i32 %_t34 to i64
+  %_t36 = load i32, ptr %N
+  %_t37 = sext i32 %_t36 to i64
+  %_t38 = icmp sle i64 %_t27, 0
+  %_t39 = icmp sle i64 %_t29, 0
+  %_t40 = or i1 %_t38, %_t39
+  br i1 %_t40, label %gemm.return.9, label %gemm.alias_check_k.10
+gemm.alias_check_k.10:
+  %_t41 = icmp sle i64 %_t31, 0
+  br i1 %_t41, label %gemm.scalar.7, label %gemm.alias_ranges.11
+gemm.alias_ranges.11:
+  %_t42 = icmp sge i64 %_t33, %_t31
+  %_t43 = sub i64 %_t27, 1
+  %_t44 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t43, i64 %_t33)
+  %_t45 = extractvalue { i64, i1 } %_t44, 0
+  %_t46 = extractvalue { i64, i1 } %_t44, 1
+  %_t47 = xor i1 %_t46, true
+  %_t48 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t45, i64 %_t31)
+  %_t49 = extractvalue { i64, i1 } %_t48, 0
+  %_t50 = extractvalue { i64, i1 } %_t48, 1
+  %_t51 = xor i1 %_t50, true
+  %_t52 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t49, i64 4)
+  %_t53 = extractvalue { i64, i1 } %_t52, 0
+  %_t54 = extractvalue { i64, i1 } %_t52, 1
+  %_t55 = xor i1 %_t54, true
+  %_t56 = icmp ule i64 %_t53, 9223372036854775807
+  %_t57 = load ptr, ptr %A
+  %_t58 = ptrtoint ptr %_t57 to i64
+  %_t59 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t58, i64 %_t53)
+  %_t60 = extractvalue { i64, i1 } %_t59, 0
+  %_t61 = extractvalue { i64, i1 } %_t59, 1
+  %_t62 = xor i1 %_t61, true
+  %_t63 = icmp sge i64 %_t35, %_t29
+  %_t64 = sub i64 %_t31, 1
+  %_t65 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t64, i64 %_t35)
+  %_t66 = extractvalue { i64, i1 } %_t65, 0
+  %_t67 = extractvalue { i64, i1 } %_t65, 1
+  %_t68 = xor i1 %_t67, true
+  %_t69 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t66, i64 %_t29)
+  %_t70 = extractvalue { i64, i1 } %_t69, 0
+  %_t71 = extractvalue { i64, i1 } %_t69, 1
+  %_t72 = xor i1 %_t71, true
+  %_t73 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t70, i64 4)
+  %_t74 = extractvalue { i64, i1 } %_t73, 0
+  %_t75 = extractvalue { i64, i1 } %_t73, 1
+  %_t76 = xor i1 %_t75, true
+  %_t77 = icmp ule i64 %_t74, 9223372036854775807
+  %_t78 = load ptr, ptr %B
+  %_t79 = ptrtoint ptr %_t78 to i64
+  %_t80 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t79, i64 %_t74)
+  %_t81 = extractvalue { i64, i1 } %_t80, 0
+  %_t82 = extractvalue { i64, i1 } %_t80, 1
+  %_t83 = xor i1 %_t82, true
+  %_t84 = icmp sge i64 %_t37, %_t29
+  %_t85 = sub i64 %_t27, 1
+  %_t86 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t85, i64 %_t37)
+  %_t87 = extractvalue { i64, i1 } %_t86, 0
+  %_t88 = extractvalue { i64, i1 } %_t86, 1
+  %_t89 = xor i1 %_t88, true
+  %_t90 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t87, i64 %_t29)
+  %_t91 = extractvalue { i64, i1 } %_t90, 0
+  %_t92 = extractvalue { i64, i1 } %_t90, 1
+  %_t93 = xor i1 %_t92, true
+  %_t94 = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %_t91, i64 4)
+  %_t95 = extractvalue { i64, i1 } %_t94, 0
+  %_t96 = extractvalue { i64, i1 } %_t94, 1
+  %_t97 = xor i1 %_t96, true
+  %_t98 = icmp ule i64 %_t95, 9223372036854775807
+  %_t99 = load ptr, ptr %C
+  %_t100 = ptrtoint ptr %_t99 to i64
+  %_t101 = call { i64, i1 } @llvm.uadd.with.overflow.i64(i64 %_t100, i64 %_t95)
+  %_t102 = extractvalue { i64, i1 } %_t101, 0
+  %_t103 = extractvalue { i64, i1 } %_t101, 1
+  %_t104 = xor i1 %_t103, true
+  %_t105 = icmp ule i64 %_t60, %_t79
+  %_t106 = icmp ule i64 %_t81, %_t58
+  %_t107 = or i1 %_t105, %_t106
+  %_t108 = icmp ule i64 %_t60, %_t100
+  %_t109 = icmp ule i64 %_t102, %_t58
+  %_t110 = or i1 %_t108, %_t109
+  %_t111 = icmp ule i64 %_t81, %_t100
+  %_t112 = icmp ule i64 %_t102, %_t79
+  %_t113 = or i1 %_t111, %_t112
+  %_t114 = and i1 true, %_t42
+  %_t115 = and i1 %_t114, %_t47
+  %_t116 = and i1 %_t115, %_t51
+  %_t117 = and i1 %_t116, %_t55
+  %_t118 = and i1 %_t117, %_t56
+  %_t119 = and i1 %_t118, %_t62
+  %_t120 = and i1 %_t119, %_t63
+  %_t121 = and i1 %_t120, %_t68
+  %_t122 = and i1 %_t121, %_t72
+  %_t123 = and i1 %_t122, %_t76
+  %_t124 = and i1 %_t123, %_t77
+  %_t125 = and i1 %_t124, %_t83
+  %_t126 = and i1 %_t125, %_t84
+  %_t127 = and i1 %_t126, %_t89
+  %_t128 = and i1 %_t127, %_t93
+  %_t129 = and i1 %_t128, %_t97
+  %_t130 = and i1 %_t129, %_t98
+  %_t131 = and i1 %_t130, %_t104
+  %_t132 = and i1 %_t131, %_t107
+  %_t133 = and i1 %_t132, %_t110
+  %_t134 = and i1 %_t133, %_t113
+  br i1 %_t134, label %gemm.fast.8, label %gemm.scalar.7
+gemm.fast.8:
   %_t1 = load i32, ptr %M
   %_t2 = sext i32 %_t1 to i64
   %_t3 = load i32, ptr %N
@@ -71,7 +194,143 @@ entry:
   %_t13 = load ptr, ptr %A
   %_t14 = load ptr, ptr %B
   %_t15 = load ptr, ptr %C
+  %_t16 = icmp sle i64 %_t2, 0
+  %_t17 = icmp sle i64 %_t4, 0
+  %_t18 = or i1 %_t16, %_t17
+  br i1 %_t18, label %gemm.done.6, label %gemm.check_k.1
+gemm.check_k.1:
+  %_t19 = icmp sle i64 %_t6, 0
+  br i1 %_t19, label %gemm.zero.2, label %gemm.compute.5
+gemm.zero.2:
+  %_t20 = mul i64 %_t4, 4
+  br label %gemm.zero_cond.3
+gemm.zero_cond.3:
+  %_t21 = phi i64 [ 0, %gemm.zero.2 ], [ %_t22, %gemm.zero_body.4 ]
+  %_t23 = icmp slt i64 %_t21, %_t2
+  br i1 %_t23, label %gemm.zero_body.4, label %gemm.done.6
+gemm.zero_body.4:
+  %_t24 = mul i64 %_t21, %_t12
+  %_t25 = getelementptr float, ptr %_t15, i64 %_t24
+  call void @llvm.memset.p0.i64(ptr %_t25, i8 0, i64 %_t20, i1 false)
+  %_t22 = add i64 %_t21, 1
+  br label %gemm.zero_cond.3
+gemm.compute.5:
   call void @__y_sgemm_f32_avx512(ptr %_t13, ptr %_t14, ptr %_t15, i64 %_t2, i64 %_t4, i64 %_t6, i64 %_t8, i64 %_t10, i64 %_t12)
+  br label %gemm.done.6
+gemm.done.6:
+  br label %gemm.return.9
+gemm.scalar.7:
+  %_t135 = load i32, ptr %M
+  store i32 0, ptr %i
+  br label %for.cond.12
+for.cond.12:
+  %_t136 = load i32, ptr %i
+  %_t137 = icmp slt i32 %_t136, %_t135
+  br i1 %_t137, label %for.body.13, label %for.end.14
+for.body.13:
+  %_t138 = load i32, ptr %N
+  store i32 0, ptr %j
+  br label %for.cond.15
+for.cond.15:
+  %_t139 = load i32, ptr %j
+  %_t140 = icmp slt i32 %_t139, %_t138
+  br i1 %_t140, label %for.body.16, label %for.end.17
+for.body.16:
+  %_t141 = fptrunc double 0.000000e0 to float
+  store float %_t141, ptr %sum
+  %_t142 = load i32, ptr %K
+  store i32 0, ptr %k
+  br label %for.cond.18
+for.cond.18:
+  %_t143 = load i32, ptr %k
+  %_t144 = icmp slt i32 %_t143, %_t142
+  br i1 %_t144, label %for.body.19, label %for.end.20
+for.body.19:
+  %_t145 = load ptr, ptr %A
+  %_t146 = load i32, ptr %i
+  %_t147 = sext i32 %_t146 to i64
+  %_t148 = load i32, ptr %k
+  %_t149 = sext i32 %_t148 to i64
+  %_t150 = load i32, ptr %K
+  %_t151 = sext i32 %_t150 to i64
+  %_t152 = load i32, ptr %M
+  %_t153 = sext i32 %_t152 to i64
+  %_t154 = load i32, ptr %K
+  %_t155 = sext i32 %_t154 to i64
+  %_t156 = mul nsw i64 %_t147, %_t151
+  %_t157 = add nsw i64 %_t156, %_t149
+  %_t158 = icmp ult i64 %_t147, %_t153
+  %_t159 = icmp ult i64 %_t149, %_t155
+  %_t160 = and i1 %_t158, %_t159
+  %_t161 = select i1 %_t160, i64 %_t157, i64 0
+  %_t162 = getelementptr inbounds float, ptr %_t145, i64 %_t161
+  %_t163 = load float, ptr %_t162
+  %_t164 = select i1 %_t160, float %_t163, float 0.0
+  store float %_t164, ptr %a_val
+  %_t165 = load ptr, ptr %B
+  %_t166 = load i32, ptr %k
+  %_t167 = sext i32 %_t166 to i64
+  %_t168 = load i32, ptr %j
+  %_t169 = sext i32 %_t168 to i64
+  %_t170 = load i32, ptr %N
+  %_t171 = sext i32 %_t170 to i64
+  %_t172 = load i32, ptr %K
+  %_t173 = sext i32 %_t172 to i64
+  %_t174 = load i32, ptr %N
+  %_t175 = sext i32 %_t174 to i64
+  %_t176 = mul nsw i64 %_t167, %_t171
+  %_t177 = add nsw i64 %_t176, %_t169
+  %_t178 = icmp ult i64 %_t167, %_t173
+  %_t179 = icmp ult i64 %_t169, %_t175
+  %_t180 = and i1 %_t178, %_t179
+  %_t181 = select i1 %_t180, i64 %_t177, i64 0
+  %_t182 = getelementptr inbounds float, ptr %_t165, i64 %_t181
+  %_t183 = load float, ptr %_t182
+  %_t184 = select i1 %_t180, float %_t183, float 0.0
+  store float %_t184, ptr %b_val
+  %_t185 = load float, ptr %sum
+  %_t186 = load float, ptr %a_val
+  %_t187 = load float, ptr %b_val
+  %_t188 = fmul float %_t186, %_t187
+  %_t189 = fadd float %_t185, %_t188
+  store float %_t189, ptr %sum
+  %_t190 = load i32, ptr %k
+  %_t191 = add i32 %_t190, 1
+  store i32 %_t191, ptr %k
+  br label %for.cond.18
+for.end.20:
+  %_t192 = load ptr, ptr %C
+  %_t193 = load i32, ptr %i
+  %_t194 = sext i32 %_t193 to i64
+  %_t195 = load i32, ptr %j
+  %_t196 = sext i32 %_t195 to i64
+  %_t197 = load i32, ptr %N
+  %_t198 = sext i32 %_t197 to i64
+  %_t199 = load i32, ptr %M
+  %_t200 = sext i32 %_t199 to i64
+  %_t201 = load i32, ptr %N
+  %_t202 = sext i32 %_t201 to i64
+  %_t203 = mul nsw i64 %_t194, %_t198
+  %_t204 = add nsw i64 %_t203, %_t196
+  %_t205 = icmp ult i64 %_t194, %_t200
+  %_t206 = icmp ult i64 %_t196, %_t202
+  %_t207 = and i1 %_t205, %_t206
+  %_t208 = load float, ptr %sum
+  %_t209 = getelementptr inbounds float, ptr %_t192, i64 %_t204
+  %_t210 = select i1 %_t207, ptr %_t209, ptr %.y_oob_sink
+  store float %_t208, ptr %_t210
+  %_t211 = load i32, ptr %j
+  %_t212 = add i32 %_t211, 1
+  store i32 %_t212, ptr %j
+  br label %for.cond.15
+for.end.17:
+  %_t213 = load i32, ptr %i
+  %_t214 = add i32 %_t213, 1
+  store i32 %_t214, ptr %i
+  br label %for.cond.12
+for.end.14:
+  br label %gemm.return.9
+gemm.return.9:
   ; [Y CPU GEMM] GemmShape { a: "A", b: "B", c: "C", m: "M", n: "N", k: "K", lda: "K", ldb: "N", ldc: "N", drift: None, operand_ty: Some("F32") }
   ret void
 }

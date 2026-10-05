@@ -83,8 +83,8 @@ run 'X4 the commutativity identification marked unvalidated'
 
 M <<'EOF'
 s=open('fpmode.py').read()
-a="        if name == 'FMAX' and len(args) == 2:"
-assert s.count(a)==1; open('fpmode.py','w').write(s.replace(a,"        if name in ('FMAX','FMIN') and len(args) == 2:"))
+a="        if name in ('FADD', 'FMAX') and len(args) == 2:\n            if not IDENTIFICATIONS[f'{name}_IS_COMMUTATIVE']:"
+assert s.count(a)==1; open('fpmode.py','w').write(s.replace(a,"        if name in ('FADD', 'FMAX', 'FMIN') and len(args) == 2:\n            if not IDENTIFICATIONS.get(f'{name}_IS_COMMUTATIVE', True):"))
 EOF
 run 'X5 FMIN canonicalised too (an unmeasured identification)'
 

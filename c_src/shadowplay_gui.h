@@ -47,6 +47,9 @@ int32_t get_replay_duration(void)      { return 0; }
 int32_t get_replay_duration_idx(void)  { return 0; }
 int32_t get_microphone_index(void)     { return 0; }
 int32_t get_indicator_state(void)      { return 0; }
+int32_t get_voice_recording_state(void) { return 0; }
+int32_t get_capture_failure_count(void) { return 0; }
+int32_t print_microphone_label(void)   { return 0; }
 void    get_microphone_name(char* out_buf) { if (out_buf) out_buf[0] = '\0'; }
 
 #else
@@ -63,12 +66,23 @@ void    get_microphone_name(char* out_buf) { if (out_buf) out_buf[0] = '\0'; }
 #include <signal.h>
 #include <time.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+
+// Which microphones exist, and what each recorder is told. Pure code with no
+// X11 in it, split out so it can be tested without a display or a sound card.
+#include "shadowplay_capture.h"
 
 // Window geometry. These were five separate literals (600/480 at the centring
 // site, again at creation, and the footer's y hardcoded against them), so a
 // layout change had to be made in every one of them or the footer fell off.
-#define HUD_W 600
+#define HUD_W 720
 #define HUD_H 520
+#define CARD_GAP 20
+// The right-hand settings column. At the old 300px, "[  AV1  ]" ran into the
+// "Replay Length:" label beside it.
+#define RIGHT_COL 340
 
 // Custom X11 Error Handler to prevent crashes if a key is already grabbed
 static int x11_error_handler(Display* d, XErrorEvent* e) {
@@ -115,11 +129,27 @@ static int file_format = 0;     // 0 = MP4, 1 = MKV
 static int quality = 1;         // 0 = 720p, 1 = 1080p, 2 = 4K
 static int video_codec = 2;     // 0 = H264, 1 = HEVC, 2 = AV1
 static int show_indicator = 1;  // 0 = hide the on-screen recording dot, 1 = show it
+static int voice_recording = 0; // 0 = OFF, 1 = recording the microphone on its own
 
 // Keyboard navigation
 static int selected_idx = 0;    // 0=Replay, 1=Record, 2=Broadcast, 3=Format, 4=Quality,
-                                // 5=Codec, 6=ReplayLength, 7=Keybind, 8=Mic, 9=Indicator
-#define NUM_ITEMS 10
+                                // 5=Codec, 6=ReplayLength, 7=Keybind, 8=Mic, 9=Indicator,
+                                // 10=Voice Record
+#define SEL_VOICE 10
+#define NUM_ITEMS 11
+
+// The four cards across the top, left to right. Voice Record arrived after
+// the settings rows were numbered, so its index is not its position; every
+// piece of card navigation and drawing goes through this table instead of
+// assuming the cards are 0..2.
+static const int card_order[4] = {0, 1, SEL_VOICE, 2};
+
+static int card_position(int idx) {
+    for (int p = 0; p < 4; p++) {
+        if (card_order[p] == idx) return p;
+    }
+    return -1;
+}
 
 // Is the small corner dot supposed to be on screen right now? Four call sites
 // asked this question and would otherwise have to stay in agreement by hand:
@@ -127,15 +157,38 @@ static int selected_idx = 0;    // 0=Replay, 1=Record, 2=Broadcast, 3=Format, 4=
 // event loop's per-tick repaint. Disagreement leaves a mapped window with
 // nothing drawn in it, or a dot that never repaints.
 static int indicator_wanted(void) {
-    return show_indicator && (recording || instant_replay);
+    return show_indicator && (recording || instant_replay || voice_recording);
+}
+
+// One mark per active capture: replay, screen recording, voice.
+static int indicator_marks(void) {
+    return (instant_replay != 0) + (recording != 0) + (voice_recording != 0);
+}
+
+// Two marks fit the original 70px corner box; the third needs room.
+static int indicator_width(void) {
+    return indicator_marks() > 2 ? 94 : 70;
 }
 
 static pid_t record_pid = 0;
 static pid_t replay_pid = 0;
+static pid_t voice_pid = 0;
+static time_t voice_started = 0;
+static char voice_path[512] = "";
+
+// Bumped whenever a recorder exits on its own. The Y program polls it to tell
+// "the recording stopped because it failed" from "the user stopped it and it
+// was saved", which a single on/off state cannot say.
+static int capture_failures = 0;
 
 static int has_gpu_screen_recorder = 0;
 static int has_wf_recorder = 0;
 static int has_ffmpeg = 0;
+static int has_parecord = 0;
+
+#define RECORD_LOG "/tmp/y_recording_log.txt"
+#define REPLAY_LOG "/tmp/y_replay_log.txt"
+#define VOICE_LOG  "/tmp/y_voice_log.txt"
 
 static int replay_duration_idx = 2; // 0=20s, 1=30s, 2=40s, 3=60s
 static int replay_durations[] = {20, 30, 40, 60};
@@ -240,7 +293,8 @@ static void update_window_layout() {
         XMapWindow(dpy, win);
     } else if (indicator_wanted()) {
         // Top-right tiny status indicator
-        XMoveResizeWindow(dpy, win, screen_w - 90, 40, 70, 32);
+        int w = indicator_width();
+        XMoveResizeWindow(dpy, win, screen_w - w - 20, 40, w, 32);
         XMapWindow(dpy, win);
     } else {
         // Completely hidden
@@ -259,72 +313,115 @@ static void show_toast(const char* message) {
     draw_ui();
 }
 
-static char mic_devices[16][128]; // support up to 16 mics
-static char mic_labels[16][128];
-static int num_mic_devices = 0;
-static int selected_mic_idx = 0; // 0=OFF, 1=Default Mic, ...
+// Microphones the audio server offers, found at startup. The HUD's Microphone
+// row cycles through "Disabled" (index 0) and these (1..num_mics).
+static sp_mic mics[SP_MAX_MICS];
+static int num_mics = 0;
+static int selected_mic_idx = 0; // 0 = microphone off, k = mics[k - 1]
 
+// The source every recorder is given, or NULL when the microphone is off.
+static const char* selected_mic_name(void) {
+    if (selected_mic_idx < 1 || selected_mic_idx > num_mics) return NULL;
+    return mics[selected_mic_idx - 1].name;
+}
+
+static const char* selected_mic_label(void) {
+    if (selected_mic_idx < 1 || selected_mic_idx > num_mics) return "Disabled";
+    return mics[selected_mic_idx - 1].label;
+}
+
+// Is `name` runnable? `command -v` rather than `which`, which is a separate
+// package that a minimal system does not have.
+static int have_command(const char* name) {
+    char cmd[256];
+    snprintf(cmd, sizeof cmd, "command -v '%s' >/dev/null 2>&1", name);
+    return system(cmd) == 0;
+}
+
+// Run a command and return what it printed, NUL-terminated (malloc'd), or
+// NULL if it could not run. Output past 256 KiB is dropped - but still READ:
+// a child blocked writing to a full pipe would hang pclose() forever.
+static char* read_command(const char* cmd) {
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return NULL;
+    size_t cap = 256 * 1024, len = 0;
+    char* buf = malloc(cap);
+    if (!buf) {
+        pclose(fp);
+        return NULL;
+    }
+    char chunk[4096];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof chunk, fp)) > 0) {
+        size_t room = cap - 1 - len;
+        size_t take = got < room ? got : room;
+        memcpy(buf + len, chunk, take);
+        len += take;
+    }
+    buf[len] = '\0';
+    pclose(fp);
+    return buf;
+}
+
+// Find the microphones and choose one. This used to parse the error older
+// gpu-screen-recorder releases printed for `-a check_devices`; 6.x never gets
+// as far as `-a` without a `-w`, so the list was always just "Disabled" and
+// "Default Input" - see shadowplay_capture.h for why the latter can be the
+// desktop instead of a voice.
 static void detect_audio_devices() {
-    strcpy(mic_devices[0], "OFF");
-    strcpy(mic_labels[0], "Disabled");
-    
-    strcpy(mic_devices[1], "default_input");
-    strcpy(mic_labels[1], "Default Input");
-    
-    num_mic_devices = 2;
-    selected_mic_idx = 1; // Default to Default Input
+    char default_source[SP_NAME_LEN] = "";
+    char default_sink[SP_NAME_LEN] = "";
+    char* text;
 
-    FILE* fp = popen("gpu-screen-recorder -a check_devices 2>&1", "r");
-    if (!fp) return;
+    num_mics = 0;
+    selected_mic_idx = 0;
 
-    char line[256];
-    int start_parsing = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "expected one of:")) {
-            start_parsing = 1;
-            continue;
-        }
-        if (start_parsing) {
-            char* ptr = line;
-            while (*ptr == ' ' || *ptr == '\t') ptr++;
-            if (*ptr == '\n' || *ptr == '\0') continue;
-            
-            char dev[128];
-            char lbl[128];
-            char* open_paren = strchr(ptr, '(');
-            if (open_paren) {
-                int dev_len = open_paren - ptr;
-                while (dev_len > 0 && (ptr[dev_len - 1] == ' ' || ptr[dev_len - 1] == '\t')) dev_len--;
-                if (dev_len >= 127) dev_len = 127;
-                strncpy(dev, ptr, dev_len);
-                dev[dev_len] = '\0';
-                
-                char* close_paren = strchr(open_paren, ')');
-                if (close_paren) {
-                    int lbl_len = close_paren - (open_paren + 1);
-                    if (lbl_len >= 127) lbl_len = 127;
-                    strncpy(lbl, open_paren + 1, lbl_len);
-                    lbl[lbl_len] = '\0';
-                } else {
-                    strcpy(lbl, dev);
-                }
-            } else {
-                char* nl = strchr(ptr, '\n');
-                if (nl) *nl = '\0';
-                strcpy(dev, ptr);
-                strcpy(lbl, ptr);
-            }
-            
-            if (strstr(dev, "input") || strstr(dev, "source")) {
-                if (strcmp(dev, "default_input") != 0 && num_mic_devices < 16) {
-                    strcpy(mic_devices[num_mic_devices], dev);
-                    strcpy(mic_labels[num_mic_devices], lbl);
-                    num_mic_devices++;
-                }
-            }
+    // LC_ALL=C: pactl translates its field names, and the parser reads them.
+    text = read_command("LC_ALL=C pactl list sources 2>/dev/null");
+    if (text) {
+        num_mics = sp_parse_pactl_sources(text, mics, SP_MAX_MICS);
+        free(text);
+    }
+    if (num_mics == 0) {
+        text = read_command("gpu-screen-recorder --list-audio-devices 2>/dev/null");
+        if (text) {
+            num_mics = sp_parse_gsr_devices(text, mics, SP_MAX_MICS);
+            free(text);
         }
     }
-    pclose(fp);
+    text = read_command("LC_ALL=C pactl info 2>/dev/null");
+    if (text) {
+        sp_pactl_info_field(text, "Default Source:", default_source, sizeof default_source);
+        sp_pactl_info_field(text, "Default Sink:", default_sink, sizeof default_sink);
+        free(text);
+    }
+
+    sp_pick_reason why = SP_PICK_NONE;
+    int pick = sp_pick_mic(mics, num_mics, default_source, default_sink, &why);
+    selected_mic_idx = pick + 1;   // no microphone (-1) becomes 0, "Disabled"
+
+    printf("[Audio] %d microphone input(s) found:\n", num_mics);
+    for (int i = 0; i < num_mics; i++) {
+        printf("        %s %s  (%s)\n", i == pick ? "*" : " ", mics[i].label, mics[i].name);
+    }
+    if (pick < 0) {
+        printf("[Audio] No microphone found: voice recording is unavailable, and recordings "
+               "will carry desktop audio only.\n");
+    } else if (why != SP_PICK_DEFAULT && default_source[0]) {
+        printf("[Audio] Your default input is '%s' - %s - so voice will use '%s'%s.\n",
+               default_source,
+               sp_ends_with(default_source, ".monitor")
+                   ? "that is what your speakers play, not a microphone"
+                   : "that is not one of the inputs above",
+               mics[pick].label,
+               why == SP_PICK_SAME_DEVICE ? " (the microphone on the device you listen on)" : "");
+    } else {
+        printf("[Audio] Voice will use '%s'%s.\n", mics[pick].label,
+               why == SP_PICK_DEFAULT ? " (your default input)" : "");
+    }
+    if (pick >= 0) {
+        printf("[Audio] To change it: open the HUD (Alt+Z), go to 'Microphone' and press Enter.\n");
+    }
 }
 
 static int is_wsl() {
@@ -355,123 +452,158 @@ static void get_default_monitor_device(char* buf, size_t max_len) {
         }
         pclose(pipe);
     }
-    strncpy(buf, "default", max_len);
+    // Not "default": that is the default SOURCE - a microphone on most
+    // machines - and mixing it in as "desktop audio" would record the voice
+    // twice. @DEFAULT_MONITOR@ is the audio server's name for what the
+    // default output plays.
+    strncpy(buf, "@DEFAULT_MONITOR@", max_len);
 }
 
-static int has_pulse_audio() {
-    int status = system("ffmpeg -y -f pulse -i default -t 0.1 -f null - >/dev/null 2>&1");
-    return (status == 0);
+// Can ffmpeg open audio-server sources at all? Asked once, and only when
+// ffmpeg is going to be the recorder, because the probe takes a moment. It
+// runs in the HUD process now, so `-nostdin`: without it ffmpeg reads the
+// terminal and swallows keypresses.
+static int ffmpeg_pulse_state = -1;
+static int ffmpeg_can_record_audio(void) {
+    if (ffmpeg_pulse_state < 0) {
+        ffmpeg_pulse_state = system("ffmpeg -nostdin -y -f pulse -i default -t 0.1 -f null - "
+                                    ">/dev/null 2>&1") == 0;
+    }
+    return ffmpeg_pulse_state;
+}
+
+static const char* home_dir(void) {
+    const char* h = getenv("HOME");
+    return (h && h[0]) ? h : "/tmp";
+}
+
+// ~/Videos/Y_Captures, created if it does not exist.
+static void ensure_captures_dir(void) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/Videos", home_dir());
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/Videos/Y_Captures", home_dir());
+    mkdir(path, 0755);
+}
+
+// Start a recorder. The command was built in the parent, so the child only has
+// to let go of X, tie its lifetime to ours, and exec.
+static pid_t spawn_encoder(sp_argv* cmd, const char* log_path) {
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid > 0) setpgid(pid, pid);   // both sides call it, so there is no window
+    if (pid != 0) return pid;         // the parent, or -1
+
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    // A recorder must not outlive the HUD. If the HUD dies without cleaning
+    // up - a crash, a SIGKILL - the kernel sends the recorder SIGINT, which is
+    // the signal every recorder here finalizes its file on. Without this, a
+    // voice recording would go on listening to the microphone after the
+    // program that started it was gone.
+    prctl(PR_SET_PDEATHSIG, SIGINT);
+    if (getppid() != parent) _exit(0);   // it died before prctl took effect
+    // Its own process group, so Ctrl+C in the terminal reaches the HUD alone
+    // and the HUD stops each recorder with exactly ONE SIGINT. A second one -
+    // the terminal's, landing while ffmpeg writes the file's index - means
+    // "exit immediately" to ffmpeg, and the recording is lost.
+    setpgid(0, 0);
+
+    if (dpy) close(ConnectionNumber(dpy));
+    int in = open("/dev/null", O_RDONLY);
+    if (in >= 0) dup2(in, STDIN_FILENO);
+    // ONE open shared by stdout and stderr. Opening the file twice with "w"
+    // gave the two streams separate offsets, so they overwrote each other.
+    int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+    if (log >= 0) {
+        dup2(log, STDOUT_FILENO);
+        dup2(log, STDERR_FILENO);
+    }
+    execvp(cmd->v[0], cmd->v);
+    fprintf(stderr, "[ShadowPlay] could not run %s: %s\n", cmd->v[0], strerror(errno));
+    _exit(127);
+}
+
+// The screen-recorder settings, in the form the pure builder takes.
+static void fill_capture(sp_capture* c, int replay, const char* out) {
+    const char* session = getenv("XDG_SESSION_TYPE");
+    const char* display = getenv("DISPLAY");
+    memset(c, 0, sizeof *c);
+    c->replay = replay;
+    c->replay_seconds = replay_durations[replay_duration_idx];
+    c->quality = quality;
+    c->codec = video_codec;
+    c->container = file_format;
+    c->mic = selected_mic_name();
+    c->desktop = default_audio_dev;
+    c->out = out;
+    c->wayland = session && strcmp(session, "wayland") == 0;
+    c->display = display ? display : ":0.0";
+    c->screen_w = screen_width;
+    c->screen_h = screen_height;
+    c->has_gsr = has_gpu_screen_recorder;
+    c->has_wf = has_wf_recorder;
+    c->has_ffmpeg = has_ffmpeg;
+    c->ffmpeg_pulse = (!has_gpu_screen_recorder && has_ffmpeg) ? ffmpeg_can_record_audio() : 0;
+}
+
+// Build the screen-recorder command and start it. Returns its pid, or 0 when
+// nothing was started - the reason has been printed. The "Audio:" line comes
+// from the same builder as the command, so it cannot promise a microphone the
+// command leaves out.
+static pid_t launch_capture(int replay, const char* out, const char* log_path) {
+    sp_capture c;
+    sp_argv cmd;
+    char note[512];
+
+    fill_capture(&c, replay, out);
+    sp_backend b = sp_build_capture(&cmd, &c, note, sizeof note);
+    if (b == SP_NONE) {
+        if (cmd.overflow) {
+            printf("[ShadowPlay Error] The recorder command did not fit (a path is too long).\n");
+        } else {
+            printf("[ShadowPlay Error] No screen recorder is installed. "
+                   "Install gpu-screen-recorder (or ffmpeg).\n");
+        }
+        fflush(stdout);
+        return 0;
+    }
+    printf("[ShadowPlay] Recorder: %s\n", sp_backend_name(b));
+    printf("[ShadowPlay] Audio: %s\n", note);
+    fflush(stdout);
+
+    pid_t pid = spawn_encoder(&cmd, log_path);
+    if (pid < 0) {
+        printf("[ShadowPlay Error] Could not start %s: %s\n", sp_backend_name(b), strerror(errno));
+        fflush(stdout);
+        return 0;
+    }
+    return pid;
 }
 
 static void start_manual_recording() {
     if (record_pid > 0) return;
-    
+
     printf("[ShadowPlay] Starting manual recording...\n");
-    if (selected_mic_idx == 0) {
-        printf("[ShadowPlay] Audio Source: Desktop only (default_output)\n");
-    } else {
-        printf("[ShadowPlay] Audio Source: Desktop (default_output) + Mic (%s) [Merged]\n", mic_devices[selected_mic_idx]);
-    }
     fflush(stdout);
-    
     if (is_wsl()) {
         printf("[ShadowPlay Warning] You are running inside WSL. Linux screen recorders (like ffmpeg/wf-recorder) can only capture Linux GUI windows inside WSLg, not your main Windows host desktop screen.\n");
     }
 
-    // Create output folder
-    system("mkdir -p ~/Videos/Y_Captures");
-    
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/Videos/Y_Captures/Manual_Capture_%ld.%s", 
-             getenv("HOME"), time(NULL), file_format == 0 ? "mp4" : "mkv");
+    ensure_captures_dir();
+    char filepath[512];
+    snprintf(filepath, sizeof(filepath), "%s/Videos/Y_Captures/Manual_Capture_%ld.%s",
+             home_dir(), (long)time(NULL), file_format == 0 ? "mp4" : "mkv");
 
-    record_pid = fork();
-    if (record_pid == 0) {
-        if (dpy) {
-            close(ConnectionNumber(dpy));
-        }
-        const char* dpy_env = getenv("DISPLAY");
-        if (!dpy_env) dpy_env = ":0.0";
-        
-        char grab_res[64];
-        snprintf(grab_res, sizeof(grab_res), "%dx%d", screen_width, screen_height);
-        
-        char scale_filter[64] = "";
-        char crf_val[8] = "24";
-        if (quality == 0) {
-            strcpy(scale_filter, "scale=1280:-2");
-            strcpy(crf_val, "28");
-        } else if (quality == 1) {
-            strcpy(scale_filter, "scale=1920:-2");
-            strcpy(crf_val, "24");
-        } else {
-            strcpy(scale_filter, "scale=3840:-2");
-            strcpy(crf_val, "22");
-        }
-
-        freopen("/dev/null", "r", stdin);
-        freopen("/tmp/y_recording_log.txt", "w", stdout);
-        freopen("/tmp/y_recording_log.txt", "w", stderr);
-
-        if (has_gpu_screen_recorder) {
-            char res_str[64];
-            if (quality == 0) strcpy(res_str, "1280x720");
-            else if (quality == 1) strcpy(res_str, "1920x1080");
-            else strcpy(res_str, "3840x2160");
-            
-            char* session = getenv("XDG_SESSION_TYPE");
-            int is_wayland = (session && strcmp(session, "wayland") == 0);
-            
-            char audio_arg[256];
-            if (selected_mic_idx == 0) {
-                strcpy(audio_arg, "default_output");
-            } else {
-                snprintf(audio_arg, sizeof(audio_arg), "default_output|%s", mic_devices[selected_mic_idx]);
-            }
-
-            char quality_preset[16] = "very_high";
-            if (quality == 0) {
-                strcpy(quality_preset, "medium");
-            } else if (quality == 1) {
-                strcpy(quality_preset, "high");
-            }
-
-            const char* codec_str = "h264";
-            if (video_codec == 1) codec_str = "hevc";
-            else if (video_codec == 2) codec_str = "av1";
-
-            execlp("gpu-screen-recorder", "gpu-screen-recorder", "-w", is_wayland ? "portal" : "screen", "-f", "60", "-s", res_str, "-a", audio_arg, "-k", codec_str, "-q", quality_preset, "-o", filepath, NULL);
-        } else {
-            char* session = getenv("XDG_SESSION_TYPE");
-            int is_wayland = (session && strcmp(session, "wayland") == 0);
-            
-            if (is_wayland && has_wf_recorder) {
-                execlp("wf-recorder", "wf-recorder", "-a", default_audio_dev, "-f", filepath, NULL);
-            }
-
-            if (has_ffmpeg) {
-                int has_audio = has_pulse_audio();
-                char ffmpeg_codec[32] = "libx264";
-                if (video_codec == 1) {
-                    strcpy(ffmpeg_codec, "libx265");
-                } else if (video_codec == 2) {
-                    strcpy(ffmpeg_codec, "libsvtav1");
-                }
-
-                if (has_audio) {
-                    execlp("ffmpeg", "ffmpeg", "-y", "-nostdin", "-f", "x11grab", "-r", "30", "-s", grab_res, "-i", dpy_env, 
-                           "-f", "pulse", "-i", default_audio_dev, "-c:v", ffmpeg_codec, "-preset", "veryfast", "-crf", crf_val, 
-                           "-vf", scale_filter, "-c:a", "aac", filepath, NULL);
-                } else {
-                    execlp("ffmpeg", "ffmpeg", "-y", "-nostdin", "-f", "x11grab", "-r", "30", "-s", grab_res, "-i", dpy_env, 
-                           "-c:v", ffmpeg_codec, "-preset", "veryfast", "-crf", crf_val, 
-                           "-vf", scale_filter, filepath, NULL);
-                }
-            }
-        }
-        _exit(1);
+    record_pid = launch_capture(0, filepath, RECORD_LOG);
+    if (record_pid <= 0) {
+        record_pid = 0;
+        recording = 0;
+        show_toast("Recording failed to start");
+        return;
     }
     printf("[ShadowPlay] Manual screen recording started: %s\n", filepath);
+    fflush(stdout);
     show_toast("Recording Started");
 }
 
@@ -507,115 +639,35 @@ static void stop_manual_recording() {
 
 static void start_replay_buffer() {
     if (replay_pid > 0) return;
-    
+
     printf("[ShadowPlay] Starting Instant Replay buffer...\n");
-    if (selected_mic_idx == 0) {
-        printf("[ShadowPlay] Audio Source: Desktop only (default_output)\n");
-    } else {
-        printf("[ShadowPlay] Audio Source: Desktop (default_output) + Mic (%s) [Merged]\n", mic_devices[selected_mic_idx]);
-    }
     fflush(stdout);
-    
     if (is_wsl()) {
         printf("[ShadowPlay Warning] You are running inside WSL. Linux screen recorders (like ffmpeg/wf-recorder) can only capture Linux GUI windows inside WSLg, not your main Windows host desktop screen.\n");
     }
 
-    replay_pid = fork();
-    if (replay_pid == 0) {
-        if (dpy) {
-            close(ConnectionNumber(dpy));
-        }
-        const char* dpy_env = getenv("DISPLAY");
-        if (!dpy_env) dpy_env = ":0.0";
-        
-        char grab_res[64];
-        snprintf(grab_res, sizeof(grab_res), "%dx%d", screen_width, screen_height);
-        
-        char scale_filter[64] = "";
-        char crf_val[8] = "24";
-        if (quality == 0) {
-            strcpy(scale_filter, "scale=1280:-2");
-            strcpy(crf_val, "28");
-        } else if (quality == 1) {
-            strcpy(scale_filter, "scale=1920:-2");
-            strcpy(crf_val, "24");
-        } else {
-            strcpy(scale_filter, "scale=3840:-2");
-            strcpy(crf_val, "22");
-        }
-
-        freopen("/dev/null", "r", stdin);
-        freopen("/tmp/y_recording_log.txt", "w", stdout);
-        freopen("/tmp/y_recording_log.txt", "w", stderr);
-
-        if (has_gpu_screen_recorder) {
-            char res_str[64];
-            if (quality == 0) strcpy(res_str, "1280x720");
-            else if (quality == 1) strcpy(res_str, "1920x1080");
-            else strcpy(res_str, "3840x2160");
-            
-            char fmt_str[8];
-            strcpy(fmt_str, file_format == 0 ? "mp4" : "mkv");
-            
-            char out_dir[256];
-            snprintf(out_dir, sizeof(out_dir), "%s/Videos/Y_Captures", getenv("HOME"));
-            
-            char dur_str[16];
-            snprintf(dur_str, sizeof(dur_str), "%d", replay_durations[replay_duration_idx]);
-            
-            char* session = getenv("XDG_SESSION_TYPE");
-            int is_wayland = (session && strcmp(session, "wayland") == 0);
-            
-            char audio_arg[256];
-            if (selected_mic_idx == 0) {
-                strcpy(audio_arg, "default_output");
-            } else {
-                snprintf(audio_arg, sizeof(audio_arg), "default_output|%s", mic_devices[selected_mic_idx]);
-            }
-
-            char quality_preset[16] = "very_high";
-            if (quality == 0) {
-                strcpy(quality_preset, "medium");
-            } else if (quality == 1) {
-                strcpy(quality_preset, "high");
-            }
-
-            const char* codec_str = "h264";
-            if (video_codec == 1) codec_str = "hevc";
-            else if (video_codec == 2) codec_str = "av1";
-
-            execlp("gpu-screen-recorder", "gpu-screen-recorder", "-w", is_wayland ? "portal" : "screen", "-f", "60", "-s", res_str, "-a", audio_arg, "-r", dur_str, "-k", codec_str, "-q", quality_preset, "-c", fmt_str, "-o", out_dir, NULL);
-        } else {
-            char* session = getenv("XDG_SESSION_TYPE");
-            int is_wayland = (session && strcmp(session, "wayland") == 0);
-            
-            if (is_wayland && has_wf_recorder) {
-                execlp("wf-recorder", "wf-recorder", "-a", default_audio_dev, "-f", "/tmp/y_replay_buffer.mp4", NULL);
-            }
-
-            if (has_ffmpeg) {
-                int has_audio = has_pulse_audio();
-                char ffmpeg_codec[32] = "libx264";
-                if (video_codec == 1) {
-                    strcpy(ffmpeg_codec, "libx265");
-                } else if (video_codec == 2) {
-                    strcpy(ffmpeg_codec, "libsvtav1");
-                }
-
-                if (has_audio) {
-                    execlp("ffmpeg", "ffmpeg", "-y", "-nostdin", "-f", "x11grab", "-r", "30", "-s", grab_res, "-i", dpy_env, 
-                           "-f", "pulse", "-i", default_audio_dev, "-c:v", ffmpeg_codec, "-preset", "veryfast", "-crf", crf_val, 
-                           "-vf", scale_filter, "-c:a", "aac", "/tmp/y_replay_buffer.mp4", NULL);
-                } else {
-                    execlp("ffmpeg", "ffmpeg", "-y", "-nostdin", "-f", "x11grab", "-r", "30", "-s", grab_res, "-i", dpy_env, 
-                           "-c:v", ffmpeg_codec, "-preset", "veryfast", "-crf", crf_val, 
-                           "-vf", scale_filter, "/tmp/y_replay_buffer.mp4", NULL);
-                }
-            }
-        }
-        _exit(1);
+    // gpu-screen-recorder keeps the buffer itself and writes each saved clip
+    // into a directory; the fallbacks record to a file that save_replay_clip()
+    // cuts the end off.
+    char out[512];
+    if (has_gpu_screen_recorder) {
+        ensure_captures_dir();
+        snprintf(out, sizeof out, "%s/Videos/Y_Captures", home_dir());
+    } else {
+        snprintf(out, sizeof out, "/tmp/y_replay_buffer.mp4");
     }
-    printf("[ShadowPlay] Instant Replay background buffer activated (saving to /tmp/y_replay_buffer.mp4).\n");
+
+    replay_pid = launch_capture(1, out, REPLAY_LOG);
+    if (replay_pid <= 0) {
+        replay_pid = 0;
+        instant_replay = 0;
+        show_toast("Instant Replay failed to start");
+        return;
+    }
+    printf("[ShadowPlay] Instant Replay background buffer activated (%s).\n",
+           has_gpu_screen_recorder ? "clips are saved to ~/Videos/Y_Captures/"
+                                   : "buffering to /tmp/y_replay_buffer.mp4");
+    fflush(stdout);
     show_toast("Instant Replay ON");
 }
 
@@ -670,9 +722,125 @@ static void save_replay_clip() {
     }
 }
 
+// ------------------------------------------------------------------ voice --
+
+// A name for a new voice recording that no file has yet. The recorder picks
+// the extension (.m4a or .wav), so both are checked. Two recordings started in
+// the same second would otherwise share a name.
+static void new_voice_base(char* out, size_t cap) {
+    long stamp = (long)time(NULL);
+    for (int n = 1; n < 1000; n++) {
+        if (n == 1) snprintf(out, cap, "%s/Videos/Y_Captures/Voice_Recording_%ld", home_dir(), stamp);
+        else snprintf(out, cap, "%s/Videos/Y_Captures/Voice_Recording_%ld_%d", home_dir(), stamp, n);
+        char probe[600];
+        snprintf(probe, sizeof probe, "%s.m4a", out);
+        if (access(probe, F_OK) == 0) continue;
+        snprintf(probe, sizeof probe, "%s.wav", out);
+        if (access(probe, F_OK) == 0) continue;
+        return;
+    }
+}
+
+// Record the selected microphone on its own, into a file of its own.
+static void start_voice_recording(void) {
+    if (voice_pid > 0) return;
+
+    const char* mic = selected_mic_name();
+    if (!mic) {
+        printf("[ShadowPlay] Voice recording needs a microphone: open the HUD (Alt+Z), "
+               "go to 'Microphone' and press Enter to pick one.\n");
+        fflush(stdout);
+        show_toast("No microphone selected");
+        return;
+    }
+
+    ensure_captures_dir();
+    char base[512];
+    new_voice_base(base, sizeof base);
+    sp_voice v;
+    memset(&v, 0, sizeof v);
+    v.mic = mic;
+    v.out_base = base;
+    v.has_ffmpeg = has_ffmpeg;
+    v.has_parecord = has_parecord;
+
+    sp_argv cmd;
+    sp_backend b = sp_build_voice(&cmd, &v, voice_path, sizeof voice_path);
+    if (b == SP_NONE) {
+        printf("[ShadowPlay Error] Voice recording needs ffmpeg or parecord%s.\n",
+               cmd.overflow ? " (or the output path is too long)" : "");
+        fflush(stdout);
+        show_toast("Voice needs ffmpeg");
+        return;
+    }
+    voice_pid = spawn_encoder(&cmd, VOICE_LOG);
+    if (voice_pid < 0) {
+        voice_pid = 0;
+        printf("[ShadowPlay Error] Could not start %s: %s\n", sp_backend_name(b), strerror(errno));
+        fflush(stdout);
+        show_toast("Voice recording failed");
+        return;
+    }
+    voice_recording = 1;
+    voice_started = time(NULL);
+    printf("[ShadowPlay] Voice recording started (microphone: %s, recorder: %s): %s\n",
+           selected_mic_label(), sp_backend_name(b), voice_path);
+    fflush(stdout);
+    show_toast("Voice Recording Started");
+}
+
+static void stop_voice_recording(void) {
+    if (voice_pid <= 0) {
+        voice_recording = 0;
+        return;
+    }
+    reap_encoder(&voice_pid, "voice recorder");
+    voice_recording = 0;
+    long secs = (long)(time(NULL) - voice_started);
+    printf("[ShadowPlay] Voice recording saved (%ld:%02ld): %s\n", secs / 60, secs % 60, voice_path);
+    fflush(stdout);
+    show_toast("Voice Recording Saved");
+}
+
+static void toggle_voice_recording(void) {
+    if (voice_recording) stop_voice_recording();
+    else start_voice_recording();
+}
+
+// A recorder that exits on its own has FAILED: every one of them runs until it
+// is told to stop. Without this check the HUD went on saying "RECORDING..."
+// after gpu-screen-recorder refused a device or the Wayland screen-share
+// dialog was cancelled, while nothing was being written. Polled every tick.
+static void reap_if_dead(pid_t* pid, int* active, const char* what, const char* log_path,
+                         const char* toast) {
+    if (*pid <= 0) return;
+    int status = 0;
+    pid_t r = waitpid(*pid, &status, WNOHANG);
+    if (r == 0 || (r < 0 && errno != ECHILD)) return;   // still running
+
+    *pid = 0;
+    *active = 0;
+    capture_failures++;
+    if (r > 0 && WIFEXITED(status)) {
+        fprintf(stderr, "[ShadowPlay Error] The %s stopped on its own (exit code %d), so nothing "
+                        "is being recorded. Its output is in %s.\n",
+                what, WEXITSTATUS(status), log_path);
+    } else if (r > 0 && WIFSIGNALED(status)) {
+        fprintf(stderr, "[ShadowPlay Error] The %s was killed by signal %d, so nothing is being "
+                        "recorded. Its output is in %s.\n",
+                what, WTERMSIG(status), log_path);
+    } else {
+        fprintf(stderr, "[ShadowPlay Error] The %s is gone, so nothing is being recorded. "
+                        "Its output is in %s.\n", what, log_path);
+    }
+    show_toast(toast);
+    update_window_layout();
+}
+
 void cleanup_shadowplay_gui(void) {
+    stop_voice_recording();
     stop_manual_recording();
-    stop_replay_buffer();
+    if (replay_pid > 0) stop_replay_buffer();   // it announces "deactivated" unconditionally
     if (dpy) {
         XCloseDisplay(dpy);
         dpy = NULL;
@@ -686,6 +854,7 @@ static unsigned long color_green;
 static unsigned long color_white;
 static unsigned long color_grey;
 static unsigned long color_red;
+static unsigned long color_voice;
 
 // Helper to allocate colors
 static unsigned long get_color(const char* hex) {
@@ -717,11 +886,33 @@ static void fill_rounded_rect(Display* d, Drawable dr, GC gc, int x, int y, int 
     XFillRectangle(d, dr, gc, x+w-r, y+r, r, h-r*2);
 }
 
+// A microphone `h` pixels tall with its top-left at (x, y), about h*3/4 wide:
+// a capsule, the cradle curving under it, and a stand.
+static void draw_mic_icon(GC gc, int x, int y, int h) {
+    int cap_w = h * 3 / 8;
+    int cap_h = h * 5 / 8;
+    int cradle_w = h * 3 / 4;
+    int cx = x + cradle_w / 2;
+    // The capsule as two full discs and the band between them: quarter arcs
+    // (fill_rounded_rect) come out lumpy at the 16px the corner indicator uses.
+    XFillArc(dpy, win, gc, cx - cap_w / 2, y, cap_w, cap_w, 0, 360 * 64);
+    XFillArc(dpy, win, gc, cx - cap_w / 2, y + cap_h - cap_w, cap_w, cap_w, 0, 360 * 64);
+    XFillRectangle(dpy, win, gc, cx - cap_w / 2, y + cap_w / 2, cap_w, cap_h - cap_w);
+    XSetLineAttributes(dpy, gc, h >= 16 ? 2 : 1, LineSolid, CapRound, JoinRound);
+    XDrawArc(dpy, win, gc, x, y + cap_h / 3, cradle_w, cap_h, 180 * 64, 180 * 64);
+    XDrawLine(dpy, win, gc, cx, y + cap_h / 3 + cap_h, cx, y + h - 1);
+    XDrawLine(dpy, win, gc, cx - cap_w / 2, y + h - 1, cx + cap_w / 2, y + h - 1);
+}
+
 static void draw_ui() {
     if (!dpy || !win) return;
     if (!visible && !toast_active && !indicator_wanted()) return;
 
-    if (toast_active) {
+    // A toast is for when the HUD is closed. Drawn while it is open, it
+    // replaced the whole HUD with a 280x80 box for three seconds - every time
+    // a setting change restarted Instant Replay, and every time the Voice
+    // card (which keeps the HUD open) was used. The HUD shows the state itself.
+    if (toast_active && !visible) {
         // Clear window to dark card background instead of fullscreen bg
         XSetWindowBackground(dpy, win, color_card);
         XClearWindow(dpy, win);
@@ -739,7 +930,7 @@ static void draw_ui() {
         
         // Draw Text inside the toast
         XSetForeground(dpy, gc, color_white);
-        XDrawString(dpy, win, gc, 65, 35, "ShadowPlay Replay", 17);
+        XDrawString(dpy, win, gc, 65, 35, "Y ShadowPlay", 12);
         XSetForeground(dpy, gc, color_grey);
         XDrawString(dpy, win, gc, 65, 55, toast_text, strlen(toast_text));
         
@@ -759,8 +950,8 @@ static void draw_ui() {
         // Draw border
         XSetForeground(dpy, gc, color_grey);
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
-        XDrawRectangle(dpy, win, gc, 0, 0, 68, 30);
-        
+        XDrawRectangle(dpy, win, gc, 0, 0, indicator_width() - 2, 30);
+
         int draw_x = 12;
         if (instant_replay) {
             // Draw green circular arrow indicator / dot
@@ -772,6 +963,13 @@ static void draw_ui() {
             // Draw red recording dot
             XSetForeground(dpy, gc, color_red);
             XFillArc(dpy, win, gc, draw_x, 10, 12, 12, 0, 360 * 64);
+            draw_x += 24;
+        }
+        if (voice_recording) {
+            // A microphone rather than a third coloured dot: three dots would
+            // leave the user to remember which colour meant what.
+            XSetForeground(dpy, gc, color_voice);
+            draw_mic_icon(gc, draw_x, 8, 16);
         }
         
         XFreeGC(dpy, gc);
@@ -799,14 +997,15 @@ static void draw_ui() {
     snprintf(title_buf, sizeof(title_buf), "- SHADOWPLAY OVERLAY (Y) [%s]", hw_gpu_name);
     XDrawString(dpy, win, gc, 235, 42, title_buf, strlen(title_buf));
     
-    // Draw 3 primary columns/cards (Replay, Record, Broadcast)
-    int col_width = 160;
+    // Draw the four cards (Replay, Record, Voice, Broadcast), in card_order
+    int col_width = (HUD_W - 60 - 3 * CARD_GAP) / 4;
     int col_height = 100;
     int start_y = 70;
     int r = 8; // rounded corner radius
-    
-    for (int i = 0; i < 3; i++) {
-        int start_x = 30 + i * (col_width + 30);
+
+    for (int pos = 0; pos < 4; pos++) {
+        int i = card_order[pos];
+        int start_x = 30 + pos * (col_width + CARD_GAP);
         
         // Fill card background
         XSetForeground(dpy, gc, color_card);
@@ -861,6 +1060,23 @@ static void draw_ui() {
                 XDrawArc(dpy, win, gc, rx, ry, 14, 14, 0, 360*64);
                 XFillArc(dpy, win, gc, rx + 3, ry + 3, 8, 8, 0, 360*64);
             }
+        } else if (i == SEL_VOICE) {
+            XDrawString(dpy, win, gc, start_x + 15, start_y + 35, "Voice Record", 12);
+            char status[32];
+            if (voice_recording) {
+                long secs = (long)(time(NULL) - voice_started);
+                snprintf(status, sizeof status, "REC %ld:%02ld", secs / 60, secs % 60);
+                XSetForeground(dpy, gc, color_voice);
+            } else if (!selected_mic_name()) {
+                snprintf(status, sizeof status, "No mic selected");
+                XSetForeground(dpy, gc, color_grey);
+            } else {
+                snprintf(status, sizeof status, "Status: OFF");
+                XSetForeground(dpy, gc, color_grey);
+            }
+            XDrawString(dpy, win, gc, start_x + 15, start_y + 70, status, strlen(status));
+            XSetForeground(dpy, gc, voice_recording ? color_voice : color_grey);
+            draw_mic_icon(gc, start_x + col_width - 30, start_y + 12, 20);
         } else if (i == 2) {
             XDrawString(dpy, win, gc, start_x + 15, start_y + 35, "Live Broadcast", 14);
             if (broadcast) {
@@ -915,15 +1131,15 @@ static void draw_ui() {
     }
 
     // Quality selection row
-    int quality_x = 430;
+    int quality_x = RIGHT_COL + 130;
     if (selected_idx == 4) {
         XSetForeground(dpy, gc, color_green);
-        XDrawString(dpy, win, gc, 300, row1_y + 15, "> Video Quality:", 16);
+        XDrawString(dpy, win, gc, RIGHT_COL, row1_y + 15, "> Video Quality:", 16);
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
         draw_rounded_rect(dpy, win, gc, quality_x - 10, row1_y, 150, 22, 4);
     } else {
         XSetForeground(dpy, gc, color_white);
-        XDrawString(dpy, win, gc, 300, row1_y + 15, "  Video Quality:", 16);
+        XDrawString(dpy, win, gc, RIGHT_COL, row1_y + 15, "  Video Quality:", 16);
     }
 
     if (quality == 0) {
@@ -985,15 +1201,15 @@ static void draw_ui() {
     }
 
     // Replay Length selection row
-    int length_x = 430;
+    int length_x = RIGHT_COL + 130;
     if (selected_idx == 6) {
         XSetForeground(dpy, gc, color_green);
-        XDrawString(dpy, win, gc, 300, row2_y + 15, "> Replay Length:", 16);
+        XDrawString(dpy, win, gc, RIGHT_COL, row2_y + 15, "> Replay Length:", 16);
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
         draw_rounded_rect(dpy, win, gc, length_x - 10, row2_y, 150, 22, 4);
     } else {
         XSetForeground(dpy, gc, color_white);
-        XDrawString(dpy, win, gc, 300, row2_y + 15, "  Replay Length:", 16);
+        XDrawString(dpy, win, gc, RIGHT_COL, row2_y + 15, "  Replay Length:", 16);
     }
 
     for (int idx = 0; idx < 4; idx++) {
@@ -1042,16 +1258,26 @@ static void draw_ui() {
         XSetForeground(dpy, gc, color_green);
         XDrawString(dpy, win, gc, 30, row4_y + 15, "> Microphone:", 13);
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
-        draw_rounded_rect(dpy, win, gc, mic_x - 10, row4_y, 430, 22, 4);
+        draw_rounded_rect(dpy, win, gc, mic_x - 10, row4_y, HUD_W - mic_x - 20, 22, 4);
     } else {
         XSetForeground(dpy, gc, color_white);
         XDrawString(dpy, win, gc, 30, row4_y + 15, "  Microphone:", 13);
     }
 
-    XSetForeground(dpy, gc, color_green);
-    char mic_opt[128];
-    snprintf(mic_opt, sizeof(mic_opt), "[ %s ]", mic_labels[selected_mic_idx]);
+    // The microphone feeds Voice Record and is mixed into recordings and
+    // replays, so the row says so - "Default Input" said nothing about which
+    // device that was, and on some machines it was not a microphone at all.
+    XSetForeground(dpy, gc, selected_mic_name() ? color_green : color_grey);
+    char mic_opt[SP_LABEL_LEN + 64];
+    snprintf(mic_opt, sizeof(mic_opt), "[ %s ]", selected_mic_label());
     XDrawString(dpy, win, gc, mic_x, row4_y + 16, mic_opt, strlen(mic_opt));
+    if (selected_mic_name() && num_mics > 1) {
+        char hint[48];
+        snprintf(hint, sizeof hint, "%d of %d", selected_mic_idx, num_mics);
+        XSetForeground(dpy, gc, color_grey);
+        int hint_w = hud_font ? XTextWidth(hud_font, hint, strlen(hint)) : 60;
+        XDrawString(dpy, win, gc, HUD_W - 40 - hint_w, row4_y + 16, hint, strlen(hint));
+    }
 
     // Row 5 starts at settings_y + 185 (y = 385)
     int row5_y = settings_y + 185;
@@ -1086,11 +1312,11 @@ static void draw_ui() {
     XDrawLine(dpy, win, gc, 30, HUD_H - 85, HUD_W - 30, HUD_H - 85);
 
     XSetForeground(dpy, gc, color_grey);
-    char footer_msg[128];
+    char footer_msg[160];
     if (instant_replay) {
-        snprintf(footer_msg, sizeof(footer_msg), "Alt+Z: Hide HUD | %s: Save Last %ds Replay | Arrows: Navigate | Enter: Toggle", bind_labels[replay_keybind_idx], replay_durations[replay_duration_idx]);
+        snprintf(footer_msg, sizeof(footer_msg), "Alt+Z: Hide HUD | %s: Save Last %ds Replay | Alt+V: Voice | Enter: Toggle", bind_labels[replay_keybind_idx], replay_durations[replay_duration_idx]);
     } else {
-        snprintf(footer_msg, sizeof(footer_msg), "Alt+Z: Hide HUD | Arrows: Navigate | Enter: Toggle Option | Esc: Close");
+        snprintf(footer_msg, sizeof(footer_msg), "Alt+Z: Hide HUD | Alt+V: Voice Record | Arrows: Navigate | Enter: Toggle | Esc: Close");
     }
     XDrawString(dpy, win, gc, 30, HUD_H - 55, footer_msg, strlen(footer_msg));
 
@@ -1098,18 +1324,30 @@ static void draw_ui() {
     XFlush(dpy);
 }
 
-static volatile sig_atomic_t shutting_down = 0;
+// Ctrl+C and SIGTERM. The handler only records that a stop was asked for;
+// update_shadowplay_gui() does the stopping, outside signal context. Stopping
+// a recorder is Xlib, stdio and waitpid, and none of that may run inside a
+// signal handler - which is where all of it used to run. A second press while
+// the stop is under way changes nothing; a third exits at once.
+//
+// (Which process receives the terminal's Ctrl+C is spawn_encoder's business:
+// the recorders run in their own process group, so the HUD is the only thing
+// that ever signals them.)
+static volatile sig_atomic_t stop_requested = 0;
 
 static void handle_sigint(int sig) {
     (void)sig;
-    // A second SIGINT while the encoder is being drained used to re-enter
-    // cleanup and kill/wait on pids it had already zeroed.
-    if (shutting_down) { _exit(130); }
-    shutting_down = 1;
-    printf("\n[ShadowPlay] Interrupted! Performing clean shutdown...\n");
-    cleanup_shadowplay_gui();
-    fflush(NULL);
-    _exit(0);
+    if (stop_requested >= 2) {
+        // The third press means "now". The kernel still sends each recorder
+        // SIGINT (PR_SET_PDEATHSIG) - a second one for a recorder the shutdown
+        // had already stopped, so a file being finalized at that instant can
+        // be lost. That is the price of pressing Ctrl+C three times.
+        static const char msg[] = "\n[ShadowPlay] Forced exit.\n";
+        ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1);
+        (void)w;
+        _exit(130);
+    }
+    stop_requested++;
 }
 
 // Global initialization
@@ -1163,15 +1401,21 @@ int32_t init_shadowplay_gui(void) {
     color_white = get_color("#f4f4f5");
     color_grey = get_color("#71717a");
     color_red = get_color("#ef4444");
+    color_voice = get_color("#f59e0b");
 
     // Set custom error handlers
     XSetErrorHandler(x11_error_handler);
     XSetIOErrorHandler(x11_io_error_handler);
 
     // Check system dependencies
-    has_gpu_screen_recorder = (system("which gpu-screen-recorder > /dev/null 2>&1") == 0);
-    has_wf_recorder = (system("which wf-recorder > /dev/null 2>&1") == 0);
-    has_ffmpeg = (system("which ffmpeg > /dev/null 2>&1") == 0);
+    has_gpu_screen_recorder = have_command("gpu-screen-recorder");
+    has_wf_recorder = have_command("wf-recorder");
+    has_ffmpeg = have_command("ffmpeg");
+    has_parecord = have_command("parecord");
+
+    if (!has_ffmpeg && !has_parecord) {
+        printf("[ShadowPlay WARNING] Voice Record needs 'ffmpeg' (or 'parecord'); neither was found. Please run: sudo pacman -S ffmpeg\n");
+    }
 
     if (has_gpu_screen_recorder) {
         printf("[ShadowPlay] Found 'gpu-screen-recorder'. Recording tasks will use hardware-accelerated GPU capture.\n");
@@ -1204,6 +1448,9 @@ int32_t init_shadowplay_gui(void) {
     XGrabKey(dpy, f12_code, Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
 
     update_grabbed_keys();
+
+    // Alt+V starts and stops a voice recording from anywhere.
+    grab_hotkey(XK_v);
 
     // Create borderless window (CWOverrideRedirect)
     XSetWindowAttributes attrs;
@@ -1257,11 +1504,33 @@ int32_t get_replay_duration(void)      { return replay_durations[replay_duration
 int32_t get_replay_duration_idx(void)  { return replay_duration_idx; }
 int32_t get_microphone_index(void)     { return selected_mic_idx; }
 int32_t get_indicator_state(void)      { return show_indicator; }
-void get_microphone_name(char* out_buf) { strcpy(out_buf, mic_labels[selected_mic_idx]); }
+int32_t get_voice_recording_state(void) { return voice_recording; }
+int32_t get_capture_failure_count(void) { return capture_failures; }
+void get_microphone_name(char* out_buf) { if (out_buf) strcpy(out_buf, selected_mic_label()); }
+
+// Print the selected microphone's name, without a newline. The Y program logs
+// it, and Y has no way to receive a C string, so the C side does the printing.
+int32_t print_microphone_label(void) {
+    printf("%s", selected_mic_label());
+    fflush(stdout);
+    return 0;
+}
 
 // Check X11 events and update the display
 int32_t update_shadowplay_gui(void) {
+    // Before the display check: stopping the recorders does not need X.
+    if (stop_requested) {
+        printf("\n[ShadowPlay] Interrupted! Performing clean shutdown...\n");
+        fflush(stdout);
+        cleanup_shadowplay_gui();
+        fflush(NULL);
+        exit(0);
+    }
     if (!dpy) return -1;
+
+    reap_if_dead(&record_pid, &recording, "screen recorder", RECORD_LOG, "Recording failed");
+    reap_if_dead(&replay_pid, &instant_replay, "instant-replay buffer", REPLAY_LOG, "Instant Replay failed");
+    reap_if_dead(&voice_pid, &voice_recording, "voice recorder", VOICE_LOG, "Voice recording failed");
 
     if (toast_active && (time(NULL) - toast_start_time >= 3)) {
         toast_active = 0;
@@ -1307,6 +1576,13 @@ int32_t update_shadowplay_gui(void) {
 
             KeySym save_keysym = save_keysym_lower; // Keep in scope for inner check
 
+            // Alt+V: start or stop a voice recording, HUD open or not.
+            if ((keysym == XK_v || keysym == XK_V) && (ev.xkey.state & Mod1Mask)) {
+                toggle_voice_recording();
+                if (visible) draw_ui();
+                continue;
+            }
+
             if ((keysym == save_keysym_lower || keysym == save_keysym_upper) && (ev.xkey.state & Mod1Mask)) {
                 if (instant_replay) {
                     save_replay_clip();
@@ -1340,8 +1616,8 @@ int32_t update_shadowplay_gui(void) {
                         save_replay_clip();
                     }
                 } else if (keysym == XK_Left) {
-                    if (selected_idx < 3) {
-                        selected_idx = (selected_idx - 1 + 3) % 3;
+                    if (card_position(selected_idx) >= 0) {
+                        selected_idx = card_order[(card_position(selected_idx) + 3) % 4];
                     } else if (selected_idx == 3) {
                         selected_idx = 4;
                     } else if (selected_idx == 4) {
@@ -1353,8 +1629,8 @@ int32_t update_shadowplay_gui(void) {
                     }
                     draw_ui();
                 } else if (keysym == XK_Right) {
-                    if (selected_idx < 3) {
-                        selected_idx = (selected_idx + 1) % 3;
+                    if (card_position(selected_idx) >= 0) {
+                        selected_idx = card_order[(card_position(selected_idx) + 1) % 4];
                     } else if (selected_idx == 3) {
                         selected_idx = 4;
                     } else if (selected_idx == 4) {
@@ -1366,9 +1642,9 @@ int32_t update_shadowplay_gui(void) {
                     }
                     draw_ui();
                 } else if (keysym == XK_Up) {
-                    if (selected_idx == 0 || selected_idx == 1 || selected_idx == 2) selected_idx = 9;
+                    if (card_position(selected_idx) >= 0) selected_idx = 9;
                     else if (selected_idx == 3) selected_idx = 0;
-                    else if (selected_idx == 4) selected_idx = 1;
+                    else if (selected_idx == 4) selected_idx = SEL_VOICE;   // the card above Video Quality
                     else if (selected_idx == 5) selected_idx = 3;
                     else if (selected_idx == 6) selected_idx = 4;
                     else if (selected_idx == 7) selected_idx = 5;
@@ -1376,8 +1652,8 @@ int32_t update_shadowplay_gui(void) {
                     else if (selected_idx == 9) selected_idx = 8;
                     draw_ui();
                 } else if (keysym == XK_Down) {
-                    if (selected_idx == 0) selected_idx = 3;
-                    else if (selected_idx == 1 || selected_idx == 2) selected_idx = 4;
+                    // The two left cards sit over File Format, the two right ones over Video Quality.
+                    if (card_position(selected_idx) >= 0) selected_idx = card_position(selected_idx) < 2 ? 3 : 4;
                     else if (selected_idx == 3) selected_idx = 5;
                     else if (selected_idx == 4) selected_idx = 6;
                     else if (selected_idx == 5) selected_idx = 7;
@@ -1410,6 +1686,11 @@ int32_t update_shadowplay_gui(void) {
                         } else {
                             stop_manual_recording();
                         }
+                    } else if (selected_idx == SEL_VOICE) {
+                        // The HUD stays open, unlike the two video cards:
+                        // nothing on screen is being captured, and the card
+                        // shows the running time.
+                        toggle_voice_recording();
                     } else if (selected_idx == 2) {
                         broadcast = !broadcast;
                     } else if (selected_idx == 3) {
@@ -1440,7 +1721,10 @@ int32_t update_shadowplay_gui(void) {
                         replay_keybind_idx = (replay_keybind_idx + 1) % 4;
                         update_grabbed_keys();
                     } else if (selected_idx == 8) {
-                        selected_mic_idx = (selected_mic_idx + 1) % num_mic_devices;
+                        selected_mic_idx = (selected_mic_idx + 1) % (num_mics + 1);
+                        printf("[ShadowPlay] Microphone: %s%s\n", selected_mic_label(),
+                               voice_recording ? " (from the next voice recording on)" : "");
+                        fflush(stdout);
                         if (instant_replay) {
                             stop_replay_buffer();
                             start_replay_buffer();

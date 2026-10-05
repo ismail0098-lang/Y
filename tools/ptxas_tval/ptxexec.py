@@ -11,6 +11,7 @@ from z3 import *
 import fpmode
 import smem
 import memorder
+import ptxsource
 
 W = 32
 def bv(n): return BitVecVal(n, W)
@@ -20,7 +21,10 @@ ZERO = bv(0)
 class Ptx:
     def __init__(self, sym):
         self.r = {}; self.rd = {}; self.p = {}; self.f = {}
-        self.cc = BoolVal(False)          # the PTX carry flag
+        # The ISA does not promise an entry value for the implicit carry flag.
+        # A carry reader must be dominated, under its guard, by a CC writer.
+        self.cc = Bool('ptx_undef_cc')
+        self.cc_defined = BoolVal(False)
         self.sym = sym
         # FALSE once the kernel may have returned.  See the `ret` arm.
         self.alive = BoolVal(True)
@@ -47,7 +51,18 @@ class Ptx:
         self.smem_layout = sym.get('smem_layout', {})
         self.smem_ops = []
         self.smem_snaps = []      # array contents ENTERING each barrier          # (kind, byte_addr, guard) for diagnostics
-        self.align_obs = []         # 4-byte alignment obligations
+        self.align_obs = []         # guarded natural-alignment obligations
+
+    @staticmethod
+    def vector(operand, count, *, destination=False):
+        match = re.fullmatch(r'\{(.*)\}', operand.strip())
+        items = [] if match is None else [s.strip() for s in match.group(1).split(',')]
+        if (len(items) != count or any(not s for s in items)
+                or (destination and len(set(items)) != len(items))):
+            raise Exception(f'UNMODELLED PTX vector operand {operand!r}: expected '
+                            f'{count} components' + (' with distinct destinations' if destination else '')
+                            + '  (refusing, not guessing)')
+        return items
 
     def R(self, o):
         o = o.strip()
@@ -92,6 +107,8 @@ class Ptx:
         raise Exception(f'unmodelled float operand {o!r}')
 
     def wf(self, o, v, g):
+        if re.fullmatch(r'%f\d+', o.strip()) is None:
+            raise Exception(f'UNMODELLED PTX float destination {o!r}  (refusing, not guessing)')
         i = int(o.strip()[2:])
         old = self.f.get(i)
         if old is None: self.undef += 1; old = BitVec(f'ptx_undef_f{i}', W)
@@ -114,7 +131,30 @@ class Ptx:
             return BitVecVal(self.smem_layout[o], 64)
         m = re.fullmatch(r'(-?)(\d+)', o)
         if m: return BitVecVal(-int(m.group(2)) if m.group(1) else int(m.group(2)), 64)
-        raise Exception(f'unmodelled 64-bit operand {o!r}')
+        m = re.fullmatch(r'(-?)0[xX]([0-9a-fA-F]+)', o)
+        if m: return BitVecVal(-int(m.group(2), 16) if m.group(1) else int(m.group(2), 16), 64)
+        raise Exception(f'UNMODELLED PTX 64-bit operand {o!r}  (refusing, not guessing)')
+
+    def GA(self, o):
+        """A modelled global byte address: a 64-bit base plus a literal offset.
+
+        Shared addresses have their own 32-bit window. Mixing their reader
+        into global stores let a 32-bit address crash later in the memory
+        model, while global loads rejected ordinary [%rdN+4] expressions.
+        """
+        original = o.strip()
+        base, offset = original, 0
+        m = re.fullmatch(r'(.+?)\s*\+\s*(-?0[xX][0-9a-fA-F]+|-?\d+)', original)
+        if m:
+            base = m.group(1).strip()
+            literal = m.group(2)
+            offset = int(literal, 16 if 'x' in literal.lower() else 10)
+        if re.fullmatch(r'%rd\d+|-?\d+|-?0[xX][0-9a-fA-F]+', base) is None:
+            raise Exception(f'UNMODELLED PTX global address {original!r}: '
+                            'only 64-bit bases and literal offsets are modelled  '
+                            '(refusing, not guessing)')
+        value = self.D(base)
+        return value + BitVecVal(offset, 64) if m else value
 
     def SA(self, o):
         """A shared-memory address operand, from either register file.
@@ -122,23 +162,43 @@ class Ptx:
         `[%rd7]` and `[%r102]` both occur; the shared window is 32-bit, so both
         reduce to 32 bits here rather than at the point of use."""
         o = o.strip()
-        return self.D(o) if o.startswith('%rd') else self.R(o)
+        offset = 0
+        m = re.fullmatch(r'(.*?)\s*\+\s*(-?0[xX][0-9a-fA-F]+|-?\d+)', o)
+        if m:
+            o = m.group(1).strip()
+            literal = m.group(2)
+            offset = int(literal, 16 if 'x' in literal.lower() else 10)
+        if (re.fullmatch(r'%r(?:d)?\d+|-?\d+|-?0[xX][0-9a-fA-F]+', o) is None
+                and o not in self.smem_layout):
+            raise Exception(f'UNMODELLED PTX shared address {o!r}  '
+                            '(refusing, not guessing)')
+        if o.startswith('%rd'):
+            base = self.D(o)
+        else:
+            base = self.R(o)
+        return base + BitVecVal(offset, base.size()) if m else base
 
     def P(self, o):
         o = o.strip(); neg = o.startswith('!')
         if neg: o = o[1:]
+        if re.fullmatch(r'%p\d+', o) is None:
+            raise Exception(f'UNMODELLED PTX predicate operand {o!r}  (refusing, not guessing)')
         i = int(o[2:])
         if i not in self.p:
             self.undef += 1; self.p[i] = Bool(f'ptx_undef_p{i}')
         return Not(self.p[i]) if neg else self.p[i]
 
     def wr(self, o, v, g):
+        if re.fullmatch(r'%r\d+', o.strip()) is None:
+            raise Exception(f'UNMODELLED PTX integer destination {o!r}  (refusing, not guessing)')
         i = int(o.strip()[2:])
         old = self.r.get(i)
         if old is None: self.undef += 1; old = BitVec(f'ptx_undef_r{i}', W)
         self.r[i] = simplify(If(g, v, old) if not is_true(g) else v)
         self.defs.append((self.pc, o.strip(), self.r[i]))
     def wd(self, o, v, g):
+        if re.fullmatch(r'%rd\d+', o.strip()) is None:
+            raise Exception(f'UNMODELLED PTX wide destination {o!r}  (refusing, not guessing)')
         i = int(o.strip()[3:])
         old = self.rd.get(i)
         if old is None: self.undef += 1; old = BitVec(f'ptx_undef_rd{i}', 64)
@@ -149,6 +209,8 @@ class Ptx:
                           val, carry))
 
     def wp(self, o, v, g):
+        if re.fullmatch(r'%p\d+', o.strip()) is None:
+            raise Exception(f'UNMODELLED PTX predicate destination {o!r}  (refusing, not guessing)')
         i = int(o.strip()[2:])
         old = self.p.get(i)
         if old is None: self.undef += 1; old = Bool(f'ptx_undef_p{i}')
@@ -160,6 +222,21 @@ class Ptx:
         s = e(a) + e(b)
         if cin is not None: s = s + If(cin, BitVecVal(1, 33), BitVecVal(0, 33))
         return Extract(31,0,s), (Extract(32,32,s) == BitVecVal(1,1))
+
+    def read_cc(self, guard, opcode):
+        missing = simplify(And(guard, Not(self.cc_defined)))
+        if not is_false(missing):
+            solver = Solver(); solver.set(timeout=1000); solver.add(missing)
+            # Only UNSAT proves every executing path initialized CC. SAT and
+            # UNKNOWN both refuse; an expired solver cannot license a read.
+            if solver.check() != unsat:
+                raise Exception(f'UNMODELLED PTX carry read in {opcode!r}: CC may be '
+                                'uninitialized under its guard  (refusing, not guessing)')
+        return self.cc
+
+    def write_cc(self, value, guard):
+        self.cc = simplify(If(guard, value, self.cc))
+        self.cc_defined = simplify(Or(self.cc_defined, guard))
     def subb(self, a, b, bin_):
         e = lambda x: ZeroExt(1, x)
         s = e(a) - e(b)
@@ -200,9 +277,8 @@ class Ptx:
         array.  `memorder.read_through` then reads it through every store this
         side has already made.
 
-        The offset term is built only when something needs it.  The multiply
-        primitive orders its operands by z3 node id, so building a node an
-        abstract-mode load never used would renumber every term after it."""
+        The offset term is built only when something needs it, preserving the
+        simpler terms of abstract-mode loads with no read-through."""
         if 'abstract' in self.sym:
             base = self.sym['abstract'](i, k)
             if not self.stores:
@@ -247,15 +323,24 @@ class Ptx:
             if ch in '}]': depth -= 1
             if ch == ',' and depth == 0: ops.append(cur); cur = ''
             else: cur += ch
-        if cur.strip(): ops.append(cur)
+        if cur.strip() or rest.rstrip().endswith(','): ops.append(cur)
         ops = [o.strip() for o in ops]
+        if depth != 0:
+            raise Exception(f'UNMODELLED PTX operand grouping in {op!r}  '
+                            '(refusing, not guessing)')
+        if op.startswith(('ld.', 'st.')) and len(ops) != 2:
+            raise Exception(f'UNMODELLED PTX OPERAND COUNT in {op!r}: expected 2, '
+                            f'got {len(ops)}  (refusing, not guessing)')
 
-        if op.startswith('ld.param.'):
+        if op in ('ld.param.u32', 'ld.param.s32', 'ld.param.b32',
+                  'ld.param.u64', 'ld.param.s64', 'ld.param.b64'):
             nm = re.fullmatch(r'\[(\w+)\]', ops[1]).group(1)
             if op.endswith('64'):
                 self.wd(ops[0], Concat(self.sym[nm+'_hi'], self.sym[nm+'_lo']), g)
             else:
                 self.wr(ops[0], self.sym[nm+'_lo'], g)
+        elif op.startswith('ld.param.'):
+            raise Exception(f'UNMODELLED PTX PARAMETER LOAD {op!r}  (refusing, not guessing)')
         elif op == 'mov.u32':
             src = ops[1]
             if src.startswith('%') and not re.fullmatch(r'%r\d+', src):
@@ -278,43 +363,46 @@ class Ptx:
         elif op == 'cvt.u64.u32':
             self.wd(ops[0], ZeroExt(32, self.R(ops[1])), g)
         elif op == 'shl.b64':
-            self.wd(ops[0], self.D(ops[1]) << BitVecVal(int(ops[2]), 64), g)
+            self.wd(ops[0], self.D(ops[1]) << ZeroExt(32, self.R(ops[2])), g)
         elif op == 'add.u64':
             self.wd(ops[0], self.D(ops[1]) + self.D(ops[2]), g)
         elif op in ('st.shared.v4.u32','st.shared.v4.b32','st.shared.v4.f32'):
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
-            srcs = re.fullmatch(r'\{(.*)\}', ops[1]).group(1).split(',')
+            srcs = self.vector(ops[1], 4)
             rd = self.F if op.endswith('f32') else self.R
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 16, g))
             self.smem_ops.append(('st', addr, g))
             for k, sname in enumerate(srcs):
                 idx = smem.word(addr + BitVecVal(4*k, addr.size()))
                 nxt = Store(self.smem, idx, rd(sname))
                 self.smem = simplify(If(g, nxt, self.smem) if not is_true(g) else nxt)
         elif op in ('ld.shared.v4.u32','ld.shared.v4.b32','ld.shared.v4.f32'):
-            dsts = re.fullmatch(r'\{(.*)\}', ops[0]).group(1).split(',')
+            dsts = self.vector(ops[0], 4, destination=True)
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 16, g))
             self.smem_ops.append(('ld', addr, g))
+            write = self.wf if op.endswith('f32') else self.wr
             for k, d in enumerate(dsts):
                 idx = smem.word(addr + BitVecVal(4*k, addr.size()))
-                self.wr(d, Select(self.smem, idx), g)
+                write(d, Select(self.smem, idx), g)
         elif op in ('st.shared.u32','st.shared.s32','st.shared.b32','st.shared.f32'):
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             rd = self.F if op.endswith('f32') else self.R
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 4, g))
             self.smem_ops.append(('st', addr, g))
             idx = smem.word(addr)
             nxt = Store(self.smem, idx, rd(ops[1]))
             self.smem = simplify(If(g, nxt, self.smem) if not is_true(g) else nxt)
         elif op in ('ld.shared.u32','ld.shared.s32','ld.shared.b32','ld.shared.f32'):
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            self.align_obs.append(smem.require_aligned(addr))
+            self.align_obs.append(smem.require_aligned(addr, 4, g))
             self.smem_ops.append(('ld', addr, g))
-            self.wr(ops[0], Select(self.smem, smem.word(addr)), g)
+            write = self.wf if op.endswith('f32') else self.wr
+            write(ops[0], Select(self.smem, smem.word(addr)), g)
         elif op.startswith(('ld.shared.','st.shared.')):
             smem.refuse_subword(op)
         elif op.startswith('bar.sync') or op.startswith('barrier.sync'):
+            smem.require_full_barrier(op, ops, 'ptx')
             # NOT a no-op.  See smem.py: a no-op barrier validates a kernel whose
             # shared store ptxas moved across it, which is the main thing here
             # worth catching.  A barrier under a guard is a program neither this
@@ -324,14 +412,14 @@ class Ptx:
             self.smem_snaps.append(self.smem)
             self.smem = self.bar.apply(self.smem, 'ptx')
         elif op == 'ld.global.v4.u32':
-            dsts = re.fullmatch(r'\{(.*)\}', ops[0]).group(1).split(',')
-            addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            i = len(self.loads); self.loads.append((addr, g))
+            dsts = self.vector(ops[0], 4, destination=True)
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
+            i = len(self.loads); self.loads.append((addr, g, 16))
             for k, d in enumerate(dsts):
                 self.wr(d, self.gload(addr, i, k, 4*k), g)
         elif op in ('ld.global.u32','ld.global.s32','ld.global.b32','ld.global.nc.u32'):
-            addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            i = len(self.loads); self.loads.append((addr, g))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
+            i = len(self.loads); self.loads.append((addr, g, 4))
             self.wr(ops[0], self.gload(addr, i, 0), g)
         # --- a PTX macro-op: ptxas does not transliterate it, it inlines a
         # --- refinement sequence.  Named refusal, with the reason.
@@ -381,8 +469,8 @@ class Ptx:
         elif op == 'mov.f32':
             self.wf(ops[0], self.F(ops[1]), g)
         elif op == 'ld.global.f32':
-            addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            i = len(self.loads); self.loads.append((addr, g))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
+            i = len(self.loads); self.loads.append((addr, g, 4))
             self.wf(ops[0], self.gload(addr, i, 0), g)
         # --- sub-word global loads.
         # MEMORY MODEL: the initial memory is Array(BV64 -> BV32) -- the 32-bit
@@ -393,14 +481,14 @@ class Ptx:
         # equivalence, never complete.  After a store the load is read byte by
         # byte through it (`gload`), which IS byte-faithful.
         elif op in ('ld.global.s8','ld.global.u8','ld.global.s16','ld.global.u16'):
-            addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            i = len(self.loads); self.loads.append((addr, g))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             nb = 8 if op.endswith('8') else 16
+            i = len(self.loads); self.loads.append((addr, g, nb // 8))
             w = self.gload(addr, i, 0, None, nb // 8)
             byte = Extract(nb-1, 0, w)
             self.wr(ops[0], (SignExt(W-nb, byte) if '.s' in op else ZeroExt(W-nb, byte)), g)
         elif op == 'st.global.f32':
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             self.stores.append((addr, self.F(ops[1]), g))
         elif op in ('st.global.u8','st.global.s8','st.global.u16','st.global.s16'):
             # A SUB-WORD STORE.  Refused while the memory model had no width --
@@ -410,33 +498,33 @@ class Ptx:
             # measures on the device that STG.E.{U,S}{8,16} write exactly their
             # low bytes, little-endian, and nothing else.  Signedness does not
             # change the stored bits.
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             nb = 8 if op.endswith('8') else 16
             self.stores.append((addr, Extract(nb - 1, 0, self.R(ops[1])), g))
         elif op in ('st.global.u32','st.global.s32','st.global.b32'):
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             self.stores.append((addr, self.R(ops[1]), g))
         elif op == 'st.global.v4.u32':
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
-            srcs = re.fullmatch(r'\{(.*)\}', ops[1]).group(1).split(',')
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            srcs = self.vector(ops[1], 4)
             for k, s in enumerate(srcs):
                 self.stores.append((addr + BitVecVal(4*k, 64), self.R(s), g))
         # --- the carry-flag family -------------------------------------
         elif op in ('mad.lo.cc.u32','madc.lo.cc.u32','mad.hi.cc.u32','madc.hi.cc.u32'):
             prod = (self.hi if '.hi.' in op else self.lo)(self.R(ops[1]), self.R(ops[2]))
-            cin = self.cc if op.startswith('madc') else None
+            cin = self.read_cc(g, op) if op.startswith('madc') else None
             s, co = self.addc(prod, self.R(ops[3]), cin)
-            self.wr(ops[0], s, g); self.cc = If(g, co, self.cc); self.widen(s, co)
+            self.wr(ops[0], s, g); self.write_cc(co, g); self.widen(s, co)
         elif op in ('add.cc.u32','addc.cc.u32','addc.u32','add.u32'):
-            cin = self.cc if op.startswith('addc') else None
+            cin = self.read_cc(g, op) if op.startswith('addc') else None
             s, co = self.addc(self.R(ops[1]), self.R(ops[2]), cin)
             self.wr(ops[0], s, g); self.widen(s, co)
-            if op.endswith('.cc.u32'): self.cc = If(g, co, self.cc)
+            if op.endswith('.cc.u32'): self.write_cc(co, g)
         elif op in ('sub.cc.u32','subc.cc.u32','subc.u32','sub.u32'):
-            bin_ = self.cc if op.startswith('subc') else None
+            bin_ = self.read_cc(g, op) if op.startswith('subc') else None
             s, co = self.subb(self.R(ops[1]), self.R(ops[2]), bin_)
             self.wr(ops[0], s, g); self.widen(s, co)
-            if op.endswith('.cc.u32'): self.cc = If(g, co, self.cc)
+            if op.endswith('.cc.u32'): self.write_cc(co, g)
         # --- address / move / convert ----------------------------------
         elif op in ('cvta.to.global.u64','cvta.global.u64'):
             self.wd(ops[0], self.D(ops[1]), g)          # address-space cast: identity here
@@ -484,10 +572,16 @@ class Ptx:
         elif op in ('mul.lo.u64','mul.lo.s64'): self.wd(ops[0], self.D(ops[1])*self.D(ops[2]), g)
         elif op == 'sub.u64':       self.wd(ops[0], self.D(ops[1]) - self.D(ops[2]), g)
         elif op in ('add.s64','add.u64.'): self.wd(ops[0], self.D(ops[1]) + self.D(ops[2]), g)
-        elif op == 'shr.u64':       self.wd(ops[0], LShR(self.D(ops[1]), ZeroExt(32,self.R(ops[2])) if re.fullmatch(r'%r\d+',ops[2].strip()) else BitVecVal(int(ops[2]),64)), g)
+        elif op == 'shr.u64':       self.wd(ops[0], LShR(self.D(ops[1]), ZeroExt(32,self.R(ops[2]))), g)
         # --- comparisons ------------------------------------------------
         elif op.startswith('setp.'):
-            k = op.split('.')[1]; ty = op.split('.')[2] if len(op.split('.'))>2 else 'u32'
+            # Only these exact integer forms have modelled semantics. Float
+            # operands may legally live in .b32 registers, so register spelling
+            # cannot distinguish an FP comparison from an integer comparison.
+            m = re.fullmatch(r'setp\.(lt|le|gt|ge|eq|ne)\.(u32|s32|b32|u64|s64|b64)', op)
+            if m is None or len(ops) != 3:
+                raise Exception(f'UNMODELLED PTX COMPARISON {op!r}  (refusing, not guessing)')
+            k, ty = m.groups()
             wide = ty in ('u64','s64','b64')
             a = self.D(ops[1]) if wide else self.R(ops[1])
             b = self.D(ops[2]) if wide else self.R(ops[2])
@@ -499,18 +593,18 @@ class Ptx:
             self.wp(ops[0], f(a,b), g)
         # --- wider global access ---------------------------------------
         elif op in ('ld.global.v2.u32','ld.global.v2.b32'):
-            dsts = re.fullmatch(r'\{(.*)\}', ops[0]).group(1).split(',')
-            addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
-            i = len(self.loads); self.loads.append((addr, g))
+            dsts = self.vector(ops[0], 2, destination=True)
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
+            i = len(self.loads); self.loads.append((addr, g, 8))
             for k2,d in enumerate(dsts):
                 self.wr(d, self.gload(addr, i, k2, 4*k2), g)
         elif op in ('st.global.v2.u32','st.global.v2.b32'):
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
-            srcs = re.fullmatch(r'\{(.*)\}', ops[1]).group(1).split(',')
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            srcs = self.vector(ops[1], 2)
             for k2,s2 in enumerate(srcs):
                 self.stores.append((addr + BitVecVal(4*k2,64), self.R(s2), g))
         elif op == 'st.global.u64':
-            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            addr = self.GA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             v = self.D(ops[1])
             self.stores.append((addr, Extract(31,0,v), g))
             self.stores.append((addr+BitVecVal(4,64), Extract(63,32,v), g))
@@ -555,14 +649,16 @@ def run_ptx(path, sym):
             f'which one is under test is undefined  (refusing, not guessing)')
     sym.setdefault('smem_layout', {}).update(smem.layout(path))
     st = Ptx(sym); depth = 0
-    for line in open(path):
+    for line in ptxsource.read(path).splitlines():
         s = line.strip()
         if s.startswith('//') or not s: continue
         if s.startswith('.') or s.startswith('.reg') or s.endswith('(') or s.startswith('.param'): continue
         if s == '{': depth += 1; continue
         if s == '}': depth -= 1; continue
         if not depth: continue
-        if not s.endswith(';'): continue
+        if loopcfg.PTX_LABEL.fullmatch(s): continue
+        if not s.endswith(';'):
+            raise Exception(f'UNMODELLED PTX source line {s!r}  (refusing, not guessing)')
         st.step(s[:-1].strip())
     return st
 

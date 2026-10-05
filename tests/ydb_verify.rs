@@ -381,6 +381,45 @@ fn main() -> I32 {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A loop-local binding that shadows an outer one is refused by the verifier
+/// (its SSA model is keyed by name). Let through, the invariant is UNVERIFIED
+/// for that reason - in a `for` and in a `while`. Recording it as "not
+/// verified: the code is @unsafe" would be false: the code is strict.
+#[test]
+fn a_shadowed_loop_binding_is_unverified_and_says_why() {
+    let src = "\
+fn main() -> I32 {
+    let x: I32 = 1;
+    let mut s: I32 = 0;
+    @invariant(s >= 0)
+    for i in 0..4 { // L:for
+        let x: I32 = 2;
+        s = s + x;
+    }
+    let mut j: I32 = 0;
+    @invariant(j >= 0)
+    while j < 3 { // L:while
+        let x: I32 = 5;
+        j = j + 1;
+    }
+    return s + x;
+}
+";
+    let (dir, prog) = setup("shadow", src, pinned::SM_PINNED);
+    let (table, text) = emit(&dir, &prog, &[]);
+    assert!(table.is_none(), "a shadowed loop binding is refused:\n{}", text);
+    assert!(text.contains("shadows an existing binding"), "{}", text);
+    let (table, text) = emit(&dir, &prog, &[("Y_ALLOW_UNVERIFIED_INVARIANTS", "1")]);
+    let table = table.unwrap_or_else(|| panic!("{}", text));
+    for (tag, what) in [("for", "@invariant(s >= 0)"), ("while", "@invariant(j >= 0)")] {
+        let inv = fact(&table, "invariant", line_of(src, tag), what);
+        assert_eq!(status(&inv), "unverified", "{}", inv);
+        assert!(inv.contains("shadows an existing binding"), "{}", inv);
+        assert!(!inv.contains("@unsafe"), "{}", inv);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// The flag writes a table and compiles nothing, so a backend or debug flag
 /// beside it is refused rather than ignored.
 #[test]

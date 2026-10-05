@@ -35,7 +35,7 @@
     mov.u32 %r1, 0;
     mov.u32 %r2, 1024;
     $LOOP_START_0:
-    setp.ge.u32 %p1, %r1, %r2;
+    setp.ge.s32 %p1, %r1, %r2;
     @%p1 bra $LOOP_END_1;
     mov.u32 %r3, %r1;   // own register: `%r1` is another binding's
     cvt.f64.f32 %fd4, %f0;

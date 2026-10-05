@@ -7,7 +7,9 @@
 // permitted X/Z grid dimensions can produce more workers than a signed 32-bit
 // index holds. So the aliased binding is 64-bit in every grid-stride reduction
 // this repository ships.
-kernel let_alias_wide(Out: GlobalMemory<I64>, N: I64) {
+// `N` is I32 so `i + nworkers` cannot leave I64: the invariant verifier
+// models machine arithmetic. The copy under test is the 64-bit `i = worker`.
+kernel let_alias_wide(Out: GlobalMemory<I64>, N: I32) {
     let block_x: I64 = block_idx_x();
     let grid_x: I64 = grid_dim_x();
     let block_size: I64 = block_dim_x();

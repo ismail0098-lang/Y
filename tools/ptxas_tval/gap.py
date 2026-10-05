@@ -79,9 +79,12 @@ def census(kernel):
     p, s = f'corpus/{kernel}.ptx', f'corpus/{kernel}.sass'
     r = {'kernel': kernel}
     for side in ('ptx','sass'):
-        sym = fresh(p)
         first, opgap, other = None, [], []
         try:
+            # Inside the try: the PTX READER now refuses some programs outright
+            # (a nested lexical scope), and a refusal while setting up one kernel
+            # is that kernel's setup blocker, not a crash of the whole census.
+            sym = fresh(p)
             if side == 'ptx':
                 sym.setdefault('smem_layout', {}).update(smem.layout(p))
                 st = ptxexec.Ptx(sym); items = [(None,i) for i in ptx_insns(p)]

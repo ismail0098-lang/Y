@@ -1,0 +1,6 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'y_autotune_probe' for 'sm_89'
+ptxas info    : Function properties for y_autotune_probe
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 220 registers, used 1 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 27.791 ms

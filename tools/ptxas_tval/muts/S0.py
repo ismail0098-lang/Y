@@ -1,2 +1,3 @@
 # CONTROL: reorder the two alignment-obligation lists.  Semantically neutral.
-s=open('smemval.py').read(); s=s.replace('P.align_obs + S.align_obs','S.align_obs + P.align_obs'); open('smemval.py','w').write(s)
+s=open('smem.py').read(); a='ptx.align_obs + sass.align_obs'
+assert s.count(a)==1; s=s.replace(a,'sass.align_obs + ptx.align_obs'); open('smem.py','w').write(s)

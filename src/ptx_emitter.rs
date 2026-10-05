@@ -2915,7 +2915,10 @@ or `shared_alloc_u32` for a shared-memory array.",
         label
     }
 
-    fn emit_u32_init(&mut self, dst: &str, expr: &Expr) {
+    /// Materialize a source I32 loop-header value. Safe-loop verification
+    /// proves signed-I32 representability; the conversion is still necessary
+    /// when an expression arrives in a 64-bit register.
+    fn emit_i32_loop_header(&mut self, dst: &str, expr: &Expr) {
         match expr {
             Expr::IntLit(val, _) if *val >= 0 && *val <= u32::MAX as i64 => {
                 writeln!(
@@ -2927,6 +2930,7 @@ or `shared_alloc_u32` for a shared-memory array.",
             }
             _ => {
                 let val_reg = self.emit_expr(expr, None, &HardwareProfile::default());
+                let val_reg = self.emit_convert(&val_reg, ScalarTy::I32);
                 writeln!(
                     &mut self.ptx_buffer,
                     "    mov.u32 {}, {};",
@@ -4130,7 +4134,7 @@ declare it as a Q format.\n{}",
                     }
                     Some(dynamic) => {
                         let r = self.alloc_reg32();
-                        self.emit_u32_init(&r, dynamic);
+                        self.emit_i32_loop_header(&r, dynamic);
                         step_reg = Some(r);
                         1
                     }
@@ -4141,14 +4145,14 @@ declare it as a Q format.\n{}",
                     writeln!(&mut self.ptx_buffer, "    // [Y AUTOMATED VECTORIZING PASS] Transformed loop step into 128-bit SIMD v4 stride").unwrap();
                 }
 
-                self.emit_u32_init(&loop_reg, start);
-                self.emit_u32_init(&end_reg, end);
+                self.emit_i32_loop_header(&loop_reg, start);
+                self.emit_i32_loop_header(&end_reg, end);
                 self.variables.insert(loop_var.clone(), loop_reg.clone());
 
                 writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
                 writeln!(
                     &mut self.ptx_buffer,
-                    "    setp.ge.u32 {}, {}, {};",
+                    "    setp.ge.s32 {}, {}, {};",
                     exit_pred, loop_reg, end_reg
                 )
                 .unwrap();
@@ -4802,7 +4806,7 @@ declare it as a Q format.\n{}",
                                     16
                                 }
                             };
-                            writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], {};", dest_reg, src_reg, bytes).unwrap();
+                            self.emit_cp_async(&dest_reg, &src_reg, bytes);
                             // Without a commit_group the copy belongs to no group,
                             // so the `cp.async.wait_group` that `pipe.wait` emits
                             // waits on nothing and returns immediately. Committing
@@ -6605,12 +6609,24 @@ declare it as a Q format.\n{}",
         buffer
     }
 
-    /// Emits native Ampere/Ada cp.async transfer instruction bypassing register files and L1 cache allocation (.cg).
+    /// Emit cp.async with the cache modifier its transfer width supports.
+    /// `.cg` bypasses L1 for 16-byte transfers; 4/8-byte transfers require `.ca`.
     pub fn emit_cp_async(&mut self, dest_smem: &str, src_gmem: &str, bytes: u32) {
+        let cache = match bytes {
+            16 => "cg",
+            4 | 8 => "ca",
+            _ => {
+                self.unsupported_intrinsic(
+                    "cp_async",
+                    &format!("cp.async transfers exactly 4, 8 or 16 bytes; {bytes} was requested"),
+                );
+                return;
+            }
+        };
         writeln!(
             &mut self.ptx_buffer,
-            "    cp.async.cg.shared.global [{}], [{}], {};",
-            dest_smem, src_gmem, bytes
+            "    cp.async.{}.shared.global [{}], [{}], {};",
+            cache, dest_smem, src_gmem, bytes
         )
         .unwrap();
     }
@@ -6882,11 +6898,14 @@ declare it as a Q format.\n{}",
     /// the whole contraction:
     ///
     /// ```text
-    ///   | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+    ///   | sum over k < K of A[r][k] * B[c][k] |  <=  K * 128^2  <=  i32::MAX
     /// ```
     ///
-    /// `floor(i32::MAX / 127^2)` is 133_144; the kernel already requires
-    /// `K % 32 == 0`, so the largest K it can be handed is 133_120.
+    /// `I8` includes -128, whose square is larger than 127's. The full-range
+    /// bound is `floor(i32::MAX / 128^2) = 131_071`; the kernel already requires
+    /// `K % 32 == 0`, so the largest K it can be handed is 131_040.
+    /// Using 127 admitted K = 131_072 with A = B = -128: measured on the GPU,
+    /// the exact 2_147_483_648 wrapped to -2_147_483_648.
     ///
     /// **Measured on the device before this guard existed**, M=16 N=8, every
     /// element of A and B set to 127, one warp, grid (1,1,1):
@@ -6918,7 +6937,7 @@ declare it as a Q format.\n{}",
     /// int32 `C` is therefore the one obvious use of that accumulate which the
     /// licence does NOT cover: every launch is individually accepted and the
     /// accumulation is not. Measured, M=16 N=8, every operand 127,
-    /// K = 66,560 per launch (half the maximum, so each launch compiles),
+    /// K = 66,560 per launch (inside the licence, so each launch compiles),
     /// `C` zeroed once before the first:
     ///
     /// | launch | `C[0]` | |
@@ -6934,7 +6953,7 @@ declare it as a Q format.\n{}",
     /// that only appears in a proof is one the user never reads.
     ///
     /// Tied to `proofs/Int8GemmExact.v` by `tests/int8_gemm_exactness.rs`.
-    const INT8_MAX_EXACT_K: u32 = 133_120;
+    const INT8_MAX_EXACT_K: u32 = 131_040;
 
     /// **A BIG TILE IS A LOSS AT A SMALL SHAPE, AND THE LOSS IS LARGER THAN THE
     /// WIN.** A tile is one WARP, so taking the largest tile the shape admits
@@ -6997,7 +7016,7 @@ declare it as a Q format.\n{}",
                 "[PTX] `{}`: K = {} exceeds this kernel's exact range. \
                  `mma.sync...s32.s8.s8.s32` accumulates into int32 and there is no \
                  flush - the output is int32 too - so the contraction must satisfy \
-                 K * 127^2 <= i32::MAX, i.e. K <= {}. At K = {} a full-range int8 \
+                 K * 128^2 <= i32::MAX, i.e. K <= {}. At K = {} a full-range int8 \
                  product is {} against an i32::MAX of 2147483647, and the kernel \
                  returns the wrapped value with no error. Reduce K, or split the \
                  GEMM and accumulate the partials in a WIDER TYPE ON THE HOST - \
@@ -7009,7 +7028,7 @@ declare it as a Q format.\n{}",
                 k,
                 Self::INT8_MAX_EXACT_K,
                 k,
-                (k as u64) * 127 * 127
+                (k as u64) * 128 * 128
             ));
             return 32;
         }
@@ -12004,6 +12023,21 @@ declare it as a Q format.\n{}",
             writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", t_reg, warp).unwrap();
             (t_reg, seq_len.clone())
         };
+        // A warp advances by num_warps tokens. When that stride is smaller
+        // than a page, consecutive tokens can share the page-table entry.
+        // Cache only the physical page base; the token's slot is still
+        // recomputed every iteration, including unaligned split starts.
+        let cached_page = if num_warps < page_size {
+            let r = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0xffffffff;", r).unwrap();
+            Some(r)
+        } else {
+            None
+        };
+        let kv_base = self.alloc_reg64();
+        if cached_page.is_some() {
+            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", kv_base).unwrap();
+        }
         writeln!(&mut self.ptx_buffer, "ATTN_LOOP_{}:", kernel_name).unwrap();
         let p_done = self.alloc_pred();
         writeln!(&mut self.ptx_buffer, "    setp.ge.s32 {}, {}, {};", p_done, t_reg, t_end).unwrap();
@@ -12020,6 +12054,14 @@ declare it as a Q format.\n{}",
             writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", slot, t_reg, page_size).unwrap();
         }
 
+        // The page is warp-uniform. All lanes skip the lookup together;
+        // the invalid initial cache guarantees the first token loads it.
+        if let Some(cached) = &cached_page {
+            let p_same_page = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.eq.s32 {}, {}, {};", p_same_page, page, cached).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_PAGE_READY_{};", p_same_page, kernel_name).unwrap();
+        }
+
         // page_table[seq, page] -> physical page
         let pt_idx = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", pt_idx, ctaid_y, max_pages_reg, page).unwrap();
@@ -12033,8 +12075,11 @@ declare it as a Q format.\n{}",
         // KV element index = ((phys*PS + slot)*NKVH + kv_head)*HD + lane*EPL.
         // Computed in 64 bits: num_pages*page_size*num_kv_heads*head_dim
         // overflows 32 bits for a realistically sized cache.
-        let kv_base = self.alloc_reg64();
         writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, {};", kv_base, phys, page_size * num_kv_heads * head_dim).unwrap();
+        if let Some(cached) = &cached_page {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", cached, page).unwrap();
+            writeln!(&mut self.ptx_buffer, "ATTN_PAGE_READY_{}:", kernel_name).unwrap();
+        }
         let s1 = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", s1, slot, num_kv_heads * head_dim).unwrap();
         let s2 = self.alloc_reg32();

@@ -333,7 +333,7 @@ fn every_reducing_entry_was_actually_examined() {
 /// The proof's accumulator bound is the compiler's.
 ///
 /// Parsed out of the `.v` rather than restated here — a third copy of
-/// `2^63 / ((2^28 - 1) * 127)` is the defect, not the check.
+/// `(2^63 - 1) / (2^28 * 127)` is the defect, not the check.
 #[test]
 fn the_proof_and_the_compiler_agree_on_the_accumulator_bound() {
     let v = std::fs::read_to_string(
@@ -349,9 +349,9 @@ fn the_proof_and_the_compiler_agree_on_the_accumulator_bound() {
         .filter(|s| !s.is_empty())
         .map(|s| s.parse().unwrap())
         .collect();
-    // `(2 ^ 63) / ((2 ^ 28 - 1) * 127)`
-    assert_eq!(nums, vec![2, 63, 2, 28, 1, 127], "the bound's shape moved: {line}");
-    let from_proof = (1u128 << nums[1]) / (((1u128 << nums[3]) - nums[4]) * nums[5]);
+    // `(2 ^ 63 - 1) / (2 ^ 28 * 127)`
+    assert_eq!(nums, vec![2, 63, 1, 2, 28, 127], "the bound's shape moved: {line}");
+    let from_proof = ((1u128 << nums[1]) - nums[2]) / ((1u128 << nums[4]) * nums[5]);
     assert_eq!(
         from_proof as usize, MAX_EXACT_SEQ_LEN,
         "proofs/GridStrideSplit.v and src/exact_attention.rs disagree on where \

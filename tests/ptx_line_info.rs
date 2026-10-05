@@ -244,7 +244,7 @@ kernel saxpy(X: GlobalMemory<F32>, Yv: GlobalMemory<F32>, N: I32) { // L:kernel
 
 kernel sum(Out: GlobalMemory<I32>) { // L:sum
     let mut s: I32 = 0;
-    @invariant(s >= 0) // L:invariant
+    @invariant(s >= 0 && s <= 8 * k) // L:invariant
     for k in 0..8 { // L:for
         s = s + k; // L:body
     }

@@ -13,7 +13,7 @@
 //! rather than being refused or emitted. That is the exact shape of every row
 //! in `CLAUDE.md`'s design-rule table, and it lands on the single most common
 //! GPU idiom there is: the **grid-stride loop**,
-//! `for i in worker..N step nworkers`, which is how a kernel is written when
+//! `for i in worker..count step nworkers`, which is how a kernel is written when
 //! its launch geometry is a tuning parameter rather than part of its meaning.
 //!
 //! Stepping by 1 there is not a slowdown, it is a wrong answer: every thread
@@ -60,10 +60,12 @@ fn compile(name: &str, src: &str) -> (bool, String, String) {
 
 const GRID_STRIDE: &str = r#"
 kernel gs(Src: GlobalMemory<I32>, Out: GlobalMemory<I32>, N: I32) {
+    // Bound the runtime trip count so stepping by up to 1024 cannot wrap.
+    @bounds(min=0, max=1024) let count: I32 = N;
     let worker: I32 = thread_idx_x();
     let nworkers: I32 = block_dim_x();
     @invariant(i >= 0)
-    for i in worker..N step nworkers {
+    for i in worker..count step nworkers {
         Out[i] = i;
     }
 }
@@ -118,8 +120,9 @@ fn a_runtime_step_is_emitted_rather_than_silently_becoming_one() {
 fn a_literal_step_is_still_a_constant_and_still_vectorises() {
     let src = r#"
 kernel lit(Out: GlobalMemory<F32>, N: I32) {
+    @bounds(min=0, max=1024) let count: I32 = N;
     @invariant(i >= 0)
-    for i in 0..N step 4 {
+    for i in 0..count step 4 {
         Out[i] = 1.0;
     }
 }
@@ -145,26 +148,16 @@ fn a_non_positive_literal_step_is_refused() {
             r#"
 kernel bad(Out: GlobalMemory<I32>, N: I32) {{
     @invariant(i >= 0)
-    for i in 0..N step {bad} {{
+    for i in 0..8 step {bad} {{
         Out[i] = i;
     }}
 }}
 "#
         );
         let (ok, _, log) = compile("bad_step", &src);
-        if bad == "0" {
-            assert!(
-                !ok,
-                "a step of 0 compiled successfully; it cannot terminate under the \
-                 loop's `>=` exit test.\n{log}"
-            );
-        } else {
-            // `0 - 2` is a BinaryOp, so it takes the dynamic path and is a
-            // runtime value as far as the emitter is concerned. Recorded here
-            // as a known limit rather than left as a surprise: a negative
-            // runtime step is not detectable at compile time, and the loop
-            // simply runs zero times or forever depending on the bound.
-            let _ = ok;
-        }
+        assert!(
+            !ok,
+            "a non-positive step `{bad}` compiled successfully:\n{log}"
+        );
     }
 }

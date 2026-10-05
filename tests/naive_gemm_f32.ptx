@@ -41,7 +41,7 @@
     mov.u32 %r13, 0;
     mov.u32 %r14, %r2;
     $LOOP_START_0:
-    setp.ge.u32 %p0, %r13, %r14;
+    setp.ge.s32 %p0, %r13, %r14;
     @%p0 bra $LOOP_END_1;
     // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
     mul.lo.s32 %r16, %r7, %r2;

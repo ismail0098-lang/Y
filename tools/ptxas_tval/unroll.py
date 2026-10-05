@@ -221,6 +221,12 @@ def selftest():
             out.append(line)
             if SASS_OBS.match(line.strip().split('*/')[-1].strip().rstrip(';').strip()):
                 out.append(line)
+        # RENUMBER the addresses: a duplicated line keeps its address, and the
+        # executors refuse a disassembly whose addresses do not increase
+        # strictly. Branches name labels, not addresses, so they are unchanged.
+        addr = iter(range(0, 16 * len(out), 16))
+        out = [re.sub(r'^(\s*)/\*[0-9a-f]{4,}\*/', lambda m: f'{m.group(1)}/*{next(addr):04x}*/', l)
+               for l in out]
         open(f'{tmp}/{k}.sass', 'w').writelines(out)
         v, det = factor(k, tmp)
         if v != 'UNROLLED':

@@ -2242,15 +2242,17 @@ not `GridStrideSplit.v`, which is what it looks like from the kernel's side.
 
 **The obligation bites, which is what stops it being paperwork.** The kernel
 reduces into a 64-bit accumulator, so exactness needs
-`S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize`
+`S * 2^28 * 127 < 2^63`. Y decides that in `usize`
 (`exact_attention::MAX_EXACT_SEQ_LEN`); the certificate states it over `Z` and
 hands it to `coqc`, which has no `usize`. Two tools, no shared code, no shared
-representation, and a boundary **one unit wide** — verified before anything was
-wired in:
+representation, and a boundary **one unit wide** after including
+`exp(0) = 2^28`. The previous `2^28 - 1`
+term made both tools accept 270,549,122 even though equal scores and V=127
+overflow there; the test now derives the maximum from the real exp function:
 
 ```
-seq_len = 270,549,122   emitter: emits    coqc: accepted
-seq_len = 270,549,123   emitter: refuses  coqc: "Cannot find witness"
+seq_len = 270,549,121   emitter: emits    coqc: accepted
+seq_len = 270,549,122   emitter: refuses  coqc: "Cannot find witness"
 ```
 
 That is the same structure as the exact-GEMM certificate's licence check, which
@@ -2280,7 +2282,7 @@ PTX rounds twice.
 > that shipped on 2026-09-05.
 
 **A `nat` literal is unary, and at a production length that is a landmine.**
-`Definition seq_len : nat := 270549122` is 270 million constructors, and every
+`Definition seq_len : nat := 270549121` is 270 million constructors, and every
 normalising tactic would try to evaluate it. The certificate emits
 `Z.to_nat seq_len_Z` and proves `Z.of_nat seq_len = seq_len_Z` by `Z2Nat.id` —
 the pattern this repository already recorded from `SoftmaxErrorBound.v`'s own
@@ -2776,11 +2778,14 @@ this kernel has **no flush**, and there is nowhere to widen to because the
 `Fl` k-pairs. So the bound is on the whole contraction:
 
 ```text
-  | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+  | sum over k < K of A[r][k] * B[c][k] |  <=  K * 128^2  <=  i32::MAX
 ```
 
-`floor(i32::MAX / 127²)` is 133 144, and `K % 32 == 0` is already the kernel's
-shape precondition, so the largest admissible K is **133 120**.
+`I8` includes -128, so `floor(i32::MAX / 128²)` is 131 071. With the
+kernel's `K % 32 == 0` precondition, the largest admissible K is **131 040**.
+The earlier 127-based bound admitted K=131 072 with A=B=-128; the GPU returned
+−2 147 483 648 instead of the exact 2 147 483 648. The endpoint tests now use
+−128, and the proof models that counterexample explicitly.
 
 **Nothing checked it.** Not `emit_int8_gemm_kernel`, whose only refusal was on
 `M % 16` / `N % 8` / `K % 32`; not `proofs/`; not any test. Measured on the
@@ -2848,14 +2853,14 @@ answer.**
 
 The compiler decides the licence in `u32`; the proof states it over `Z` and
 hands it to `coqc`, which has no `u32`. `the_emitter_and_the_proof_agree_on_the_bound`
-asserts the proof *derives* `MAX_EXACT_K` from `I32MAX / 127²` rather than
+asserts the proof *derives* `MAX_EXACT_K` from `I32MAX / 128²` rather than
 stating a numeral, and that the emitter's constant is the proof's
 `MAX_EXACT_K_STEPS`. Same structure as the exact-GEMM certificate's floating-point
 licence checked against a `Z` obligation.
 
 **The prover caught a transcription error of mine on the first run**: I had
-written 133 143 where `⌊2147483647/16129⌋` is 133 144. The step-granular bound
-is unaffected, which is precisely why the theorem states both numbers.
+written 133 143 where `⌊2147483647/16129⌋` is 133 144. That original 127-based
+step-granular bound was unaffected, which is precisely why the theorem states both numbers.
 
 ##### A `nat` literal is unary, and it cost the whole afternoon
 
@@ -3135,7 +3140,7 @@ bounds the sum of *absolute* values and every partial of either fold is a sum
 over a subset of the products.
 
 Measured at the licensed maximum K, where every partial of both folds is at its
-worst, M=16 N=8, every operand 127:
+worst, M=16 N=8, every operand −128:
 
 | `gridDim.z` | 1 | 2 | 3 | 8 | 17 | 64 |
 |---|---|---|---|---|---|---|
@@ -3148,7 +3153,7 @@ and a sweep of powers of two would not say so.
 
 `wcombine 0` — the combine starts from the destination's initial value, and
 writing the theorem means choosing what that is. **The licence
-`K · 127² ≤ i32::MAX` is sufficient only when `C` starts at zero, and that is
+`K · 128² ≤ i32::MAX` is sufficient only when `C` starts at zero, and that is
 stated nowhere in the compiler.**
 
 The emitter's own comment says a caller must zero `C`; every test does; nothing
@@ -3157,14 +3162,15 @@ accumulates into `C`** — which is exactly what lets `gridDim.z` split the
 contraction — so a caller who splits K across *launches* into the same int32
 buffer is doing the obvious thing with that property.
 
-Measured, K = 66,560 per launch (half the licensed maximum, so **the compiler
-accepts every one of these launches**), `C` zeroed once before the first:
+Measured with every operand −128, K = 65,504 per launch (half the licensed
+maximum rounded down to a whole K step, so **the compiler accepts every one
+of these launches**), `C` zeroed once before the first:
 
 | launch | `C[0]` | exact | |
 |---|---|---|---|
-| 1 | 1,073,546,240 | 1,073,546,240 | ok |
-| 2 | 2,147,092,480 | 2,147,092,480 | ok |
-| 3 | **−1,074,328,576** | 3,220,638,720 | **wrapped** |
+| 1 | 1,073,217,536 | 1,073,217,536 | ok |
+| 2 | 2,146,435,072 | 2,146,435,072 | ok |
+| 3 | **−1,075,314,688** | 3,219,652,608 | **wrapped** |
 
 Every launch individually licensed; the accumulation not. Same severity class
 as the accumulator bound itself — latent rather than live, because nothing in

@@ -37,7 +37,7 @@
     mov.u32 %r7, 0;
     mov.u32 %r8, 18;
     $LOOP_START_0:
-    setp.ge.u32 %p0, %r7, %r8;
+    setp.ge.s32 %p0, %r7, %r8;
     @%p0 bra $LOOP_END_1;
     mov.u32 %r9, 18;
     mov.u32 %r10, 18;
@@ -60,7 +60,7 @@
     mov.u32 %r15, 0;
     mov.u32 %r16, 8;
     $LOOP_START_2:
-    setp.ge.u32 %p4, %r15, %r16;
+    setp.ge.s32 %p4, %r15, %r16;
     @%p4 bra $LOOP_END_3;
     mov.u32 %r17, 8;
     mov.u32 %r18, 8;
@@ -81,7 +81,7 @@
     mov.u32 %r24, 0;
     mov.u32 %r25, 8;
     $LOOP_START_4:
-    setp.ge.u32 %p8, %r24, %r25;
+    setp.ge.s32 %p8, %r24, %r25;
     @%p8 bra $LOOP_END_5;
     mov.u32 %r26, 8;
     mov.u32 %r27, 8;
@@ -219,7 +219,7 @@
     mov.u32 %r76, 1;
     mov.u32 %r77, 8;
     $LOOP_START_6:
-    setp.ge.u32 %p33, %r76, %r77;
+    setp.ge.s32 %p33, %r76, %r77;
     @%p33 bra $LOOP_END_7;
     mov.u32 %r78, 0;
     mov.u32 %r79, 8;
@@ -345,7 +345,7 @@
     mov.u32 %r125, 0;
     mov.u32 %r126, 8;
     $LOOP_START_8:
-    setp.ge.u32 %p55, %r125, %r126;
+    setp.ge.s32 %p55, %r125, %r126;
     @%p55 bra $LOOP_END_9;
     mov.u32 %r127, 18;
     mov.u32 %r128, 18;
@@ -417,7 +417,7 @@
     mov.u32 %r159, 0;
     mov.u32 %r160, 8;
     $LOOP_START_10:
-    setp.ge.u32 %p65, %r159, %r160;
+    setp.ge.s32 %p65, %r159, %r160;
     @%p65 bra $LOOP_END_11;
     mov.u32 %r161, 10;
     add.s32 %r162, %r161, %r159;

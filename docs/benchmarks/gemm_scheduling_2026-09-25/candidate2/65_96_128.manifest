@@ -1,0 +1,17 @@
+version=1
+m=65
+n=96
+k=128
+entry=y_autotune_probe
+grid_x=3
+grid_y=5
+threads=32
+dyn_smem_bytes=15360
+candidate=AutotuneCandidate { cta_m: 16, cta_n: 32, cta_k: 32, warps_m: 1, warps_n: 1, num_stages: 4, num_warps: 1 }
+sm_version=sm_89
+ptx_sha256=1d2fa887565a2ac80f136a745c3c684a1e0ac4a8866552452c2d02e69dd10475
+source_sha256:src/ptx_emitter.rs=95b4192a91ac221b5099651758524ab7593a966c8d56039543dc94d12131d7bc
+source_sha256:src/autotuner.rs=94daf4cdeae4f2aefcae4ad297b373d87c4d10110558646b61677bea78024e0b
+source_sha256:src/empirical_autotune.rs=45fbb627060fdd13015e07698a4e5b324e8302855a720017fc6a36fcb213d0a4
+source_sha256:src/cuda_runtime.rs=1c3cf4a6381a2c76936f5170d7302d48bd071618edd3622a3bbdca243eb3c13b
+source_sha256:src/adaptive_jit.rs=0b98a05c28abd3bb1baf7db0e08f327eb05de677e122f8ee7da337bfb72f6df4

@@ -163,6 +163,31 @@ fn main() -> I32 {
     assert_eq!(o.run.as_ref().map(|r| r.0), Some(60), "0 + 10 + 20 + 30:\n{}", o.compiler);
 }
 
+/// What lets the loops above verify is narrow: indexing through a reference
+/// hands no reference to anyone only when the array's ELEMENTS carry none. An
+/// element that carries `&mut I32` is still a reference passed to the call,
+/// and the invariant is still refused - otherwise `bump_link(a[0])` could
+/// change a tracked variable behind the verifier's back.
+#[test]
+fn an_element_that_carries_a_reference_still_counts() {
+    let src = "\
+struct Link { p: &mut I32 }
+@unsafe fn bump_link(link: Link) { *link.p = -1; }
+fn touch(a: &mut [Link; 1]) -> I32 {
+    let x: I32 = 0;
+    @invariant(x >= 0)
+    for i in 0..1 {
+        bump_link(a[0]);
+    }
+    return x;
+}
+fn main() -> I32 { return 0; }
+";
+    let o = build_and_run("element_reference", src);
+    assert!(!o.built, "an element carrying a reference was not counted:\n{}", o.compiler);
+    assert!(o.compiler.contains("passes a reference to a call"), "{}", o.compiler);
+}
+
 /// Under `@unsafe` an unprovable index is not refused, and it is checked when
 /// the program runs: index 9 into 4 elements stops the program. Index 3 is the
 /// control - the check must not fire in bounds.

@@ -24,6 +24,11 @@
 //! than assumed from the pass/fail.
 
 use y::cuda_runtime::CudaContext;
+use y::verified_exact_pv::{ExactPvShape, ValidatedExactPv};
+use sha2::{Digest, Sha256};
+
+#[path = "common/validator.rs"]
+mod validator;
 
 #[path = "common/pinned.rs"]
 mod pinned;
@@ -37,37 +42,34 @@ const D: usize = 64; // head_dim
 const Q: usize = 3;
 const P_BITS: u32 = 28;
 
-/// Compiled ONCE per process, behind a `OnceLock`.
-///
-/// Each test used to call this directly, and `cargo test` runs them on
-/// separate threads: three of them invoked the compiler over the same
-/// `tests/exact_pv.ptx` path at once, so one thread read the file while
-/// another was writing it and the JIT reported a corrupt module. It passed and
-/// failed at random. CLAUDE.md records the identical trap in the GPU field
-/// harness ("A test harness that compiles the same `.ysu` from several threads
-/// races on the `.ptx` path"), which is exactly the mistake this is.
-fn ptx() -> &'static str {
-    static PTX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PTX.get_or_init(compile)
+/// Compile and translation-validate once in an isolated directory. Every
+/// device test loads the retained cubin through its pinned receipt, so a
+/// driver JIT cannot replace the compilation these tests claim to exercise.
+fn validated_artifact() -> &'static ValidatedExactPv {
+    static ARTIFACT: std::sync::OnceLock<ValidatedExactPv> = std::sync::OnceLock::new();
+    ARTIFACT.get_or_init(compile)
 }
 
-fn compile() -> String {
+fn compile() -> ValidatedExactPv {
+    use std::path::Path;
     use std::process::Command;
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
-    // A COPY, against a PINNED profile (the floor, which loads on any card).
-    // This compiled the fixture IN PLACE with the repository as working
-    // directory - rewriting the committed `tests/exact_pv.ptx` for this
-    // machine's card - and then read that committed path back.
-    let dir = pinned::pinned_scratch("exact_pv", pinned::SM_PINNED);
-    let src = pinned::copy_fixture(&dir, "tests/exact_pv.ysu");
+    // A COPY, against a PINNED profile. This compiled the fixture IN PLACE
+    // with the repository as working directory - rewriting the committed
+    // `tests/exact_pv.ptx` for this machine's card. The pin is sm_89, not the
+    // floor: the validated artifact format accepts an unqualified
+    // `.target sm_89` only.
+    let work = pinned::pinned_scratch("exact_pv", pinned::SM_FP8);
+    let source = pinned::copy_fixture(&work, "tests/exact_pv.ysu");
     let out = Command::new(bin.join("Y"))
-        .arg(&src)
+        .arg(&source)
         .arg("--emit-ptx")
-        .current_dir(&dir)
+        .current_dir(&work)
         .output()
         .expect("run Y");
     assert!(
@@ -76,7 +78,27 @@ fn compile() -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx")
+    let ptx_path = work.join("exact_pv.ptx");
+    let ptx = std::fs::read(&ptx_path).expect("no emitted .ptx");
+    let expected_ptx_sha256 = format!("{:x}", Sha256::digest(&ptx));
+    let bundle = work.join("validated");
+    let python = validator::validator_python(repo);
+    let out = Command::new(python)
+        .arg(repo.join("tools/ptxas_tval/exact_pv_artifact.py"))
+        .arg("build")
+        .arg(&ptx_path)
+        .arg(&bundle)
+        .current_dir(&work)
+        .output()
+        .expect("run exact_pv artifact validator (Y_TVAL_PYTHON must provide z3)");
+    assert!(
+        out.status.success(),
+        "exact_pv translation validation failed; verified execution is forbidden:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    ValidatedExactPv::open(&bundle, Some(&expected_ptx_sha256))
+        .expect("validated exact_pv artifact binding failed")
 }
 
 /// A cheap deterministic PRNG, so the fixture needs no dev-dependency.
@@ -123,10 +145,11 @@ fn reference(p: &[u32], v: &[i8]) -> Vec<i64> {
 }
 
 fn run(ctx: &CudaContext, p: &[u32], v: &[i8]) -> Vec<i64> {
-    let module = ctx.load_ptx(ptx(), "exact_pv").expect("PTX failed to load");
+    let module = ctx.load_checked_exact_pv(validated_artifact())
+        .expect("validated exact_pv cubin failed to load; PTX JIT is forbidden");
     let d_p = ctx.alloc(p.len() * 4).unwrap();
     let d_v = ctx.alloc(v.len()).unwrap();
-    let d_o = ctx.alloc(B * Q * D * 8).unwrap();
+    let mut d_o = ctx.alloc(B * Q * D * 8).unwrap();
 
     let raw_p: Vec<u8> = p.iter().flat_map(|x| x.to_le_bytes()).collect();
     let raw_v: Vec<u8> = v.iter().map(|x| *x as u8).collect();
@@ -134,22 +157,10 @@ fn run(ctx: &CudaContext, p: &[u32], v: &[i8]) -> Vec<i64> {
     ctx.memcpy_htod_at(&d_v, 0, &raw_v).unwrap();
     ctx.memset_u8(&d_o, 0xAB).unwrap();
 
-    // Scalars go through the same u64 slot as pointers; `launch` builds the
-    // array of pointers-to-values that `cuLaunchKernel` wants.
-    let args = vec![
-        d_p.device_ptr(),
-        d_v.device_ptr(),
-        d_o.device_ptr(),
-        T as u64,
-        D as u64,
-        Q as u64,
-        (B * Q * T) as u64,
-        (B * T * D) as u64,
-        (B * Q * D) as u64,
-    ];
-    ctx.launch(&module, (Q as u32, B as u32, 1), (D as u32, 1, 1), 0, &args)
-        .expect("launch failed");
-    ctx.synchronize().unwrap();
+    let shape = ExactPvShape::new(B as i64, Q as i64, T as i64, D as i64)
+        .expect("device fixture must satisfy the arithmetic theorem's domain");
+    ctx.launch_checked_exact_pv(&module, shape, &d_p, &d_v, &mut d_o)
+        .expect("checked exact_pv launch failed");
 
     let mut bytes = vec![0u8; B * Q * D * 8];
     ctx.memcpy_dtoh_at(&mut bytes, &d_o, 0).unwrap();
@@ -162,7 +173,7 @@ fn run(ctx: &CudaContext, p: &[u32], v: &[i8]) -> Vec<i64> {
 #[test]
 fn the_device_kernel_equals_an_exact_integer_reference() {
     let Some(ctx) = CudaContext::new() else {
-        eprintln!("SKIP: no CUDA driver -- exact_pv was emitted but not executed.");
+        eprintln!("SKIP: no CUDA driver -- verified exact_pv was not executed.");
         return;
     };
     let (p, v) = inputs(0x5eed_1234);

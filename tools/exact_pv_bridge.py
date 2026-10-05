@@ -26,9 +26,12 @@ returns `vi` as **float32** carrying integer values in [-127, 127], so the
 digit split consumes it with no conversion at all -- while the first version
 built `v` as int64 and converted inside the timed digit arm, charging it for
 work the model never does. The Y kernel wants real int8, so it owes a
-float32 -> int8 cast that the digit path does not. Both are now priced: `kernel`
-is the launch alone and `+cast` includes the conversion, reported separately
-the way the MSM numbers separate cold from fixed-base from kernel.
+float32 -> int8 cast that the digit path does not. Both are now priced: the
+Y call includes output allocation, checked launch contracts, CUDA calls and
+synchronization; `+cast` also includes the conversion. This is wall time, not
+an isolated measurement of device execution. Fresh assembly/validation and
+artifact loading happen before timing. Ratios of minima do not describe
+variance or establish general competitiveness.
 
 That `vi` is float32 at all is worth noticing on its own -- it is a tensor of
 small integers stored at 4 bytes each, so the KV cache moves 4x the bytes it
@@ -44,8 +47,8 @@ import _nospace
 _nospace.guard()
 
 import argparse  # noqa: E402
-import ctypes  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -53,32 +56,32 @@ import torch  # noqa: E402
 
 import batch_invariance_demo as D  # noqa: E402
 import ptx_bridge as PB  # noqa: E402
+from ptxas_tval.exact_pv_artifact import build, open_verified  # noqa: E402
+from ptxas_tval.exact_pv_launch import CheckedExactPv, ExactPvShape  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 YBIN = str(REPO / "target" / "release" / "Y")
 
 
-def emit_pv_ptx():
-    """Compile tests/exact_pv.ysu and read back the .ptx it writes."""
-    src = REPO / "tests" / "exact_pv.ysu"
-    subprocess.run([YBIN, str(src), "--emit-ptx"], capture_output=True,
-                   check=True, cwd=REPO)
-    return (REPO / "tests" / "exact_pv.ptx").read_text()
+def build_pv_artifact(destination):
+    """Fresh emission and validation; no committed artifact is overwritten."""
+    with tempfile.TemporaryDirectory(prefix="y_exact_pv_source_") as temporary:
+        src = Path(temporary) / "exact_pv.ysu"
+        src.write_bytes((REPO / "tests" / "exact_pv.ysu").read_bytes())
+        subprocess.run([YBIN, str(src), "--emit-ptx"], capture_output=True,
+                       check=True, cwd=REPO)
+        return build(src.with_suffix(".ptx"), destination)
 
 
-def kernel_pv(p_u32, v_i8, B, Qn, T, Dh, fn):
+def kernel_pv(p_u32, v_i8, B, Qn, T, Dh, module):
     """One launch. `p_u32` is [B, Qn, T], `v_i8` [B, T, Dh]; -> [B, Qn, Dh] i64.
 
     `Qn` query rows share one row of keys, which is what a grouped-query head
     does; the grid carries `q` on x and `b` on y.
     """
-    out = torch.empty(B * Qn * Dh, dtype=torch.int64, device=p_u32.device)
-    PB.launch(fn, (Qn, B, 1), (Dh, 1, 1),
-              [PB.dptr(p_u32), PB.dptr(v_i8), PB.dptr(out),
-               ctypes.c_uint(T), ctypes.c_uint(Dh), ctypes.c_uint(Qn),
-               ctypes.c_uint(B * Qn * T), ctypes.c_uint(B * T * Dh),
-               ctypes.c_uint(B * Qn * Dh)])
-    return out.view(B, Qn, Dh)
+    shape = module.check_shape(ExactPvShape(B, Qn, T, Dh))
+    out = torch.empty((B, Qn, Dh), dtype=torch.int64, device=p_u32.device)
+    return module.launch(p_u32, v_i8, out, shape)
 
 
 def main():
@@ -88,10 +91,20 @@ def main():
     ap.add_argument("--head-dim", type=int, default=64)
     ap.add_argument("--keys", type=int, nargs="+", default=[67, 512, 1024, 4096])
     ap.add_argument("--reps", type=int, default=30)
+    ap.add_argument("--verified-artifact", type=Path,
+                    help="load an existing validated exact_pv bundle; never rebuild or JIT on failure")
+    ap.add_argument("--build-artifact", type=Path,
+                    help="emit and validate into this new directory (retained after the run)")
     ap.add_argument("--q", type=int, default=2,
                     help="query rows per KV row (nh/nkv); 1 would leave the\n"
                          "shared-V indexing untested")
     a = ap.parse_args()
+    if a.verified_artifact is not None and a.build_artifact is not None:
+        ap.error("choose only one of --verified-artifact and --build-artifact")
+    if a.reps <= 0 or a.batch <= 0 or a.kv_heads <= 0 or any(T < 2 for T in a.keys):
+        ap.error("require positive batch, kv-heads and reps, and at least two keys per case")
+    if any(T * (1 << D.P_BITS) * 128 > (1 << 53) for T in a.keys):
+        ap.error("benchmark float64 reference requires T * 2^P_BITS * 128 <= 2^53; use the integer-oracle hardware suite for larger values")
     if not torch.cuda.is_available():
         print("SKIP: no CUDA device.")
         return 0
@@ -101,15 +114,27 @@ def main():
     # `cuModuleLoadData` needs a current context, and torch creates one
     # lazily on first tensor use rather than in `cuda.init()`.
     torch.zeros(1, device=dev)
-    mod = PB.Module(emit_pv_ptx())
-    fn = mod.fn("exact_pv")
+    # The default performs fresh validation, retaining its bundle on disk.
+    # Supplying an existing bundle only loads it: no repair or JIT fallback.
+    if a.verified_artifact is not None:
+        artifact = open_verified(a.verified_artifact)
+        artifact_dir = a.verified_artifact
+    else:
+        artifact_dir = (a.build_artifact if a.build_artifact is not None else
+                        Path(tempfile.mkdtemp(prefix="y_exact_pv_run_")) / "validated")
+        artifact = build_pv_artifact(artifact_dir)
+    mod = CheckedExactPv.load(artifact, PB.cuda)
+    for T in a.keys:
+        mod.check_shape(ExactPvShape(B, a.q, T, Dh))
+    print(f"  validated cubin: {artifact_dir} (SHA-256 {artifact.cubin_sha256})")
 
     print(f"\nexact_pv: Y kernel (one launch, int64) vs the digit split "
           f"(ceil(29/dbits) fp32 matmuls)")
     print(f"  B = {a.batch} x {a.kv_heads} KV heads = {B} rows, {a.q} query "
           f"rows each, head_dim {Dh}, best of {a.reps} interleaved\n")
+    print("  Y time includes checked launch, allocation and synchronization; offline validation is untimed.")
     print(f"{'T':>6}{'dbits':>7}{'matmuls':>9}{'digit ms':>11}{'Y ms':>9}"
-          f"{'+cast ms':>10}{'kernel':>9}{'w/cast':>9}   identical")
+          f"{'+cast ms':>10}{'digit/Y':>9}{'w/cast':>9}   identical")
 
     g = torch.Generator(device=dev).manual_seed(20260822)
     all_ok = True
@@ -129,7 +154,7 @@ def main():
 
         # Correctness first, before anything is timed.
         want = D.exact_pv(p, v_f32)
-        got = kernel_pv(p32, v8, B, a.q, T, Dh, fn).to(torch.float64)
+        got = kernel_pv(p32, v8, B, a.q, T, Dh, mod).to(torch.float64)
         torch.cuda.synchronize()
         identical = bool(torch.equal(got, want))
         all_ok &= identical
@@ -141,10 +166,10 @@ def main():
             D.exact_pv(p, v_f32)          # no cast: this is what the model has
 
         def t_y():
-            kernel_pv(p32, v8, B, a.q, T, Dh, fn)
+            kernel_pv(p32, v8, B, a.q, T, Dh, mod)
 
         def t_y_cast():
-            kernel_pv(p32, v_f32.to(torch.int8), B, a.q, T, Dh, fn)
+            kernel_pv(p32, v_f32.to(torch.int8), B, a.q, T, Dh, mod)
 
         arms = (("digit", t_digit), ("y", t_y), ("ycast", t_y_cast))
         for _, f in arms:                 # warm up all three
@@ -167,6 +192,7 @@ def main():
               f"   {'yes' if identical else 'NO'}")
 
     print()
+    mod.close()
     if not all_ok:
         print("  *** the two routes DISAGREE. They compute the same integer, so "
               "any difference\n      is a bug, not a tolerance. ***")

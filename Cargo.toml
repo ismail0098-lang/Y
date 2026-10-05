@@ -31,9 +31,10 @@ path = "src/bin/autotune_verify.rs"
 
 
 [dependencies]
+sha2 = "0.10.9"
 
-# Deliberately empty: the Y compiler itself has no external dependencies, and
-# the arkworks crates below are DEV-only. They exist so `cargo test` can take
+# SHA-256 binds verified exact_pv loads to the validated artifact. The
+# arkworks crates below remain DEV-only. They exist so `cargo test` can take
 # the R1CS this compiler emits, run a real Groth16 setup/prove/verify over
 # BN254, and assert both that an honest proof verifies and that a tampered one
 # does not. Nothing in the shipping `Y` binary links them - keeping the

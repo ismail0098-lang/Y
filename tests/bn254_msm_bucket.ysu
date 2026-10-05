@@ -194,30 +194,6 @@ kernel bn254_msm_bucket(
     let nZ5: U32 = 0;
     let nZ6: U32 = 0;
     let nZ7: U32 = 0;
-    let bX0: U32 = 0;
-    let bX1: U32 = 0;
-    let bX2: U32 = 0;
-    let bX3: U32 = 0;
-    let bX4: U32 = 0;
-    let bX5: U32 = 0;
-    let bX6: U32 = 0;
-    let bX7: U32 = 0;
-    let bY0: U32 = 0;
-    let bY1: U32 = 0;
-    let bY2: U32 = 0;
-    let bY3: U32 = 0;
-    let bY4: U32 = 0;
-    let bY5: U32 = 0;
-    let bY6: U32 = 0;
-    let bY7: U32 = 0;
-    let bZ0: U32 = 0;
-    let bZ1: U32 = 0;
-    let bZ2: U32 = 0;
-    let bZ3: U32 = 0;
-    let bZ4: U32 = 0;
-    let bZ5: U32 = 0;
-    let bZ6: U32 = 0;
-    let bZ7: U32 = 0;
     // Scratch, declared once so unrolling does not allocate a
     // register per step.
     let m: U32 = 0;
@@ -241,9 +217,11 @@ kernel bn254_msm_bucket(
     let d5: U32 = 0;
     let d6: U32 = 0;
     let d7: U32 = 0;
-    let ks: U32 = s + 1;
+    let si: I32 = s;
+    let ei: I32 = e;
+    let ks: I32 = si + 1;
     @invariant(k >= ks)
-    for k in ks..e {
+    for k in ks..ei {
         let pi: U32 = block_ptr2d_load(Idx, 0, k, NIdx, 1, NIdx);
         let bXv0: U32x4 = block_ptr2d_load_v4(PX, 0, (pi) * 4, 4 * NPts, 2, 4 * NPts);
         let bX0: U32 = bXv0.x;

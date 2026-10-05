@@ -90,7 +90,7 @@ fn a_while_loop_runs_the_right_number_of_times() {
     // 5 iterations of `acc += 3`.
     let src = "fn main() -> I32 {\n    \
                let i: I32 = 0;\n    let acc: I32 = 0;\n    \
-               @invariant(acc >= 0)\n    \
+               @invariant(i >= 0 && i <= 5 && acc == i * 3)\n    \
                while i < 5 {\n        acc = acc + 3;\n        i = i + 1;\n    }\n    \
                return acc;\n}\n";
     match run_program("llcf_while", src) {
@@ -109,7 +109,7 @@ fn a_while_whose_condition_is_false_runs_zero_times() {
     // would pass a "did the body execute" test and be a `do`-loop.
     let src = "fn main() -> I32 {\n    \
                let i: I32 = 9;\n    let acc: I32 = 7;\n    \
-               @invariant(acc >= 0)\n    \
+               @invariant(i == 9 && acc == 7)\n    \
                while i < 5 {\n        acc = acc + 3;\n        i = i + 1;\n    }\n    \
                return acc;\n}\n";
     match run_program("llcf_while_zero", src) {

@@ -1,0 +1,413 @@
+[
+  {
+    "shape": [
+      1,
+      16,
+      16
+    ],
+    "trials": 6,
+    "metrics": {
+      "enqueue_us": {
+        "before_median": 1.1484575000000001,
+        "after_median": 1.1141515000000002,
+        "gain_percent_median": 2.9127081827130166,
+        "gain_percent_min": 1.368299822363855,
+        "gain_percent_max": 7.652684995885112
+      },
+      "completed_us": {
+        "before_median": 2.4484260000000004,
+        "after_median": 2.5872225,
+        "gain_percent_median": -8.330289839163619,
+        "gain_percent_min": -18.650612353175255,
+        "gain_percent_max": 14.813212787960012
+      }
+    },
+    "pairs": [
+      {
+        "trial": 0,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.154953,
+            "completed_us": 2.520947
+          },
+          "after": {
+            "enqueue_us": 1.099502,
+            "completed_us": 2.6141970000000003
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 4.801147752332772,
+          "completed_us": -3.699006762141381
+        }
+      },
+      {
+        "trial": 1,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.141092,
+            "completed_us": 2.3759050000000004
+          },
+          "after": {
+            "enqueue_us": 1.1155620000000002,
+            "completed_us": 2.6962689999999996
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 2.237330557045342,
+          "completed_us": -13.483872461230527
+        }
+      },
+      {
+        "trial": 2,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.154153,
+            "completed_us": 2.374855
+          },
+          "after": {
+            "enqueue_us": 1.112741,
+            "completed_us": 2.8177800000000004
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 3.5880858083806917,
+          "completed_us": -18.650612353175255
+        }
+      },
+      {
+        "trial": 3,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.192013,
+            "completed_us": 3.005452
+          },
+          "after": {
+            "enqueue_us": 1.100792,
+            "completed_us": 2.560248
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 7.652684995885112,
+          "completed_us": 14.813212787960012
+        }
+      },
+      {
+        "trial": 4,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.136593,
+            "completed_us": 2.525776
+          },
+          "after": {
+            "enqueue_us": 1.121041,
+            "completed_us": 2.536816
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 1.368299822363855,
+          "completed_us": -0.4370933922881498
+        }
+      },
+      {
+        "trial": 5,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.1427620000000003,
+            "completed_us": 2.231473
+          },
+          "after": {
+            "enqueue_us": 1.125912,
+            "completed_us": 2.520707
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 1.4744977519378706,
+          "completed_us": -12.961572916185856
+        }
+      }
+    ],
+    "rust_allocations_per_call": {
+      "before": [
+        2.0
+      ],
+      "after": [
+        0.0
+      ]
+    },
+    "maximum_relative_l2": 7.35138739956983e-08
+  },
+  {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "trials": 6,
+    "metrics": {
+      "enqueue_us": {
+        "before_median": 1.135097,
+        "after_median": 1.1007419999999999,
+        "gain_percent_median": 2.9320207510002843,
+        "gain_percent_min": 1.2322136095655603,
+        "gain_percent_max": 3.807165376295455
+      },
+      "completed_us": {
+        "before_median": 3.4207015,
+        "after_median": 3.3923259999999997,
+        "gain_percent_median": 1.835737465069979,
+        "gain_percent_min": -9.189548580210301,
+        "gain_percent_max": 5.290972878686864
+      }
+    },
+    "pairs": [
+      {
+        "trial": 0,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.134722,
+            "completed_us": 3.395766
+          },
+          "after": {
+            "enqueue_us": 1.093201,
+            "completed_us": 3.2783650000000004
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 3.659134131531769,
+          "completed_us": 3.4572759135935645
+        }
+      },
+      {
+        "trial": 1,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.135472,
+            "completed_us": 3.4443759999999997
+          },
+          "after": {
+            "enqueue_us": 1.102482,
+            "completed_us": 3.2621350000000002
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 2.905399692814977,
+          "completed_us": 5.290972878686864
+        }
+      },
+      {
+        "trial": 2,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.1399820000000003,
+            "completed_us": 3.406146
+          },
+          "after": {
+            "enqueue_us": 1.0965809999999998,
+            "completed_us": 3.406596
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 3.807165376295455,
+          "completed_us": -0.013211412546609552
+        }
+      },
+      {
+        "trial": 3,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.1370419999999999,
+            "completed_us": 3.4766369999999998
+          },
+          "after": {
+            "enqueue_us": 1.1034009999999999,
+            "completed_us": 3.3827559999999997
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 2.9586418091855915,
+          "completed_us": 2.7003394372205127
+        }
+      },
+      {
+        "trial": 4,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.124392,
+            "completed_us": 3.435257
+          },
+          "after": {
+            "enqueue_us": 1.099002,
+            "completed_us": 3.4018960000000003
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 2.258109271499621,
+          "completed_us": 0.9711354929194453
+        }
+      },
+      {
+        "trial": 5,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.133732,
+            "completed_us": 3.385607
+          },
+          "after": {
+            "enqueue_us": 1.1197620000000001,
+            "completed_us": 3.6967290000000004
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 1.2322136095655603,
+          "completed_us": -9.189548580210301
+        }
+      }
+    ],
+    "rust_allocations_per_call": {
+      "before": [
+        2.0
+      ],
+      "after": [
+        0.0
+      ]
+    },
+    "maximum_relative_l2": 3.7940168201107414e-07
+  },
+  {
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "trials": 6,
+    "metrics": {
+      "enqueue_us": {
+        "before_median": 1.144867,
+        "after_median": 1.0999519999999998,
+        "gain_percent_median": 4.072887866152572,
+        "gain_percent_min": 2.5931954271361963,
+        "gain_percent_max": 5.755216019252155
+      },
+      "completed_us": {
+        "before_median": 39.607792,
+        "after_median": 39.9254875,
+        "gain_percent_median": -0.030483914376656096,
+        "gain_percent_min": -5.205429576477637,
+        "gain_percent_max": 7.081719139052072
+      }
+    },
+    "pairs": [
+      {
+        "trial": 0,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.116422,
+            "completed_us": 39.330414000000005
+          },
+          "after": {
+            "enqueue_us": 1.077761,
+            "completed_us": 38.411454
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 3.4629378496661705,
+          "completed_us": 2.3365123997932122
+        }
+      },
+      {
+        "trial": 1,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.1402919999999999,
+            "completed_us": 39.885169999999995
+          },
+          "after": {
+            "enqueue_us": 1.110722,
+            "completed_us": 40.839841
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 2.5931954271361963,
+          "completed_us": -2.3935487801606583
+        }
+      },
+      {
+        "trial": 2,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.152292,
+            "completed_us": 41.831241
+          },
+          "after": {
+            "enqueue_us": 1.0958719999999997,
+            "completed_us": 38.86887
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 4.896328361214029,
+          "completed_us": 7.081719139052072
+        }
+      },
+      {
+        "trial": 3,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.1445120000000002,
+            "completed_us": 38.265083999999995
+          },
+          "after": {
+            "enqueue_us": 1.105642,
+            "completed_us": 40.256946000000006
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 3.3962072918414288,
+          "completed_us": -5.205429576477637
+        }
+      },
+      {
+        "trial": 4,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.145222,
+            "completed_us": 39.206585
+          },
+          "after": {
+            "enqueue_us": 1.079312,
+            "completed_us": 39.594029
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 5.755216019252155,
+          "completed_us": -0.9882115466062708
+        }
+      },
+      {
+        "trial": 5,
+        "process_medians": {
+          "before": {
+            "enqueue_us": 1.158272,
+            "completed_us": 40.76544199999999
+          },
+          "after": {
+            "enqueue_us": 1.104032,
+            "completed_us": 40.387447
+          }
+        },
+        "gain_percent": {
+          "enqueue_us": 4.682837882638972,
+          "completed_us": 0.9272437178529586
+        }
+      }
+    ],
+    "rust_allocations_per_call": {
+      "before": [
+        2.0
+      ],
+      "after": [
+        0.0
+      ]
+    },
+    "maximum_relative_l2": 2.0171240677679327e-06
+  }
+]

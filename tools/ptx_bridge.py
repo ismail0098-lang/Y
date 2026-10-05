@@ -51,6 +51,13 @@ class Module:
         _chk(cuda.cuModuleLoadData(ctypes.byref(self.mod), ptx.encode()),
              "cuModuleLoadData")
 
+    @classmethod
+    def from_validated_exact_pv(cls, artifact):
+        """The verified path loads bound cubin bytes; it never calls __init__."""
+        module = cls.__new__(cls)
+        module.mod = artifact.load(cuda)
+        return module
+
     def fn(self, name):
         f = ctypes.c_void_p()
         _chk(cuda.cuModuleGetFunction(ctypes.byref(f), self.mod, name.encode()),

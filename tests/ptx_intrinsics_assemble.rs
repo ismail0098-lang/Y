@@ -48,9 +48,8 @@ use std::process::Command;
 #[path = "common/pinned.rs"]
 mod pinned;
 
-fn ptxas_present() -> bool {
-    Command::new("ptxas").arg("--version").output().is_ok()
-}
+#[path = "common/ptxas.rs"]
+mod ptxas;
 
 fn kernel_source(name: &str, body: &str) -> String {
     format!(
@@ -85,6 +84,10 @@ fn compile(name: &str, body: &str) -> (String, Option<String>) {
     let dir = pinned::scratch(&format!("intr_{name}"));
     let src = dir.join(format!("{}.ysu", name));
     std::fs::write(&src, kernel_source(name, body)).expect("write source");
+    let ptx = dir.join(format!("{}.ptx", name));
+    if ptx.exists() {
+        std::fs::remove_file(&ptx).expect("remove prior compiler artifact");
+    }
 
     // A PINNED profile in the scratch directory, which is the working
     // directory: `current_dir(repo)` compiled for this machine's card.
@@ -100,18 +103,26 @@ fn compile(name: &str, body: &str) -> (String, Option<String>) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = dir.join(format!("{}.ptx", name));
     let text = std::fs::read_to_string(&ptx).ok();
+    assert_eq!(
+        out.status.success(),
+        text.is_some(),
+        "{name}: compiler status must agree with artifact publication:\n{log}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
     (log, text)
 }
 
 /// Runs `ptxas` over `ptx`, returning its stderr on failure.
 fn assemble(name: &str, ptx: &str) -> Result<(), String> {
+    let Some(assembler) = ptxas::ptxas() else {
+        return Ok(());
+    };
     let dir = std::env::temp_dir().join(format!("y_intr_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let f = dir.join(format!("{}.check.ptx", name));
     std::fs::write(&f, ptx).expect("write ptx");
-    let res = Command::new("ptxas")
+    let res = Command::new(assembler)
         .arg("-arch=sm_89")
         .arg(&f)
         .arg("-o")
@@ -133,8 +144,7 @@ fn assemble(name: &str, ptx: &str) -> Result<(), String> {
 /// repo was asking of the intrinsic surface.
 #[test]
 fn supported_intrinsics_emit_assemblable_ptx() {
-    if !ptxas_present() {
-        eprintln!("skipping: ptxas not on PATH");
+    if ptxas::ptxas().is_none() {
         return;
     }
 
@@ -350,6 +360,8 @@ fn cp_async_honours_its_byte_count_and_rejects_illegal_ones() {
             n,
             ptx
         );
+        assemble(&format!("async_size_{n}"), &ptx)
+            .unwrap_or_else(|error| panic!("legal {n}-byte cp.async must assemble:\n{error}"));
     }
 
     // 12 is not an encodable cp.async width. Rounding it to 16 would silently
@@ -492,9 +504,7 @@ fn short_intrinsic_calls_are_refused_not_guessed() {
         "full-arity call was refused:\n{}",
         log
     );
-    if ptxas_present() {
-        if let Err(e) = assemble("a_store2d_full", &ptx) {
-            panic!("full-arity block_ptr2d_store does not assemble:\n{}", e);
-        }
+    if let Err(e) = assemble("a_store2d_full", &ptx) {
+        panic!("full-arity block_ptr2d_store does not assemble:\n{}", e);
     }
 }

@@ -928,6 +928,31 @@ not know its length",
     }
 
     fn eval_interval(&self, expr: &Expr) -> Option<Interval> {
+        let interval = self.eval_interval_unchecked(expr)?;
+        if matches!(expr,
+            Expr::BinaryOp { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod, .. }
+            | Expr::UnaryOp { op: UnaryOp::Neg, .. })
+        {
+            // Entry facts must describe machine execution too. Checking only
+            // the stored variable misses overflow in a nested subexpression.
+            let bits = self.smt_integer_width(expr).ok()?;
+            if bits == 32 && Self::contains_unsigned_literal(expr) {
+                // PTX keeps this result unsigned, so widening may zero-extend
+                // where LLVM produces a negative signed 64-bit value.
+                return None;
+            }
+            if matches!(expr, Expr::BinaryOp { op: BinaryOp::Div | BinaryOp::Mod, .. }) {
+                self.expr_to_smt(expr, &HashMap::new(), &mut Vec::new()).ok()?;
+            }
+            let limit = 1i128 << (bits - 1);
+            if (interval.min as i128) < -limit || (interval.max as i128) >= limit {
+                return None;
+            }
+        }
+        Some(interval)
+    }
+
+    fn eval_interval_unchecked(&self, expr: &Expr) -> Option<Interval> {
         match expr {
             Expr::IntLit(val, _) => Some(Interval { min: *val, max: *val, trust: 0 }),
             Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
@@ -2065,6 +2090,7 @@ range without checking it. Every proof using this range assumes it"
                 // the initiation obligation is about. See
                 // `generate_smt_decls_and_preconditions_with`.
                 let entry_intervals = self.snapshot_intervals(&assigned_vars);
+                let shadowed = self.smt_shadowed_binding(&body.stmts);
                 for var in &assigned_vars {
                     self.update_interval(var, None);
                 }
@@ -2078,15 +2104,29 @@ range without checking it. Every proof using this range assumes it"
                 }
                 self.linear_tracker.exit_loop();
 
+                // Body-exit values are not assumptions for either induction
+                // obligation. Initiation uses the separately saved entry facts.
+                let mut body_writes = std::collections::HashSet::new();
+                Self::collect_assigned(&body.stmts, &mut body_writes);
+                for name in &body_writes { self.update_interval(name, None); }
+
                 let loop_end = crate::ast::last_line(body).max(span.line);
+                // A shadowed binding is refused (or let through UNVERIFIED) by
+                // `smt_unmodellable`, and `invariant_fact` records which: the
+                // code is not @unsafe, so "not verified: @unsafe" would be false.
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
                         let errors_before = self.errors.len();
                         self.unverified = None;
                         self.smt_trust.set(0);
-                        self.verify_for_loop_invariant(
-                            loop_var, start, end, step, body, inv_expr, &entry_intervals, span,
-                        );
+                        if let Some(name) = &shadowed {
+                            self.smt_unmodellable(inv_expr.span().line, inv_expr,
+                                &format!("loop-local `{name}` shadows an existing binding; lexical shadowing is not modelled"));
+                        } else {
+                            self.verify_for_loop_invariant(
+                                loop_var, start, end, step, body, inv_expr, &entry_intervals, span,
+                            );
+                        }
                         self.invariant_fact(inv_expr, span, loop_end, errors_before);
                     }
                 } else if let Some(inv_expr) = invariant {
@@ -2134,6 +2174,8 @@ range without checking it. Every proof using this range assumes it"
                 }
                 if let Expr::Ident(name, _) = target {
                     self.update_assignment_facts(name, value, span);
+                } else if self.takes_reference(target) {
+                    self.invalidate_aliased_intervals();
                 }
             }
             Stmt::Expr(expr) => {
@@ -2234,6 +2276,7 @@ range without checking it. Every proof using this range assumes it"
                 let mut assigned_vars = std::collections::HashSet::new();
                 self.collect_assigned_vars_in_block(body, &mut assigned_vars);
                 let entry_intervals = self.snapshot_intervals(&assigned_vars);
+                let shadowed = self.smt_shadowed_binding(&body.stmts);
                 for var in &assigned_vars {
                     self.update_interval(var, None);
                 }
@@ -2253,15 +2296,29 @@ range without checking it. Every proof using this range assumes it"
                 self.linear_tracker.exit_conditional();
                 self.linear_tracker.exit_loop();
 
+                // Body-exit values are not assumptions for either induction
+                // obligation. Initiation uses the separately saved entry facts.
+                let mut body_writes = std::collections::HashSet::new();
+                Self::collect_assigned(&body.stmts, &mut body_writes);
+                for name in &body_writes { self.update_interval(name, None); }
+
                 let loop_end = crate::ast::last_line(body).max(while_span.line);
+                // A shadowed binding is refused (or let through UNVERIFIED) by
+                // `smt_unmodellable`, and `invariant_fact` records which: the
+                // code is not @unsafe, so "not verified: @unsafe" would be false.
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
                         let errors_before = self.errors.len();
                         self.unverified = None;
                         self.smt_trust.set(0);
-                        self.verify_while_loop_invariant(
-                            condition, body, inv_expr, &entry_intervals, &condition.span(),
-                        );
+                        if let Some(name) = &shadowed {
+                            self.smt_unmodellable(inv_expr.span().line, inv_expr,
+                                &format!("loop-local `{name}` shadows an existing binding; lexical shadowing is not modelled"));
+                        } else {
+                            self.verify_while_loop_invariant(
+                                condition, body, inv_expr, &entry_intervals, &condition.span(),
+                            );
+                        }
                         self.invariant_fact(inv_expr, while_span, loop_end, errors_before);
                     }
                 } else if let Some(inv_expr) = invariant {
@@ -2343,6 +2400,8 @@ range without checking it. Every proof using this range assumes it"
                         right: Box::new(value.clone()), span: span.clone(),
                     };
                     self.update_assignment_facts(name, &result, span);
+                } else if self.takes_reference(target) {
+                    self.invalidate_aliased_intervals();
                 }
             }
             Stmt::SafeBlock(block, block_span) | Stmt::GhostBlock(block, block_span) => {
@@ -2481,6 +2540,14 @@ range without checking it. Every proof using this range assumes it"
             }
             arg_types.push(actual);
         }
+        // Without an alias/effect model, a callee receiving a reference can
+        // invalidate any caller range fact. Keeping an initializer's interval
+        // after `bump(saved_reference)` can prove a false loop-entry invariant.
+        if arg_types.iter().any(|ty| self.type_contains_reference(ty))
+            || args.iter().any(|arg| self.takes_reference(arg))
+        {
+            self.invalidate_aliased_intervals();
+        }
         if let Some(sig) = signature { return sig.result; }
         if let Some(t) = typed_vec_get { return SemanticType::Primitive(t.to_string()); }
         if let Some(t) = crate::intrinsics::scalar_return_type(name) {
@@ -2610,6 +2677,9 @@ range without checking it. Every proof using this range assumes it"
                 let func_ty = self.check_expr(func);
                 self.reject_transfer_escape(&func_ty, &func.span(), "as a callable value");
                 for arg in args { self.check_expr(arg); }
+                if args.iter().any(|arg| self.takes_reference(arg)) {
+                    self.invalidate_aliased_intervals();
+                }
                 SemanticType::Unknown
             }
             Expr::MemberAccess { base, member, .. } => {
@@ -2678,6 +2748,9 @@ range without checking it. Every proof using this range assumes it"
                         let func_ty = self.check_expr(func);
                         self.reject_transfer_escape(&func_ty, &func.span(), "as a generic callable value");
                         for arg in args { self.check_expr(arg); }
+                        if args.iter().any(|arg| self.takes_reference(arg)) {
+                            self.invalidate_aliased_intervals();
+                        }
                         SemanticType::Unknown
                     }
                 }
@@ -3190,7 +3263,92 @@ range without checking it. Every proof using this range assumes it"
         }
     }
 
+    /// The SSA model is keyed by names, so shadowing cannot safely share it.
+    /// Check lexical scopes before the body introduces its local bindings.
+    fn smt_shadowed_binding(&self, statements: &[Stmt]) -> Option<String> {
+        fn visit(statements: &[Stmt], names: &mut std::collections::HashSet<String>) -> Option<String> {
+            for statement in statements {
+                match statement {
+                    Stmt::Let { name, .. } => {
+                        if !names.insert(name.clone()) { return Some(name.clone()); }
+                    }
+                    Stmt::For { loop_var, body, .. } => {
+                        let mut nested = names.clone();
+                        if !nested.insert(loop_var.clone()) { return Some(loop_var.clone()); }
+                        if let Some(name) = visit(&body.stmts, &mut nested) { return Some(name); }
+                    }
+                    Stmt::If { then_block, else_block, .. } => {
+                        if let Some(name) = visit(&then_block.stmts, &mut names.clone()) { return Some(name); }
+                        if let Some(block) = else_block {
+                            if let Some(name) = visit(&block.stmts, &mut names.clone()) { return Some(name); }
+                        }
+                    }
+                    Stmt::While { body, .. } | Stmt::SafeBlock(body, _) | Stmt::GhostBlock(body, _)
+                    | Stmt::Chisel(body, _) | Stmt::HintBlock { body, .. }
+                    | Stmt::ClockDomainBlock { body, .. } => {
+                        if let Some(name) = visit(&body.stmts, &mut names.clone()) { return Some(name); }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        let mut names = self.scopes.iter().flat_map(|scope| scope.symbols.keys().cloned()).collect();
+        visit(statements, &mut names)
+    }
+
+    fn contains_unsigned_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLit(n, _) => *n > i32::MAX as i64 && *n <= u32::MAX as i64,
+            Expr::UnaryOp { operand, .. } => Self::contains_unsigned_literal(operand),
+            Expr::BinaryOp { left, right, .. } =>
+                Self::contains_unsigned_literal(left) || Self::contains_unsigned_literal(right),
+            _ => false,
+        }
+    }
+
+    /// Only signed integers have common arithmetic semantics in LLVM and PTX.
+    /// Refuse unsigned proofs until the backends agree on their operators.
+    fn smt_integer_width(&self, expr: &Expr) -> Result<u32, String> {
+        match expr {
+            // For interval propagation use the narrower backend width. PTX
+            // holds positive u32 literals in 32 bits; LLVM uses 64 bits.
+            Expr::IntLit(n, _) => Ok(if *n >= i32::MIN as i64 && *n <= u32::MAX as i64 { 32 } else { 64 }),
+            Expr::Ident(name, _) => match self.lookup_var(name) {
+                Some(SemanticType::Primitive(ty)) => match ty.to_ascii_lowercase().as_str() {
+                    "i8" => Ok(8), "i16" => Ok(16), "i32" => Ok(32), "i64" => Ok(64),
+                    _ => Err(format!("`{name}` does not have a supported signed integer type")),
+                },
+                _ => Err(format!("the integer type of `{name}` is not known")),
+            },
+            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => self.smt_integer_width(operand),
+            Expr::BinaryOp { left, op, right, .. }
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) =>
+                Ok(self.smt_integer_width(left)?.max(self.smt_integer_width(right)?)),
+            Expr::Call { func, args, .. } if args.is_empty()
+                && matches!(&**func, Expr::Ident(name, _) if gpu_index_symbol(name).is_some()) => Ok(32),
+            _ => Err("expression has no supported machine integer type".into()),
+        }
+    }
+
+    fn smt_in_range(value: &str, bits: u32) -> String {
+        let limit = 1i128 << (bits - 1);
+        format!("(and (>= {value} {}) (<= {value} {}))", -limit, limit - 1)
+    }
+
+    fn smt_all(requirements: &[String], value: &str) -> String {
+        if requirements.is_empty() { value.to_string() }
+        else { format!("(and {} {value})", requirements.join(" ")) }
+    }
+
+    /// SMT div rounds down; machine signed division truncates toward zero.
+    fn smt_signed_quotient(lhs: &str, rhs: &str) -> String {
+        format!("(let ((div_lhs {lhs}) (div_rhs {rhs})) (let ((div_magnitude (div (ite (< div_lhs 0) (- div_lhs) div_lhs) (ite (< div_rhs 0) (- div_rhs) div_rhs)))) (ite (= (< div_lhs 0) (< div_rhs 0)) div_magnitude (- div_magnitude))))")
+    }
+
     /// Translates an expression into SMT-LIB, or reports that it cannot.
+    /// Every intermediate must fit its machine width. Requirements are proof
+    /// goals, NEVER assumptions that would exclude overflowing executions.
     ///
     /// **Every unhandled node returns `Err`.** That is the entire point, and it
     /// is a reversal: this function used to end in `_ => "0".to_string()`, with
@@ -3207,11 +3365,15 @@ range without checking it. Every proof using this range assumes it"
         &self,
         expr: &Expr,
         versions: &HashMap<String, usize>,
+        requirements: &mut Vec<String>,
     ) -> Result<String, String> {
         match expr {
+            Expr::IntLit(n, _) if *n > i32::MAX as i64 && *n <= u32::MAX as i64 =>
+                Err("integer literal has different signedness in LLVM and PTX".into()),
             Expr::IntLit(val, _) => Ok(val.to_string()),
             Expr::BoolLit(val, _) => Ok(val.to_string()),
             Expr::Ident(name, _) => {
+                self.smt_integer_width(expr)?;
                 if let Some(&ver) = versions.get(name) {
                     Ok(format!("{}_{}", name, ver))
                 } else {
@@ -3237,14 +3399,26 @@ range without checking it. Every proof using this range assumes it"
                 _ => Err("indirect call is not modellable".to_string()),
             },
             Expr::BinaryOp { left, op, right, .. } => {
-                let lhs = self.expr_to_smt(left, versions)?;
-                let rhs = self.expr_to_smt(right, versions)?;
+                let lhs = self.expr_to_smt(left, versions, requirements)?;
+                let rhs = self.expr_to_smt(right, versions, requirements)?;
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {
+                    let bits = self.smt_integer_width(expr)?;
+                    let result = match op {
+                        BinaryOp::Div | BinaryOp::Mod => {
+                            requirements.push(format!("(distinct {rhs} 0)"));
+                            requirements.push(format!("(not (and (= {lhs} {}) (= {rhs} (- 1))))", -(1i128 << (bits - 1))));
+                            let quotient = Self::smt_signed_quotient(&lhs, &rhs);
+                            if *op == BinaryOp::Div { quotient }
+                            else { format!("(- {lhs} (* {rhs} {quotient}))") }
+                        }
+                        _ => format!("({} {lhs} {rhs})", match op {
+                            BinaryOp::Add => "+", BinaryOp::Sub => "-", _ => "*",
+                        }),
+                    };
+                    requirements.push(Self::smt_in_range(&result, bits));
+                    return Ok(result);
+                }
                 let op_str = match op {
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Mul => "*",
-                    BinaryOp::Div => "div",
-                    BinaryOp::Mod => "mod",
                     BinaryOp::Eq => "=",
                     BinaryOp::NotEq => "distinct",
                     BinaryOp::Lt => "<",
@@ -3268,9 +3442,13 @@ this verifier uses",
                 Ok(format!("({} {} {})", op_str, lhs, rhs))
             }
             Expr::UnaryOp { op, operand, .. } => {
-                let opnd = self.expr_to_smt(operand, versions)?;
+                let opnd = self.expr_to_smt(operand, versions, requirements)?;
                 match op {
-                    UnaryOp::Neg => Ok(format!("(- {})", opnd)),
+                    UnaryOp::Neg => {
+                        let result = format!("(- {opnd})");
+                        requirements.push(Self::smt_in_range(&result, self.smt_integer_width(expr)?));
+                        Ok(result)
+                    }
                     UnaryOp::Not => Ok(format!("(not {})", opnd)),
                     other => Err(format!(
                         "the unary operator `{:?}` is not modelled (it used to be encoded as its \
@@ -3337,6 +3515,19 @@ own operand, so `*p` was proven as `p`)",
             let interval = at_entry
                 .and_then(|m| m.get(var))
                 .or_else(|| self.lookup_interval(var));
+            if at_entry.is_none() || interval.is_none() {
+                // A stored signed variable is always representable. These are
+                // domain facts, unlike the operation-result bounds proved below.
+                // At initiation, a concrete interval is kept on its own:
+                // intersecting a bad initializer's interval with the machine
+                // range could make the entry state contradictory. An unknown
+                // runtime parameter has no such interval, and its declared
+                // signed type still guarantees its machine range on entry.
+                let expression = Expr::Ident(var.clone(), Span { line: 0, col: 0 });
+                if let Ok(bits) = self.smt_integer_width(&expression) {
+                    preconditions.push(format!("(assert {})", Self::smt_in_range(&format!("{var}_0"), bits)));
+                }
+            }
             if let Some(interval) = interval {
                 self.smt_trust.set(self.smt_trust.get() | interval.trust);
                 preconditions.push(format!(
@@ -3517,109 +3708,73 @@ own operand, so `*p` was proven as `p`)",
         versions: &mut HashMap<String, usize>,
         declarations: &mut Vec<String>,
         body_assertions: &mut Vec<String>,
+        requirements: &mut Vec<String>,
     ) -> Result<(), String> {
         for stmt in stmts {
             match stmt {
-                Stmt::Assign { target, value, .. } => {
+                Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
                     if let Expr::Ident(name, _) = target {
                         if versions.contains_key(name) {
-                            // An unmodellable right-hand side does not need to be
-                            // refused - it needs to be UNKNOWN. Giving the target a
-                            // fresh unconstrained version says exactly that, and is
-                            // the same sound over-approximation used for branches:
-                            // the invariant must then hold whatever the expression
-                            // produced. Refusing here would reject `let v = arr[i];`
-                            // in an otherwise perfectly checkable loop.
-                            let Ok(rhs_smt) = self.expr_to_smt(value, versions) else {
+                            let expression = match stmt {
+                                Stmt::CompoundAssign { op, span, .. } => Expr::BinaryOp {
+                                    left: Box::new(target.clone()), op: op.clone(),
+                                    right: Box::new(value.clone()), span: span.clone(),
+                                },
+                                _ => value.clone(),
+                            };
+                            let mut local_requirements = Vec::new();
+                            let encoded = self.smt_integer_width(target).and_then(|bits| {
+                                self.expr_to_smt(&expression, versions, &mut local_requirements)
+                                    .map(|rhs| (bits, rhs))
+                            });
+                            let Ok((bits, rhs)) = encoded else {
                                 let mut one = std::collections::HashSet::new();
                                 one.insert(name.clone());
                                 Self::havoc(&one, versions, declarations);
                                 continue;
                             };
-                            let current_ver = versions.get(name).cloned().unwrap_or(0);
-                            let next_ver = current_ver + 1;
-                            versions.insert(name.clone(), next_ver);
-                            declarations.push(format!("(declare-const {}_{} Int)", name, next_ver));
-                            body_assertions.push(format!(
-                                "(assert (= {}_{} {}))",
-                                name, next_ver, rhs_smt
-                            ));
-                        }
-                    }
-                }
-                Stmt::CompoundAssign { target, op, value, .. } => {
-                    if let Expr::Ident(name, _) = target {
-                        if versions.contains_key(name) {
-                            let Ok(rhs_smt) = self.expr_to_smt(value, versions) else {
-                                let mut one = std::collections::HashSet::new();
-                                one.insert(name.clone());
-                                Self::havoc(&one, versions, declarations);
-                                continue;
-                            };
-                            let current_ver = versions.get(name).cloned().unwrap_or(0);
-                            let next_ver = current_ver + 1;
-                            let op_str = match op {
-                                BinaryOp::Add => "+",
-                                BinaryOp::Sub => "-",
-                                BinaryOp::Mul => "*",
-                                BinaryOp::Div => "div",
-                                BinaryOp::Mod => "mod",
-                                _ => {
-                                    // `x &= y` and friends: the result is not
-                                    // expressible, so the variable becomes unknown.
-                                    let mut one = std::collections::HashSet::new();
-                                    one.insert(name.clone());
-                                    Self::havoc(&one, versions, declarations);
-                                    continue;
-                                }
-                            };
-                            let expr_smt = format!("({} {}_{} {})", op_str, name, current_ver, rhs_smt);
-                            versions.insert(name.clone(), next_ver);
-                            declarations.push(format!("(declare-const {}_{} Int)", name, next_ver));
-                            body_assertions.push(format!(
-                                "(assert (= {}_{} {}))",
-                                name, next_ver, expr_smt
-                            ));
-                        }
-                    }
-                }
-                Stmt::Let { name, init, .. } => {
-                    let is_int = self.lookup_var(name).map(|ty| {
-                        if let SemanticType::Primitive(prim_name) = ty {
-                            prim_name == "I32" || prim_name == "u32" || prim_name == "usize" || prim_name == "i64"
-                        } else {
-                            false
-                        }
-                    }).unwrap_or(false);
-                    if is_int {
-                        let rhs_smt = if let Some(init_expr) = init {
-                            match self.expr_to_smt(init_expr, versions) {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    // Bound to something we cannot express, so the
-                                    // new variable is simply unknown.
-                                    versions.insert(name.clone(), 0);
-                                    declarations
-                                        .push(format!("(declare-const {}_{} Int)", name, 0));
-                                    continue;
-                                }
+                            // LLVM compound operations use the destination width,
+                            // while PTX promotes first. Prove that converting their
+                            // RHS is lossless before using a common arithmetic model.
+                            if matches!(stmt, Stmt::CompoundAssign { .. }) {
+                                let operand = self.expr_to_smt(value, versions, &mut local_requirements)?;
+                                local_requirements.push(Self::smt_in_range(&operand, bits));
                             }
-                        } else {
-                            "0".to_string()
-                        };
-                        versions.insert(name.clone(), 0);
-                        declarations.push(format!("(declare-const {}_{} Int)", name, 0));
-                        body_assertions.push(format!(
-                            "(assert (= {}_{} {}))",
-                            name, 0, rhs_smt
-                        ));
+                            // Conversions must also be lossless. Checking only the
+                            // final expression's width misses narrowing stores.
+                            local_requirements.push(Self::smt_in_range(&rhs, bits));
+                            requirements.extend(local_requirements);
+                            let next = versions[name] + 1;
+                            versions.insert(name.clone(), next);
+                            declarations.push(format!("(declare-const {name}_{next} Int)"));
+                            body_assertions.push(format!("(assert (= {name}_{next} {rhs}))"));
+                        }
+                    }
+                }
+                Stmt::Let { name, init, span, .. } => {
+                    let target = Expr::Ident(name.clone(), span.clone());
+                    let mut local_requirements = Vec::new();
+                    let encoded = self.smt_integer_width(&target).and_then(|bits| {
+                        let init = init.as_ref().ok_or("uninitialized integer binding")?;
+                        self.expr_to_smt(init, versions, &mut local_requirements)
+                            .map(|rhs| (bits, rhs))
+                    });
+                    // Never reset a reused name to version zero: that can
+                    // contradict entry facts and make the proof vacuous.
+                    let next = versions.get(name).map_or(0, |v| v + 1);
+                    versions.insert(name.clone(), next);
+                    declarations.push(format!("(declare-const {name}_{next} Int)"));
+                    if let Ok((bits, rhs)) = encoded {
+                        local_requirements.push(Self::smt_in_range(&rhs, bits));
+                        requirements.extend(local_requirements);
+                        body_assertions.push(format!("(assert (= {name}_{next} {rhs}))"));
                     }
                 }
                 Stmt::SafeBlock(block, _) | Stmt::Chisel(block, _) | Stmt::GhostBlock(block, _) | Stmt::HintBlock { body: block, .. } => {
-                    self.trace_body_statements(&block.stmts, versions, declarations, body_assertions)?;
+                    self.trace_body_statements(&block.stmts, versions, declarations, body_assertions, requirements)?;
                 }
                 Stmt::ClockDomainBlock { body, .. } => {
-                    self.trace_body_statements(&body.stmts, versions, declarations, body_assertions)?;
+                    self.trace_body_statements(&body.stmts, versions, declarations, body_assertions, requirements)?;
                 }
                 // A branch is modelled by HAVOC: every variable it might assign
                 // gets a fresh, unconstrained version. That is a sound
@@ -3655,7 +3810,7 @@ own operand, so `*p` was proven as `p`)",
                 // the tracked variables - all of which are integer scalars.
                 // Anything that does take a reference is refused.
                 Stmt::Expr(e) => {
-                    if Self::takes_reference(e) {
+                    if self.takes_reference(e) {
                         return Err(
                             "the loop body passes a reference to a call, which could modify a \
 tracked variable in a way this verifier cannot see"
@@ -3751,32 +3906,91 @@ model",
         }
     }
 
-    /// Whether the expression takes a reference to anything.
-    fn takes_reference(expr: &Expr) -> bool {
+    /// A write through an alias has no reliable name-based range update.
+    fn invalidate_aliased_intervals(&mut self) {
+        for scope in &mut self.scopes {
+            for entry in scope.symbols.values_mut() {
+                entry.interval = None;
+            }
+        }
+    }
+
+    /// References can also be carried by arrays, structs, and enum payloads.
+    /// Follow named types with a cycle guard rather than treating an aggregate as
+    /// an independent scalar just because it has no `&` at the call site.
+    fn type_contains_reference(&self, ty: &SemanticType) -> bool {
+        fn visit(checker: &TypeChecker, ty: &SemanticType,
+                 seen: &mut std::collections::HashSet<String>) -> bool {
+            match ty {
+                SemanticType::Reference { .. } => true,
+                SemanticType::Array { element, .. } | SemanticType::BlockTile { element, .. }
+                | SemanticType::Vector(element, _) => visit(checker, element, seen),
+                SemanticType::Primitive(name) if seen.insert(name.clone()) => {
+                    checker.structs.get(name).is_some_and(|fields|
+                        fields.values().any(|field| visit(checker, field, seen)))
+                        || checker.enums.get(name).is_some_and(|decl|
+                            decl.variants.iter().any(|variant|
+                                checker.functions.get(&format!("{name}_{}", variant.name))
+                                    .is_some_and(|signature| signature.params.iter()
+                                        .any(|field| visit(checker, field, seen)))))
+                }
+                _ => false,
+            }
+        }
+        visit(self, ty, &mut std::collections::HashSet::new())
+    }
+
+    /// Whether an expression creates OR carries a reference. Inspect types
+    /// as well as syntax: `bump(saved_reference)` can mutate exactly the same
+    /// caller state as `bump(&mut x)`.
+    fn takes_reference(&self, expr: &Expr) -> bool {
+        if self.known_expr_type(expr).is_some_and(|ty| self.type_contains_reference(&ty)) {
+            return true;
+        }
         match expr {
             Expr::UnaryOp { op: UnaryOp::Ref { .. }, .. } => true,
-            Expr::UnaryOp { operand, .. } => Self::takes_reference(operand),
+            Expr::UnaryOp { operand, .. } => self.takes_reference(operand),
             Expr::BinaryOp { left, right, .. } => {
-                Self::takes_reference(left) || Self::takes_reference(right)
+                self.takes_reference(left) || self.takes_reference(right)
             }
             Expr::Call { func, args, .. } => {
-                Self::takes_reference(func) || args.iter().any(Self::takes_reference)
+                self.takes_reference(func) || args.iter().any(|e| self.takes_reference(e))
             }
             // `func` was not visited here, only `args`. A callee named by an
             // expression that itself hands out a reference is exotic, but the
             // asymmetry with `Expr::Call` one arm up was an oversight, not a
             // decision.
             Expr::GenericCall { func, args, .. } => {
-                Self::takes_reference(func) || args.iter().any(Self::takes_reference)
+                self.takes_reference(func) || args.iter().any(|e| self.takes_reference(e))
             }
+            // Indexing DEREFERENCES: `a[i]` with `a: &mut [T; N]` reads or
+            // writes an element and hands no reference to anyone, and an array
+            // element is never one of the tracked integer scalars. So a
+            // reference-to-array base counts only if its ELEMENTS carry a
+            // reference. Without this every loop over an array reached through
+            // a reference was refused - the arrays `a[i]` is now bounds-checked
+            // through (`tests/reference_array_bounds.rs`).
             Expr::Index { base, index, .. } => {
-                Self::takes_reference(base) || Self::takes_reference(index)
+                let through_array_reference = match &**base {
+                    Expr::Ident(name, _) => match self.lookup_var(name) {
+                        Some(SemanticType::Reference { inner, .. }) => match &**inner {
+                            SemanticType::Array { element, .. } => {
+                                Some(self.type_contains_reference(element))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                through_array_reference.unwrap_or_else(|| self.takes_reference(base))
+                    || self.takes_reference(index)
             }
-            Expr::MemberAccess { base, .. } => Self::takes_reference(base),
+            Expr::MemberAccess { base, .. } => self.takes_reference(base),
             Expr::StructLit { fields, .. } => {
-                fields.iter().any(|(_, e)| Self::takes_reference(e))
+                fields.iter().any(|(_, e)| self.takes_reference(e))
             }
-            Expr::BlockExpr(b, _) => Self::stmts_take_reference(&b.stmts),
+            Expr::BlockExpr(b, _) => self.stmts_take_reference(&b.stmts),
             Expr::Ident(..)
             | Expr::IntLit(..)
             | Expr::FloatLit(..)
@@ -3817,30 +4031,30 @@ model",
     ///
     /// Exhaustive over `Stmt` with no `_ =>` arm, so a new statement kind is a
     /// compile error here rather than an unvisited subtree.
-    fn stmts_take_reference(stmts: &[Stmt]) -> bool {
+    fn stmts_take_reference(&self, stmts: &[Stmt]) -> bool {
         stmts.iter().any(|stmt| match stmt {
-            Stmt::Let { init, .. } => init.as_ref().is_some_and(Self::takes_reference),
+            Stmt::Let { init, .. } => init.as_ref().is_some_and(|e| self.takes_reference(e)),
             Stmt::Assign { target, value, .. }
             | Stmt::CompoundAssign { target, value, .. } => {
-                Self::takes_reference(target) || Self::takes_reference(value)
+                self.takes_reference(target) || self.takes_reference(value)
             }
-            Stmt::Expr(e) => Self::takes_reference(e),
-            Stmt::Return(e, _) => e.as_ref().is_some_and(Self::takes_reference),
+            Stmt::Expr(e) => self.takes_reference(e),
+            Stmt::Return(e, _) => e.as_ref().is_some_and(|e| self.takes_reference(e)),
             Stmt::If { condition, then_block, else_block, .. } => {
-                Self::takes_reference(condition)
-                    || Self::stmts_take_reference(&then_block.stmts)
+                self.takes_reference(condition)
+                    || self.stmts_take_reference(&then_block.stmts)
                     || else_block
                         .as_ref()
-                        .is_some_and(|b| Self::stmts_take_reference(&b.stmts))
+                        .is_some_and(|b| self.stmts_take_reference(&b.stmts))
             }
             Stmt::For { start, end, step, body, .. } => {
-                Self::takes_reference(start)
-                    || Self::takes_reference(end)
-                    || step.as_ref().is_some_and(Self::takes_reference)
-                    || Self::stmts_take_reference(&body.stmts)
+                self.takes_reference(start)
+                    || self.takes_reference(end)
+                    || step.as_ref().is_some_and(|e| self.takes_reference(e))
+                    || self.stmts_take_reference(&body.stmts)
             }
             Stmt::While { condition, body, .. } => {
-                Self::takes_reference(condition) || Self::stmts_take_reference(&body.stmts)
+                self.takes_reference(condition) || self.stmts_take_reference(&body.stmts)
             }
             // The two loop arms above are redundant TODAY and are kept anyway:
             // `check_stmt` requires an `@invariant` on every loop outside an
@@ -3849,17 +4063,17 @@ model",
             // either traversal leaves the suite green. This check must not
             // depend on a rule a different pass happens to enforce.
             Stmt::Match { scrutinee, arms, .. } => {
-                Self::takes_reference(scrutinee)
-                    || arms.iter().any(|a| Self::takes_reference(&a.body))
+                self.takes_reference(scrutinee)
+                    || arms.iter().any(|a| self.takes_reference(&a.body))
             }
             Stmt::Chisel(b, _)
             | Stmt::SafeBlock(b, _)
             | Stmt::GhostBlock(b, _)
-            | Stmt::HintBlock { body: b, .. } => Self::stmts_take_reference(&b.stmts),
+            | Stmt::HintBlock { body: b, .. } => self.stmts_take_reference(&b.stmts),
             Stmt::ClockDomainBlock { clock, body, .. } => {
-                Self::takes_reference(clock) || Self::stmts_take_reference(&body.stmts)
+                self.takes_reference(clock) || self.stmts_take_reference(&body.stmts)
             }
-            Stmt::CompileTimeAssert { condition, .. } => Self::takes_reference(condition),
+            Stmt::CompileTimeAssert { condition, .. } => self.takes_reference(condition),
             // Nothing to hand out: `break` has no operands, and a type alias is
             // erased before anything runs.
             Stmt::Break { .. } | Stmt::TypeAlias { .. } => false,
@@ -3968,6 +4182,28 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
         ));
     }
 
+    fn verify_smt_requirements(
+        &mut self, declarations: &[String], preconditions: &[String], assumption: &str,
+        requirements: &[String], invariant: &Expr, span: &Span,
+    ) -> bool {
+        if requirements.is_empty() { return true; }
+        let query = format!("{}\n{}\n(assert {})\n(assert (not {}))\n(check-sat)\n",
+            declarations.join("\n"), preconditions.join("\n"), assumption,
+            Self::smt_all(requirements, "true"));
+        match run_z3(&query) {
+            Ok(result) if result == "unsat" => true,
+            Ok(result) => {
+                self.errors.push(format!("Line {}: [SMT Safety Verification Failed] Loop condition arithmetic is not provably representable for invariant `{}`. Z3 returned: {}",
+                    span.line, expr_to_string(invariant), result));
+                false
+            }
+            Err(e) => {
+                self.smt_unavailable(span.line, invariant, "condition arithmetic", &e);
+                false
+            }
+        }
+    }
+
     fn verify_while_loop_invariant(
         &mut self,
         condition: &Expr,
@@ -3981,7 +4217,7 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
         // has to be checked of the WHOLE body, and of the unsliced body -
         // `slice_body_for_invariant` decides relevance from names, which is
         // precisely the reasoning a reference invalidates.
-        if Self::stmts_take_reference(&body.stmts) {
+        if self.stmts_take_reference(&body.stmts) {
             return self.smt_unmodellable(
                 span.line,
                 invariant,
@@ -4017,11 +4253,13 @@ tracked variable in a way this verifier cannot see",
         for var in &vars {
             versions_init.insert(var.clone(), 0);
         }
-        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init) {
+        let mut init_requirements = Vec::new();
+        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init, &mut init_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
+        let inv_init_smt = Self::smt_all(&init_requirements, &inv_init_smt);
         decls_init.sort();
         decls_init.dedup();
 
@@ -4052,15 +4290,21 @@ tracked variable in a way this verifier cannot see",
         let mut preconditions_pres = Vec::new();
         self.generate_smt_decls_and_preconditions(&vars, &mut decls_pres, &mut preconditions_pres);
 
-        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init) {
+        let mut invariant_requirements = Vec::new();
+        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init, &mut invariant_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
-        let cond_start_smt = match self.expr_to_smt(condition, &versions_init) {
+        let inv_start_smt = Self::smt_all(&invariant_requirements, &inv_start_smt);
+        let mut condition_requirements = Vec::new();
+        let cond_start_smt = match self.expr_to_smt(condition, &versions_init, &mut condition_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
+        if !self.verify_smt_requirements(&decls_pres, &preconditions_pres, &inv_start_smt,
+                                        &condition_requirements, invariant, span) { return; }
+        let mut requirements = Vec::new();
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
         // Encode only the statements that can affect the invariant. On an
@@ -4071,16 +4315,17 @@ tracked variable in a way this verifier cannot see",
         let sliced = Self::slice_body_for_invariant(&body.stmts, invariant, "");
         let to_encode: &[Stmt] = sliced.as_deref().unwrap_or(&body.stmts);
         if let Err(why) =
-            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions, &mut requirements)
         {
             return self.smt_unmodellable(span.line, invariant, &why);
         }
 
-        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres) {
+        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres, &mut requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
+        let inv_end_smt = Self::smt_all(&requirements, &inv_end_smt);
         decls_pres.sort();
         decls_pres.dedup();
 
@@ -4125,13 +4370,26 @@ tracked variable in a way this verifier cannot see",
         // has to be checked of the WHOLE body, and of the unsliced body -
         // `slice_body_for_invariant` decides relevance from names, which is
         // precisely the reasoning a reference invalidates.
-        if Self::stmts_take_reference(&body.stmts) {
+        if self.stmts_take_reference(&body.stmts) {
             return self.smt_unmodellable(
                 span.line,
                 invariant,
                 "the loop body passes a reference to a call, which could modify a \
 tracked variable in a way this verifier cannot see",
             );
+        }
+
+        // LLVM reevaluates a step while PTX captures it before the loop.
+        // A shared proof is valid only when header inputs stay unchanged.
+        let mut writes = std::collections::HashSet::new();
+        Self::collect_assigned(&body.stmts, &mut writes);
+        writes.insert(loop_var.to_string());
+        for expression in std::iter::once(start).chain(std::iter::once(end)).chain(step.iter()) {
+            let mut reads = std::collections::HashSet::new();
+            if !Self::collect_reads(expression, &mut reads) || !reads.is_disjoint(&writes) {
+                return self.smt_unmodellable(span.line, invariant,
+                    "a for-loop bound or step depends on a variable changed by the loop");
+            }
         }
 
         let mut vars = std::collections::HashSet::new();
@@ -4151,28 +4409,36 @@ tracked variable in a way this verifier cannot see",
         let mut preconditions_init = Vec::new();
         // The snapshot goes HERE and only here - see
         // `generate_smt_decls_and_preconditions_with`.
+        let mut entry_vars = vars.clone();
+        entry_vars.remove(loop_var);
+        // The inferred loop range describes executed iterations, not entry:
+        // it can be empty, or exclude the initializer before an unsafe cast.
+        decls_init.push(format!("(declare-const {loop_var}_0 Int)"));
         self.generate_smt_decls_and_preconditions_with(
-            &vars,
+            &entry_vars,
             Some(entry_intervals),
             &mut decls_init,
             &mut preconditions_init,
         );
 
-        let start_smt = match self.expr_to_smt(start, &std::collections::HashMap::new()) {
+        let mut init_requirements = Vec::new();
+        let start_smt = match self.expr_to_smt(start, &std::collections::HashMap::new(), &mut init_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
+        init_requirements.push(Self::smt_in_range(&start_smt, 32));
         preconditions_init.push(format!("(assert (= {}_{} {}))", loop_var, 0, start_smt));
 
         let mut versions_init = std::collections::HashMap::new();
         for var in &vars {
             versions_init.insert(var.clone(), 0);
         }
-        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init) {
+        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init, &mut init_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
+        let inv_init_smt = Self::smt_all(&init_requirements, &inv_init_smt);
         decls_init.sort();
         decls_init.dedup();
 
@@ -4203,24 +4469,37 @@ tracked variable in a way this verifier cannot see",
         let mut preconditions_pres = Vec::new();
         self.generate_smt_decls_and_preconditions(&vars, &mut decls_pres, &mut preconditions_pres);
 
-        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init) {
+        let mut invariant_requirements = Vec::new();
+        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init, &mut invariant_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
-        let loop_var_start_smt = match self.expr_to_smt(start, &versions_init) {
+        let inv_start_smt = Self::smt_all(&invariant_requirements, &inv_start_smt);
+        let mut condition_requirements = Vec::new();
+        let loop_var_start_smt = match self.expr_to_smt(start, &versions_init, &mut condition_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
-        let loop_var_end_smt = match self.expr_to_smt(end, &versions_init) {
+        let loop_var_end_smt = match self.expr_to_smt(end, &versions_init, &mut condition_requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
+        // The induction variable is I32 in both backends, and their loop
+        // comparisons are signed. A runtime negative endpoint therefore
+        // describes an empty loop when start >= end; it is not an assumed
+        // nonnegative extent. Wider header expressions still have to fit
+        // I32 so the mathematical comparison describes the emitted bits.
+        condition_requirements.push(Self::smt_in_range(&loop_var_start_smt, 32));
+        condition_requirements.push(Self::smt_in_range(&loop_var_end_smt, 32));
         let cond_start_smt = format!(
             "(and (>= {}_{} {}) (< {}_{} {}))",
             loop_var, 0, loop_var_start_smt, loop_var, 0, loop_var_end_smt
         );
 
+        if !self.verify_smt_requirements(&decls_pres, &preconditions_pres, &inv_start_smt,
+                                        &condition_requirements, invariant, span) { return; }
+        let mut requirements = Vec::new();
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
         // Encode only the statements that can affect the invariant. On an
@@ -4231,34 +4510,43 @@ tracked variable in a way this verifier cannot see",
         let sliced = Self::slice_body_for_invariant(&body.stmts, invariant, loop_var);
         let to_encode: &[Stmt] = sliced.as_deref().unwrap_or(&body.stmts);
         if let Err(why) =
-            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions, &mut requirements)
         {
             return self.smt_unmodellable(span.line, invariant, &why);
         }
 
         let current_loop_var_ver = versions_pres.get(loop_var).cloned().unwrap_or(0);
         let next_loop_var_ver = current_loop_var_ver + 1;
-        versions_pres.insert(loop_var.to_string(), next_loop_var_ver);
         decls_pres.push(format!("(declare-const {}_{} Int)", loop_var, next_loop_var_ver));
 
         let step_smt = if let Some(st) = step {
-            match self.expr_to_smt(st, &versions_pres) {
+            match self.expr_to_smt(st, &versions_pres, &mut requirements) {
                 Ok(v) => v,
                 Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
             }
         } else {
             "1".to_string()
         };
+        // The inferred lower bound i >= start is valid only for ascending
+        // loops. A negative dynamic step invalidates that induction premise.
+        requirements.push(format!("(> {step_smt} 0)"));
+        requirements.push(Self::smt_in_range(&step_smt, 32));
+        requirements.push(Self::smt_in_range(&format!("(+ {loop_var}_{current_loop_var_ver} {step_smt})"), 32));
+        // Body writes to the induction variable must preserve the lower
+        // bound used by the next iteration's proof, too.
+        requirements.push(format!("(>= {loop_var}_{next_loop_var_ver} {loop_var_start_smt})"));
+        versions_pres.insert(loop_var.to_string(), next_loop_var_ver);
         body_assertions.push(format!(
             "(assert (= {}_{} (+ {}_{} {})))",
             loop_var, next_loop_var_ver, loop_var, current_loop_var_ver, step_smt
         ));
 
-        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres) {
+        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres, &mut requirements) {
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
 
+        let inv_end_smt = Self::smt_all(&requirements, &inv_end_smt);
         decls_pres.sort();
         decls_pres.dedup();
 

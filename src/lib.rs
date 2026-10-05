@@ -18,7 +18,10 @@ pub mod quantization_pass;
 pub mod coprocessor_scheduler;
 
 pub mod autotuner;
+pub mod adaptive_jit;
+pub mod adaptive_jit_ffi;
 pub mod cuda_runtime;
+pub mod verified_exact_pv;
 pub mod empirical_autotune;
 pub mod require;
 pub mod zero_drift;

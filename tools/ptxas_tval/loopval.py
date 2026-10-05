@@ -38,7 +38,11 @@ THREE THINGS THAT ARE EASY TO GET WRONG, each found by a counterexample here.
 3. SUBSTITUTE, DO NOT MERELY ASSUME.  See rewrite().
 
 REFUSED by name, never assumed: more than one back edge, a branch inside the
-body, a store inside the body, an unrolled SASS loop.  ptxas unrolls x4 at -O2
+body, a store inside the body, an unrolled SASS loop, a PTX header with value
+effects or predicates consumed outside its guard, and shared/barrier/warp
+effects whose state this relation does not carry. A missing SASS entry guard
+is accepted only when the source is proved unable to run zero iterations.
+ptxas unrolls x4 at -O2
 and above even for a loop with no memory in it (`unroll.py`), so in practice
 this applies to -O0/-O1 output; the optimization-level differential is what
 relates that to the shipped build, and it is sampled evidence rather than a
@@ -46,7 +50,7 @@ proof.
 """
 import re, sys, time, random
 from z3 import *
-import loopcfg, ptxexec, sassexec, params, batch, mulmode, conc, mac64, memorder
+import loopcfg, ptxexec, sassexec, params, batch, mulmode, conc, mac64, memorder, domain
 
 
 # ---------- selectors: a name for one 32-bit slot of a side's state ----------
@@ -127,6 +131,9 @@ def _region_exprs(st):
     for a, v, g in st.stores:
         out += [a, v if is_bv(v) else BitVecVal(0, 32),
                 If(g, BitVecVal(1, 32), BitVecVal(0, 32))]
+    # Discarded loads still have an address and execution guard to preserve.
+    for a, g in st.loads:
+        out += [a, If(g, BitVecVal(1, 32), BitVecVal(0, 32))]
     return out or [BitVecVal(0, 32)]
 
 
@@ -236,8 +243,10 @@ def propose(psel, ssel, allp, alls, pp, sprol, pb, sb, sym, samples, iters=4):
 
 
 def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=True):
+    domain.require_matching_targets(ptx_path, sass_path)
     P = loopcfg.ptx_regions(ptx_path)
     S = loopcfg.sass_regions(sass_path)
+    loopcfg.require_thread_local(ptx_path, sass_path)
     _, layout = params.parse(ptx_path)
     sym = batch.mk(mulmode.MODES[mode](), layout)
 
@@ -274,6 +283,22 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     # region runs in a fresh state whose store trace starts empty.
     memorder.require_no_read_back_across('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
     memorder.require_no_read_back_across('SASS', [sprol, sb0, sb0, se0])
+    if pg0.loads:
+        raise memorder.Refusal(
+            'global load in the PTX loop header; repeated header accesses are not '
+            'paired with SASS regions  (refusing, not guessing)')
+    header_predicates = loopcfg.require_ptx_guard_only(P['pre_guard'])
+    # Even a predicate-only header has state effects if its predicates are
+    # consumed by the body or exit code. Only its exit calculation is composed
+    # here, so those uses must also refuse instead of reading stale predicates.
+    outside_names = set()
+    for expression in _region_exprs(pb0) + _region_exprs(pe0):
+        outside_names |= _vars(expression)
+    if any(f'ptx_undef_p{i}' in outside_names for i in header_predicates):
+        raise memorder.Refusal(
+            'PTX loop header predicate is consumed by the body or epilogue; '
+            'header predicate state is not composed into these regions '
+            '(refusing, not guessing)')
     if pb0.stores or sb0.stores:
         raise Exception(f'store inside the loop body (ptx {len(pb0.stores)}, sass '
                         f'{len(sb0.stores)}); this validator compares the stores after '
@@ -297,7 +322,7 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     # the prologue (a zero-trip guard that ends the program) or in the body (a
     # loop cut short) never reached the epilogue's stores.  Measured on HEAD:
     # a translation whose zero-trip guard EXITs instead of branching to the
-    # epilogue VALIDATED (the ENTRY obligation is only posed for a BRA), and so
+    # epilogue VALIDATED (ENTRY used to be posed only for a BRA), and so
     # did one that EXITs from the body instead of iterating.  Refused by name.
     # Both sides: `ptxexec` models a predicated `ret` the same way now.
     for where, region in (('SASS prologue', sprol), ('SASS loop body', sb0),
@@ -373,7 +398,7 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
             used.add(b[1]); ss[b[1]] = p_in(a)
         return ps, ss
 
-    pre = [ULT(sym['tid_x'], BitVecVal(1024, 32)), ULT(sym['ctaid_x'], BitVecVal(1 << 24, 32))]
+    pre = domain.launch_preconditions(sym)
     # The identity has to be instantiated over the SEEDED terms.  Instantiated
     # over the unseeded ones its operands are `ptx_undef_*` expressions that do
     # not occur in any obligation, so it sits there doing nothing -- which is
@@ -433,6 +458,39 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     sc = sb.P.get(spid, Bool(f'sass_undef_P{spid}'))
     sass_cont = Not(sc) if sneg else sc
 
+    # Stores alone cannot detect an added, removed or widened discarded load.
+    # Check the entire load trace of each executed region before accepting its
+    # output. Region motion remains unproved rather than silently disappearing.
+    def loads_equal(where, pstate, sstate, condition):
+        nonlocal n
+        if len(pstate.loads) != len(sstate.loads):
+            return f'{where} load counts {len(pstate.loads)} vs {len(sstate.loads)}'
+        hits, answers = [], []
+        for pa, pgd in pstate.loads:
+            row = [prove(Implies(And(condition, pgd), pa == sa))
+                   for sa, _ in sstate.loads]
+            answers.append(row)
+            hits.append([j for j, r in enumerate(row) if r == 'unsat']); n += 1
+        perm, reason = memorder.pair_by_address(hits)
+        if perm is None:
+            for i, row in enumerate(answers):
+                if row and all(r == 'sat' for r in row):
+                    return f'{where} load {i} address: sat'
+            return f'{where} load {reason} address'
+        for i, j in enumerate(perm):
+            wp, ws = 8*pstate.load_widths[i], 8*sstate.load_widths[j]
+            if wp != ws:
+                return f'{where} load {i} width: ptx {wp} bits, sass {ws} bits'
+            r = prove(Implies(condition, pstate.loads[i][1] == sstate.loads[j][1])); n += 1
+            if r != 'unsat': return f'{where} load {i} guard: {r}'
+        return None
+
+    for where, pr, sr, condition in (('prologue', pp, sprol, BoolVal(True)),
+                                    ('body', pb, sb, cont),
+                                    ('epilogue', pe, se, Not(cont))):
+        failure = loads_equal(where, pr, sr, condition)
+        if failure: return 'UNPROVED', failure, n
+
     # ---- LOOPCOND: the SASS back edge at k is the PTX guard at k+1 --------
     step_sub = [(p_in(a), p_out(a, pb)) for a in psel]
     r = prove(sass_cont == substitute(cont, *step_sub), [cont]); n += 1
@@ -440,18 +498,28 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     if verbose: print('  LOOPCOND ok  (same trip count)')
 
     # ---- ENTRY -----------------------------------------------------------
+    pg_entry = ptxexec.run_lines(P['pre_guard'], sym,
+                               {('r', i): v for i, v in pp.r.items()} |
+                               {('rd', i): v for i, v in pp.rd.items()} |
+                               {('p', i): v for i, v in pp.p.items()})
+    gpe = pg_entry.p[pidx]
+    ptx_skip = Not(gpe) if neg else gpe
     if sp_bra:
         m = re.fullmatch(r'(?:@(!?)P(\d+)\s+)?BRA\s+`\(\.L_\w+\)', sp_bra[0][1])
         eneg, epid = (m.group(1) == '!'), int(m.group(2))
         ec = sprol.P.get(epid, Bool(f'sass_undef_P{epid}'))
         sass_skip = Not(ec) if eneg else ec
-        pg_entry = ptxexec.run_lines(P['pre_guard'], sym,
-                                     {('r', i): v for i, v in pp.r.items()})
-        gpe = pg_entry.p[pidx]
-        ptx_skip = Not(gpe) if neg else gpe
         r = prove(sass_skip == ptx_skip); n += 1
         if r != 'unsat': return 'UNPROVED', f'ENTRY: zero-trip guards disagree: {r}', n
         if verbose: print('  ENTRY ok  (same zero-trip decision)')
+    else:
+        # A missing guard means that SASS executes its body at least once. It
+        # is equivalent to PTX only if the source cannot take the zero-trip
+        # exit. Never omit this obligation merely because the branch is absent.
+        r = prove(Not(ptx_skip)); n += 1
+        if r != 'unsat':
+            return 'UNPROVED', f'ENTRY: missing SASS zero-trip guard: {r}', n
+        if verbose: print('  ENTRY ok  (PTX cannot run zero iterations)')
 
     # ---- STORES after the loop -------------------------------------------
     if len(pe.stores) != len(se.stores):

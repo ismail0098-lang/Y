@@ -1,6 +1,6 @@
 //! `exact_pv` is the one kernel with BOTH a Rocq proof and a validated SASS.
 //!
-//! `proofs/ExactPvExact.v` proves what the emitted PTX computes;
+//! `proofs/ExactPvExact.v` proves a conditional mathematical model of the PTX;
 //! `tools/ptxas_tval/loopval.py` validates that PTX against the SASS `ptxas`
 //! produced from it. Until this file those two sets were DISJOINT -- every
 //! kernel the validator had a standing result for carried no proof, and the
@@ -11,6 +11,9 @@
 //! it, in both directions.
 //!
 //! FOUR JOBS, and the first is the seam.
+//! These opcode/domain assertions are supplementary: the fixed full-subject
+//! identity gate in `exact_pv_artifact_binding.rs` now checks every instruction
+//! and operand. The model-to-subject transcription still requires review.
 //!
 //!   1. The TRANSCRIPTION tie. `ptx_emitter.rs` does not go through the `Ix`
 //!      extraction layer, so nothing renders the proof and the kernel from one
@@ -363,7 +366,7 @@ fn the_tval_doc_credits_no_kernel_with_a_proof_it_does_not_have() {
 /// **The defect exactly, which the existence gate above does NOT catch.** The
 /// original line did not credit a kernel with a proof that did not exist in
 /// general -- it credited it with a COUNT, "three Rocq files", and `exact_pv`
-/// now has one. So reverting that prose leaves the existence gate green. Any
+/// now has dedicated proofs. Reverting that prose leaves the existence gate green. Any
 /// sentence attributing a NUMBER of Rocq files to a kernel must state the
 /// number of files in `proofs/` that name it.
 #[test]
@@ -423,6 +426,9 @@ mod device {
     use y::cuda_runtime::CudaContext;
 
     /// One launch of `exact_pv` at `b = q = d = 0`, `V` all ones.
+    /// These probes intentionally exercise inputs outside the exactness
+    /// theorem through the ordinary driver JIT. Verified, in-domain execution
+    /// is tested via a bound cubin in `ptx_exact_pv.rs`.
     fn run(
         ctx: &CudaContext,
         ptx: &str,

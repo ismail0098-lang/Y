@@ -1,0 +1,14 @@
+Original worker defaults accepted
+Custom worker counters accepted
+Mismatched calls_per_round rejected
+Mismatched audit_calls rejected
+Mismatched rounds rejected
+End-to-end CPU fixture: calls=1000, rounds=41; arguments, metadata, report verified
+End-to-end CPU fixture: calls=100, rounds=41; arguments, metadata, report verified
+End-to-end CPU fixture: calls=1000, rounds=15; arguments, metadata, report verified
+End-to-end CPU fixture: calls=100, rounds=15; arguments, metadata, report verified
+Parser rejects --calls 0
+Parser rejects --calls 1000001
+Parser rejects --rounds 2
+Parser rejects --rounds 10001
+13 CPU-only checks passed; no CUDA kernels or system metadata commands invoked.

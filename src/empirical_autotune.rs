@@ -47,6 +47,7 @@
 // ============================================================
 
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::autotuner::AutotuneCandidate;
@@ -56,9 +57,10 @@ use crate::parser::Parser;
 use crate::ptx_emitter::PtxEmitter;
 use crate::sentinel::HardwareProfile;
 
-/// Sustained-load seconds before any measurement is taken. See this module's
-/// header comment - without it the same kernel has been observed to measure
-/// anywhere in a 9x band purely from clock state.
+/// Sustained-load seconds before measurements used to replace a kernel. See
+/// this module's header comment - without it the same kernel has been observed
+/// to measure anywhere in a 9x band purely from clock state. Adaptive tuning
+/// may first use a short screen to retain its incumbent without this ramp.
 const RAMP_SECONDS: f64 = 3.0;
 
 /// Interleaved rounds in the cheap screening pass and in the final pass.
@@ -105,12 +107,12 @@ const CORRECTNESS_SAMPLES: usize = 48;
 const SEED_A: u64 = 0xA5A5_1234_5678_9ABC;
 const SEED_B: u64 = 0xB1B1_0FED_CBA9_8765;
 
-const PROBE_KERNEL: &str = "y_autotune_probe";
+pub(crate) const PROBE_KERNEL: &str = "y_autotune_probe";
 
 /// Launch geometry read back out of the emitted PTX, so the launch is
 /// guaranteed to match what the kernel was compiled for rather than being a
 /// second, independently derived guess that can silently drift from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LaunchConfig {
     pub grid_x: u32,
     pub grid_y: u32,
@@ -204,14 +206,15 @@ impl MeasuredCandidate {
     }
 }
 
-/// Why a shape could not be measured. Every variant is a fall-back-to-the-
-/// heuristic condition, not an error to propagate: the compiler must still
-/// produce a kernel on a machine with no GPU.
+/// Why a shape could not be measured. Resource and measurement failures may
+/// fall back to the incumbent. `BaselineIncorrect` instead reports a measured
+/// wrong answer: adaptive execution must stop using that kernel.
 #[derive(Debug)]
 pub enum TuneFailure {
     NoCudaDevice,
     NoUsableCandidate(String),
     Cuda(String),
+    BaselineIncorrect { relative_l2: f64 },
 }
 
 impl std::fmt::Display for TuneFailure {
@@ -220,6 +223,11 @@ impl std::fmt::Display for TuneFailure {
             TuneFailure::NoCudaDevice => write!(f, "no CUDA device/driver available"),
             TuneFailure::NoUsableCandidate(s) => write!(f, "no candidate compiled and verified: {}", s),
             TuneFailure::Cuda(s) => write!(f, "CUDA error: {}", s),
+            TuneFailure::BaselineIncorrect { relative_l2 } => write!(
+                f,
+                "baseline GEMM failed correctness checking (relative L2 error {:.3e}, limit {:.0e}); do not reuse it",
+                relative_l2, CORRECTNESS_REL_L2_TOL,
+            ),
         }
     }
 }
@@ -297,12 +305,108 @@ pub fn emit_candidate_ptx(
         let ast = parser
             .parse_program()
             .map_err(|e| format!("probe source failed to parse: {}", e))?;
+        let mut checker = crate::type_checker::TypeChecker::new();
+        checker.check_program(&ast);
+        let mut errors = checker.errors;
+        errors.extend(checker.linear_tracker.errors);
+        if !errors.is_empty() {
+            return Err(format!("probe source failed type checking: {}", errors.join("; ")));
+        }
         let mut emitter = PtxEmitter::new_with_profile(hw_profile);
-        Ok::<String, String>(emitter.emit_program(&ast, hw_profile))
+        let ptx = emitter.emit_program(&ast, hw_profile);
+        if !emitter.emit_errors.is_empty() {
+            return Err(format!("probe codegen failed: {}", emitter.emit_errors.join("; ")));
+        }
+        Ok::<String, String>(ptx)
     })?;
 
     let launch = parse_launch_config(&ptx, m, n)?;
     Ok((ptx, launch))
+}
+
+/// Selects up to `limit` distinct generated kernels in the caller's order.
+/// Put the baseline first to retain its identity when later requested stage
+/// counts clamp to the same kernel. The limit counts effective code and
+/// launch geometry, not requested configurations. Codegen failures propagate
+/// so an unusable baseline cannot silently disappear from the comparison.
+pub(crate) fn distinct_gemm_candidates(
+    m: u32,
+    n: u32,
+    k: u32,
+    hw_profile: &HardwareProfile,
+    candidates: &[AutotuneCandidate],
+    limit: usize,
+) -> Result<Vec<AutotuneCandidate>, String> {
+    let mut selected = Vec::with_capacity(limit.min(candidates.len()));
+    if limit == 0 {
+        return Ok(selected);
+    }
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !is_emittable(candidate, k) {
+            return Err(format!("{} is not emittable at K={}", describe(candidate), k));
+        }
+        let (ptx, launch) = emit_candidate_ptx(m, n, k, candidate, hw_profile)?;
+        if seen.insert(gemm_ptx_identity(&ptx, launch)) {
+            selected.push(candidate.clone());
+            if selected.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// Identity for the fixed GEMM probe generated above. Requested pipeline
+/// stages appear in comments even when they clamp to the same instructions.
+/// Keep directives, instructions, string literals and block comments intact;
+/// only line comments and surrounding/empty-line whitespace are ignored.
+/// Launch geometry must also match because it is parsed from those comments.
+fn gemm_ptx_identity(ptx: &str, launch: LaunchConfig) -> (String, LaunchConfig) {
+    let mut body = String::with_capacity(ptx.len());
+    let mut in_block_comment = false;
+    for line in ptx.lines() {
+        let bytes = line.as_bytes();
+        let mut in_string = false;
+        let mut end = bytes.len();
+        let mut i = 0;
+        while i < bytes.len() {
+            if in_block_comment {
+                if bytes[i..].starts_with(b"*/") {
+                    in_block_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if in_string {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else {
+                    if bytes[i] == b'"' {
+                        in_string = false;
+                    }
+                    i += 1;
+                }
+            } else if bytes[i..].starts_with(b"//") {
+                end = i;
+                break;
+            } else if bytes[i..].starts_with(b"/*") {
+                in_block_comment = true;
+                i += 2;
+            } else {
+                if bytes[i] == b'"' {
+                    in_string = true;
+                }
+                i += 1;
+            }
+        }
+        let code = line[..end].trim();
+        if !code.is_empty() {
+            body.push_str(code);
+            body.push('\n');
+        }
+    }
+    (body, launch)
 }
 
 /// Recovers grid/block/dynamic-shared-memory from the emitter's own
@@ -366,19 +470,15 @@ fn field_between(haystack: &str, start: &str, end: &str) -> Option<String> {
 
 // ── device-side probe harness ──────────────────────────────
 
-/// Owns the CUDA context and the A/B/C buffers every candidate for one
-/// (M, N, K) shares.
-///
-/// Field order matters: `DeviceBuffer` frees through a copy of the driver
-/// table and must be dropped while the context is still alive, and Rust
-/// drops struct fields in declaration order.
-struct GemmProbe {
+/// Owns the A/B/C scratch buffers every candidate for one (M, N, K)
+/// shares. The borrowed context outlives the probe and all its buffers.
+struct GemmProbe<'ctx> {
     a: DeviceBuffer,
     /// Several distinct copies of B, rotated across launches. See
     /// `plan_weight_replicas`.
     b: Vec<DeviceBuffer>,
     c: DeviceBuffer,
-    ctx: CudaContext,
+    ctx: &'ctx CudaContext,
     m: u32,
     n: u32,
     k: u32,
@@ -438,10 +538,8 @@ fn plan_weight_replicas(b_bytes: usize, a_bytes: usize, c_bytes: usize, l2_bytes
     wanted.min(affordable.max(1))
 }
 
-impl GemmProbe {
-    fn new(m: u32, n: u32, k: u32) -> Result<Self, TuneFailure> {
-        let ctx = CudaContext::new().ok_or(TuneFailure::NoCudaDevice)?;
-
+impl<'ctx> GemmProbe<'ctx> {
+    fn new(ctx: &'ctx CudaContext, m: u32, n: u32, k: u32) -> Result<Self, TuneFailure> {
         let a_bytes = m as usize * k as usize * 2;
         let b_bytes = k as usize * n as usize * 2;
         let c_bytes = m as usize * n as usize * 4;
@@ -458,8 +556,8 @@ impl GemmProbe {
 
         let mut b = Vec::with_capacity(replicas);
         b.push(ctx.alloc(b_bytes).map_err(TuneFailure::Cuda)?);
-        fill_f16_buffer(&ctx, &a, m as usize * k as usize, SEED_A).map_err(TuneFailure::Cuda)?;
-        fill_f16_buffer(&ctx, &b[0], k as usize * n as usize, SEED_B).map_err(TuneFailure::Cuda)?;
+        fill_f16_buffer(ctx, &a, m as usize * k as usize, SEED_A).map_err(TuneFailure::Cuda)?;
+        fill_f16_buffer(ctx, &b[0], k as usize * n as usize, SEED_B).map_err(TuneFailure::Cuda)?;
         // Replicas only need to be DIFFERENT memory, not different data, so
         // they are cloned on-device rather than regenerated and re-uploaded.
         for _ in 1..replicas {
@@ -625,7 +723,66 @@ pub fn tune_gemm_f16(
     candidates: &[AutotuneCandidate],
     verbose: bool,
 ) -> Result<Vec<MeasuredCandidate>, TuneFailure> {
-    let probe = GemmProbe::new(m, n, k)?;
+    let ctx = CudaContext::new().ok_or(TuneFailure::NoCudaDevice)?;
+    match tune_gemm_f16_impl(&ctx, m, n, k, hw_profile, candidates, verbose, None, None)? {
+        AdaptiveGemmMeasurement::Confirmed(results) => Ok(results),
+        AdaptiveGemmMeasurement::Screened { .. } => {
+            unreachable!("the full autotuner never stops after adaptive screening")
+        }
+    }
+}
+
+/// Screening can justify keeping a verified incumbent, but it cannot justify
+/// replacing one. A distinct outcome prevents coarse challenger timings from
+/// accidentally being treated as finalists by the adaptive caller.
+pub(crate) enum AdaptiveGemmMeasurement {
+    Screened {
+        baseline_us: f64,
+        candidates_measured: usize,
+    },
+    Confirmed(Vec<MeasuredCandidate>),
+}
+
+/// Measures candidates using an existing current context and private scratch
+/// buffers. A cheap interleaved screen first checks whether any challenger
+/// could plausibly clear `min_improvement`; otherwise it retains the verified
+/// incumbent without paying for a clock ramp and final comparison. When only
+/// incumbent dispersion makes a challenger plausible, one additional short
+/// screen may resolve that ambiguity. Screening is a budget decision, not
+/// evidence that no faster kernel exists.
+///
+/// A plausible challenger gets the full clock ramp and repeated warm
+/// measurement. The incumbent is always included in that final interleaved
+/// pass, even when warm screening would otherwise remove it, so promotion
+/// compares kernels under the same measurement conditions.
+pub(crate) fn tune_gemm_f16_in_context(
+    ctx: &CudaContext,
+    m: u32,
+    n: u32,
+    k: u32,
+    hw_profile: &HardwareProfile,
+    candidates: &[AutotuneCandidate],
+    verbose: bool,
+    baseline: &AutotuneCandidate,
+    min_improvement: f64,
+) -> Result<AdaptiveGemmMeasurement, TuneFailure> {
+    tune_gemm_f16_impl(
+        ctx, m, n, k, hw_profile, candidates, verbose, Some(baseline), Some(min_improvement),
+    )
+}
+
+fn tune_gemm_f16_impl(
+    ctx: &CudaContext,
+    m: u32,
+    n: u32,
+    k: u32,
+    hw_profile: &HardwareProfile,
+    candidates: &[AutotuneCandidate],
+    verbose: bool,
+    baseline: Option<&AutotuneCandidate>,
+    adaptive_min_improvement: Option<f64>,
+) -> Result<AdaptiveGemmMeasurement, TuneFailure> {
+    let probe = GemmProbe::new(ctx, m, n, k)?;
     if verbose {
         let working_set = (m as usize * k as usize * 2)
             + (k as usize * n as usize * 2) * probe.b.len();
@@ -654,15 +811,17 @@ pub fn tune_gemm_f16(
     // ---- 1. compile every candidate, dedup identical codegen ----
     //
     // Candidates that differ only in requested `num_stages` frequently emit
-    // byte-identical PTX, because the emitter clamps the request against the
+    // identical PTX instructions, because the emitter clamps the request against the
     // real shared-memory budget and against `k_tiles`. Measuring the same
     // kernel three times under three different labels would waste most of
     // the tuning budget and make the ranking look more resolved than it is.
     let mut compiled: Vec<Compiled> = Vec::new();
-    let mut seen_ptx: Vec<u64> = Vec::new();
+    let mut seen_ptx = HashSet::new();
     let mut rejects: Vec<String> = Vec::new();
 
-    for cand in candidates {
+    // Compile the incumbent first so deduplicating identical PTX preserves
+    // its identity in the ranking rather than an equivalent requested tile.
+    for cand in baseline.into_iter().chain(candidates.iter()) {
         if !is_emittable(cand, k) {
             continue;
         }
@@ -674,8 +833,8 @@ pub fn tune_gemm_f16(
             }
         };
 
-        let digest = fnv1a64(ptx.as_bytes());
-        if seen_ptx.contains(&digest) {
+        let identity = gemm_ptx_identity(&ptx, launch);
+        if seen_ptx.contains(&identity) {
             continue;
         }
 
@@ -693,7 +852,7 @@ pub fn tune_gemm_f16(
             }
         }
 
-        seen_ptx.push(digest);
+        seen_ptx.insert(identity);
         compiled.push(Compiled { candidate: cand.clone(), launch, kernel });
     }
 
@@ -706,21 +865,76 @@ pub fn tune_gemm_f16(
     // ---- 2. correctness gate, before any timing is believed ----
     let mut verified: Vec<Compiled> = Vec::new();
     for c in compiled {
-        match probe.correctness_rel_l2(&c.kernel, &c.launch) {
-            Ok(err) if err <= CORRECTNESS_REL_L2_TOL => verified.push(c),
-            Ok(err) => rejects.push(format!(
+        let error = match probe.correctness_rel_l2(&c.kernel, &c.launch) {
+            Ok(error) => error,
+            Err(e) => {
+                rejects.push(format!("{} -> correctness check: {}", describe(&c.candidate), e));
+                continue;
+            }
+        };
+        require_correct_baseline(error, baseline == Some(&c.candidate))?;
+        if error <= CORRECTNESS_REL_L2_TOL {
+            verified.push(c);
+        } else {
+            rejects.push(format!(
                 "{} -> INCORRECT (relative L2 error {:.3e} > {:.0e})",
                 describe(&c.candidate),
-                err,
+                error,
                 CORRECTNESS_REL_L2_TOL
-            )),
-            Err(e) => rejects.push(format!("{} -> correctness check: {}", describe(&c.candidate), e)),
+            ));
         }
     }
     if verified.is_empty() {
         return Err(TuneFailure::NoUsableCandidate(
             rejects.first().cloned().unwrap_or_else(|| "every candidate failed".into()),
         ));
+    }
+
+    let baseline_index = match baseline {
+        Some(candidate) => Some(verified.iter().position(|c| &c.candidate == candidate)
+            .ok_or_else(|| TuneFailure::NoUsableCandidate(format!(
+                "baseline {} could not be compiled and verified: {}",
+                describe(candidate),
+                rejects.first().map(String::as_str).unwrap_or("baseline is not emittable"),
+            )))?),
+        None => None,
+    };
+
+    // Adaptive maintenance need not spend seconds proving that it should keep
+    // the kernel it already uses. The numerical gate above still applies to
+    // every screened kernel, including the incumbent. Compare the challenger's
+    // best time to the incumbent's worst time: dispersion admits extra work
+    // instead of hiding a potentially useful replacement. This preliminary
+    // screen never supplies final timing for a promoted kernel.
+    let all: Vec<usize> = (0..verified.len()).collect();
+    if let Some(min_improvement) = adaptive_min_improvement {
+        let baseline_index = baseline_index.ok_or_else(|| {
+            TuneFailure::NoUsableCandidate("adaptive screening requires a verified baseline".into())
+        })?;
+        let mut preliminary = measure_round_robin(
+            &probe, &verified, &all, SCREEN_ROUNDS, SCREEN_BATCH_US,
+        ).map_err(TuneFailure::Cuda)?;
+        let mut retain = screen_retains_baseline(&preliminary, baseline_index, min_improvement)
+            .map_err(TuneFailure::Cuda)?;
+        if !retain && screen_needs_retry(&preliminary, baseline_index, min_improvement)
+            .map_err(TuneFailure::Cuda)?
+        {
+            // A slow incumbent outlier alone should not force seconds of
+            // further tuning. Give this ambiguous screen one more chance to
+            // settle, but preserve any first-pass best-to-best evidence of a
+            // useful challenger by going directly to full validation instead.
+            preliminary = measure_round_robin(
+                &probe, &verified, &all, SCREEN_ROUNDS, SCREEN_BATCH_US,
+            ).map_err(TuneFailure::Cuda)?;
+            retain = screen_retains_baseline(&preliminary, baseline_index, min_improvement)
+                .map_err(TuneFailure::Cuda)?;
+        }
+        if retain {
+            return Ok(AdaptiveGemmMeasurement::Screened {
+                baseline_us: preliminary[baseline_index].best_us,
+                candidates_measured: verified.len(),
+            });
+        }
     }
 
     // ---- 3. clock ramp ----
@@ -739,7 +953,6 @@ pub fn tune_gemm_f16(
     }
 
     // ---- 4. screening pass over everything ----
-    let all: Vec<usize> = (0..verified.len()).collect();
     let screen = measure_round_robin(&probe, &verified, &all, SCREEN_ROUNDS, SCREEN_BATCH_US)
         .map_err(TuneFailure::Cuda)?;
     let mut order: Vec<usize> = all.clone();
@@ -751,7 +964,7 @@ pub fn tune_gemm_f16(
     });
 
     // ---- 5. final pass over the survivors, more rounds, longer batches ----
-    let finalists: Vec<usize> = order.iter().take(FINALISTS).copied().collect();
+    let finalists = final_pass_indices(&order, baseline_index);
     let final_timing = measure_round_robin(&probe, &verified, &finalists, FINAL_ROUNDS, FINAL_BATCH_US)
         .map_err(TuneFailure::Cuda)?;
 
@@ -823,7 +1036,73 @@ pub fn tune_gemm_f16(
 
     // Winner first, so callers can keep taking `[0]`.
     results.swap(0, winner);
-    Ok(results)
+    Ok(AdaptiveGemmMeasurement::Confirmed(results))
+}
+
+/// An optimistic comparison for challengers: any candidate that could beat
+/// the slowest observed incumbent by the requested margin earns full warm
+/// validation. Clock ramp or noise therefore tends to increase tuning work.
+/// Invalid timing must fail maintenance, not become a cacheable retention.
+fn screen_retains_baseline(
+    screen: &[Timing],
+    baseline_index: usize,
+    min_improvement: f64,
+) -> Result<bool, String> {
+    if !min_improvement.is_finite() || !(0.0..1.0).contains(&min_improvement) {
+        return Err("adaptive screening requires min_improvement in [0, 1)".into());
+    }
+    let baseline = screen.get(baseline_index)
+        .ok_or_else(|| "adaptive screening has no baseline timing".to_string())?;
+    for timing in screen {
+        if !timing.best_us.is_finite()
+            || timing.best_us <= 0.0
+            || !timing.median_us.is_finite()
+            || timing.median_us < timing.best_us
+            || !timing.max_us.is_finite()
+            || timing.max_us < timing.median_us
+        {
+            return Err("adaptive screening returned invalid kernel timing".into());
+        }
+    }
+    let optimistic_limit = baseline.max_us * (1.0 - min_improvement);
+    Ok(!screen.iter().enumerate().any(|(index, timing)| {
+        index != baseline_index && timing.best_us < optimistic_limit
+    }))
+}
+
+/// Retry only when the incumbent's dispersion makes a challenger look
+/// promising. A best-to-best improvement deserves full validation immediately,
+/// even if a later short screen might fail to reproduce it.
+fn screen_needs_retry(
+    screen: &[Timing],
+    baseline_index: usize,
+    min_improvement: f64,
+) -> Result<bool, String> {
+    if screen_retains_baseline(screen, baseline_index, min_improvement)? {
+        return Ok(false);
+    }
+    let observed_limit = screen[baseline_index].best_us * (1.0 - min_improvement);
+    Ok(!screen.iter().enumerate().any(|(index, timing)| {
+        index != baseline_index && timing.best_us < observed_limit
+    }))
+}
+
+fn require_correct_baseline(relative_l2: f64, is_baseline: bool) -> Result<(), TuneFailure> {
+    if is_baseline && (!relative_l2.is_finite() || relative_l2 > CORRECTNESS_REL_L2_TOL) {
+        Err(TuneFailure::BaselineIncorrect { relative_l2 })
+    } else {
+        Ok(())
+    }
+}
+
+fn final_pass_indices(order: &[usize], baseline: Option<usize>) -> Vec<usize> {
+    let mut finalists: Vec<usize> = order.iter().take(FINALISTS).copied().collect();
+    if let Some(index) = baseline {
+        if !finalists.contains(&index) {
+            finalists.push(index);
+        }
+    }
+    finalists
 }
 
 /// Times every candidate `rounds` times, interleaved, with the starting
@@ -954,15 +1233,6 @@ pub fn describe(c: &AutotuneCandidate) -> String {
     )
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1304,240 @@ mod tests {
         assert!(src.contains("@tile(1024, 2048, 512)"));
         assert!(src.contains("A: GlobalMemory<F16>"));
         assert!(src.contains("C: GlobalMemory<F32>"));
+    }
+
+    #[test]
+    fn known_wrong_baseline_is_fatal_but_other_candidate_failures_are_not() {
+        for error in [CORRECTNESS_REL_L2_TOL * 2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                require_correct_baseline(error, true),
+                Err(TuneFailure::BaselineIncorrect { .. })
+            ));
+            assert!(require_correct_baseline(error, false).is_ok());
+        }
+        assert!(require_correct_baseline(0.0, true).is_ok());
+        assert!(require_correct_baseline(CORRECTNESS_REL_L2_TOL, true).is_ok());
+    }
+
+    fn screen_timing(best_us: f64, median_us: f64, max_us: f64) -> Timing {
+        Timing { best_us, median_us, max_us }
+    }
+
+    #[test]
+    fn adaptive_screen_keeps_the_baseline_when_no_challenger_clears_the_margin() {
+        let baseline = screen_timing(10.0, 10.0, 10.0);
+        let screen = [
+            screen_timing(9.5, 9.6, 9.7),
+            baseline,
+            screen_timing(12.0, 12.1, 12.2),
+        ];
+        assert!(screen_retains_baseline(&screen, 1, 0.05).unwrap());
+        assert!(screen_retains_baseline(&[baseline], 0, 0.05).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_sends_promising_challengers_to_full_validation() {
+        let screen = [
+            screen_timing(10.0, 10.0, 10.0),
+            screen_timing(9.0, 9.1, 9.2),
+        ];
+        assert!(!screen_retains_baseline(&screen, 0, 0.05).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_uses_dispersion_to_admit_ambiguous_challengers() {
+        let screen = [
+            screen_timing(10.0, 10.1, 11.0),
+            screen_timing(10.0, 10.1, 10.2),
+        ];
+        // Even a challenger tied with the incumbent's best time deserves a
+        // full comparison when the preliminary incumbent timing is noisy.
+        assert!(!screen_retains_baseline(&screen, 0, 0.05).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_retries_only_when_dispersion_makes_a_challenger_plausible() {
+        let ambiguous = [
+            screen_timing(10.0, 10.1, 11.0),
+            screen_timing(10.0, 10.1, 10.2),
+        ];
+        assert!(screen_needs_retry(&ambiguous, 0, 0.05).unwrap());
+        let settled = [
+            screen_timing(10.0, 10.0, 10.0),
+            screen_timing(10.0, 10.1, 10.2),
+        ];
+        assert!(!screen_needs_retry(&settled, 0, 0.05).unwrap());
+        assert!(screen_retains_baseline(&settled, 0, 0.05).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_preserves_a_clear_first_pass_gain_without_retrying() {
+        let screen = [
+            screen_timing(10.0, 10.1, 11.0),
+            screen_timing(9.0, 9.1, 9.2),
+        ];
+        assert!(!screen_retains_baseline(&screen, 0, 0.05).unwrap());
+        assert!(!screen_needs_retry(&screen, 0, 0.05).unwrap());
+        // The distinction follows the configured margin rather than a fixed
+        // percentage: this smaller gain still goes straight to validation.
+        let small_gain = [screen[0], screen_timing(9.99, 10.0, 10.1)];
+        assert!(screen_needs_retry(&small_gain, 0, 0.05).unwrap());
+        assert!(!screen_needs_retry(&small_gain, 0, 0.0).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_honors_the_configured_improvement_threshold() {
+        let screen = [
+            screen_timing(10.0, 10.0, 10.0),
+            screen_timing(9.75, 9.75, 9.75),
+        ];
+        assert!(screen_retains_baseline(&screen, 0, 0.05).unwrap());
+        assert!(!screen_retains_baseline(&screen, 0, 0.01).unwrap());
+        assert!(!screen_retains_baseline(&screen, 0, 0.0).unwrap());
+    }
+
+    #[test]
+    fn adaptive_screen_rejects_invalid_timing_instead_of_caching_a_decision() {
+        let baseline = screen_timing(10.0, 10.0, 10.0);
+        for invalid in [
+            screen_timing(f64::NAN, 10.0, 10.0),
+            screen_timing(0.0, 10.0, 10.0),
+            screen_timing(-1.0, 10.0, 10.0),
+            screen_timing(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+            screen_timing(10.0, f64::NAN, 10.0),
+            screen_timing(10.0, 9.0, 10.0),
+            screen_timing(10.0, 10.0, 9.0),
+            screen_timing(10.0, 10.0, f64::INFINITY),
+        ] {
+            assert!(screen_retains_baseline(&[baseline, invalid], 0, 0.05).is_err());
+            assert!(screen_retains_baseline(&[invalid, baseline], 0, 0.05).is_err());
+            assert!(screen_needs_retry(&[baseline, invalid], 0, 0.05).is_err());
+        }
+        assert!(screen_retains_baseline(&[], 0, 0.05).is_err());
+        assert!(screen_retains_baseline(&[baseline], 1, 0.05).is_err());
+        for invalid in [f64::NAN, f64::INFINITY, -0.01, 1.0] {
+            assert!(screen_retains_baseline(&[baseline], 0, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn adaptive_final_pass_keeps_a_screened_out_baseline() {
+        let order = [4, 3, 2, 1, 5, 6, 0];
+        assert_eq!(final_pass_indices(&order, Some(0)), vec![4, 3, 2, 1, 5, 0]);
+        assert_eq!(final_pass_indices(&order, Some(2)), vec![4, 3, 2, 1, 5]);
+        assert_eq!(final_pass_indices(&order, None), vec![4, 3, 2, 1, 5]);
+    }
+
+    #[test]
+    fn candidate_codegen_still_accepts_a_type_checked_gemm() {
+        let hw = HardwareProfile::default();
+        let (ptx, launch) = emit_candidate_ptx(64, 64, 32, &cand(32, 32, 32, 2, 1, 2), &hw)
+            .expect("the generated GEMM probe must pass the real frontend and emitter");
+        assert!(ptx.contains(PROBE_KERNEL));
+        assert_eq!(launch.grid_x, 2);
+        assert_eq!(launch.grid_y, 2);
+        assert_eq!(launch.threads, 64);
+    }
+
+    #[test]
+    fn distinct_budget_skips_k_clamped_stages_and_preserves_ranked_order() {
+        let hw = HardwareProfile { max_smem_per_sm_bytes: 102_400, ..HardwareProfile::default() };
+        let baseline = cand(32, 32, 32, 2, 1, 3);
+        let duplicate = cand(32, 32, 32, 2, 1, 4);
+        let next_tile = cand(64, 32, 32, 2, 1, 2);
+        let later_tile = cand(32, 64, 32, 2, 1, 2);
+        let (a, a_launch) = emit_candidate_ptx(128, 128, 64, &baseline, &hw).unwrap();
+        let (b, b_launch) = emit_candidate_ptx(128, 128, 64, &duplicate, &hw).unwrap();
+        assert!(a.contains("2 used after k_tiles/smem clamping"));
+        assert_ne!(a, b, "requested stages still differ in the diagnostic comments");
+        assert_eq!(gemm_ptx_identity(&a, a_launch), gemm_ptx_identity(&b, b_launch));
+
+        let candidates = [baseline.clone(), duplicate, next_tile.clone(), later_tile];
+        assert_eq!(
+            distinct_gemm_candidates(128, 128, 64, &hw, &candidates, 2).unwrap(),
+            vec![baseline, next_tile],
+            "the budget must reach the next distinct tile without replacing the baseline",
+        );
+    }
+
+    #[test]
+    fn distinct_budget_skips_shared_memory_clamped_stages() {
+        let hw = HardwareProfile { max_smem_per_sm_bytes: 49_152, ..HardwareProfile::default() };
+        let baseline = cand(128, 128, 32, 2, 2, 4);
+        let candidates = [baseline.clone(), cand(128, 128, 32, 2, 2, 3)];
+        let (ptx, _) = emit_candidate_ptx(128, 128, 512, &baseline, &hw).unwrap();
+        assert!(ptx.contains("2 used after k_tiles/smem clamping"));
+        assert_eq!(
+            distinct_gemm_candidates(128, 128, 512, &hw, &candidates, 4).unwrap(),
+            vec![baseline],
+        );
+    }
+
+    #[test]
+    fn distinct_budget_retains_effective_stage_differences() {
+        let hw = HardwareProfile { max_smem_per_sm_bytes: 102_400, ..HardwareProfile::default() };
+        let candidates = [cand(32, 32, 32, 2, 1, 2), cand(32, 32, 32, 2, 1, 3)];
+        assert_eq!(
+            distinct_gemm_candidates(128, 128, 512, &hw, &candidates, 4).unwrap(),
+            candidates.to_vec(),
+            "stage counts with different generated instructions are separate candidates",
+        );
+    }
+
+    #[test]
+    fn distinct_budget_handles_empty_limits_and_propagates_codegen_errors() {
+        let hw = HardwareProfile::default();
+        let valid = cand(32, 32, 32, 2, 1, 2);
+        let invalid = cand(16, 16, 32, 2, 2, 2);
+        assert!(distinct_gemm_candidates(64, 64, 32, &hw, &[], 4).unwrap().is_empty());
+        assert!(distinct_gemm_candidates(0, 0, 0, &hw, &[invalid.clone()], 0).unwrap().is_empty());
+        assert!(distinct_gemm_candidates(64, 64, 32, &hw, &[invalid, valid.clone()], 2).is_err());
+        let expected_error = emit_candidate_ptx(0, 64, 32, &valid, &hw).unwrap_err();
+        assert_eq!(
+            distinct_gemm_candidates(0, 64, 32, &hw, &[valid.clone()], 1).unwrap_err(),
+            expected_error,
+        );
+        // Stop at the requested budget; unused candidates are not emitted.
+        assert_eq!(
+            distinct_gemm_candidates(64, 64, 32, &hw, &[valid.clone(), cand(0, 0, 0, 0, 0, 0)], 1)
+                .unwrap(),
+            vec![valid],
+        );
+    }
+
+    #[test]
+    fn gemm_identity_ignores_line_comments_but_keeps_code_and_literals() {
+        let launch = LaunchConfig { grid_x: 1, grid_y: 1, threads: 64, dyn_smem_bytes: 4096 };
+        let bare = ".version 8.4\nmov.u32 %r0, 1;\n";
+        let commented = "// stages 4\n\n  .version 8.4 // version\n  mov.u32 %r0, 1; // value\n";
+        assert_eq!(gemm_ptx_identity(bare, launch), gemm_ptx_identity(commented, launch));
+        assert_ne!(
+            gemm_ptx_identity(bare, launch),
+            gemm_ptx_identity(".version 8.4\nmov.u32 %r0, 2;\n", launch),
+        );
+        assert_ne!(
+            gemm_ptx_identity(bare, launch),
+            gemm_ptx_identity(".version 8.5\nmov.u32 %r0, 1;\n", launch),
+        );
+        let quoted = r#".file 1 "source//quoted\"//name.ptx""#;
+        assert_eq!(gemm_ptx_identity(quoted, launch).0, format!("{}\n", quoted));
+        let block = "/* keep // inside block\n// still inside */ mov.u32 %r0, 1;";
+        assert_eq!(gemm_ptx_identity(block, launch).0, format!("{}\n", block));
+    }
+
+    #[test]
+    fn gemm_identity_keeps_each_launch_requirement() {
+        let launch = LaunchConfig { grid_x: 1, grid_y: 1, threads: 64, dyn_smem_bytes: 4096 };
+        let ptx = "ret;";
+        let baseline = gemm_ptx_identity(ptx, launch);
+        for changed in [
+            LaunchConfig { grid_x: 2, ..launch },
+            LaunchConfig { grid_y: 2, ..launch },
+            LaunchConfig { threads: 128, ..launch },
+            LaunchConfig { dyn_smem_bytes: 8192, ..launch },
+        ] {
+            assert_ne!(baseline, gemm_ptx_identity(ptx, changed));
+        }
     }
 
     #[test]

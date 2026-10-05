@@ -9,6 +9,13 @@ toolchain.
 The project is under active, single-developer development. It is a research
 compiler, not a production toolchain.
 
+An opt-in [adaptive GPU JIT runtime](docs/adaptive_jit.md) now caches compiled
+FP16 GEMMs and tunes repeatedly used shapes. Rust, C, and Python APIs provide
+warmup preparation and defers tuning to explicit maintenance calls by default. Optional
+disk persistence reuses successful decisions across runs; ordinary compiler
+behavior is unchanged.
+Try `cargo run --release --example adaptive_gemm` on an NVIDIA sm_80+ GPU.
+
 ---
 
 ## How to read the numbers in this file
@@ -89,7 +96,7 @@ repository's own investigation documents contradict.
   read-back validates while its wrong twins are refuted with a counterexample.
   **And a nest validator** (`nestval.py`) takes the first kernel with nested
   loops through: `y_cpu_matmul` at `-O1` — three loops, a store in the middle one
-  — validates at 17 obligations, and each of its seven wrong twins, plus a loop that
+  — validates with positive proof obligations, and each of its seven wrong twins, plus a loop that
   forgets the previous iteration's store, is refuted at the obligation its
   mutation breaks.
   **The u32 division is validated without being assumed**: `ptxas` computes it
@@ -102,10 +109,10 @@ repository's own investigation documents contradict.
   that differs only at division by zero validates, because the PTX ISA leaves
   that result unspecified.
   [Details](docs/ptxas_translation_validation.md).
-- **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
-  compiler ships its own BN254 field arithmetic and its own JSON reader. The
-  arkworks crates are `[dev-dependencies]` and are used as an *independent
-  oracle* in tests — nothing in the `Y` binary links them.
+- **One direct library dependency.** `sha2` checks the identity of validated
+  `exact_pv` cubins before loading. The compiler ships its own BN254 field
+  arithmetic and JSON reader. The arkworks crates are `[dev-dependencies]`
+  and provide an *independent oracle* in tests — the `Y` binary does not link them.
 
 **Not real, and previously presented as if it were:**
 
@@ -243,8 +250,8 @@ matters more than any single row below:
 |---|---|---|---|
 | **CPU exact GEMM** (`vpdpwssd`) | **End to end**: the threaded, tiled, row- or K-split kernel holds the source dot products. The operand licence is checked exhaustively over int16, and a compilation emits its own certificate. | not applicable | `vpdpwssd`'s semantics (pinned on hardware, not proved); the ordering `pthread_join` imposes (ThreadSanitizer, dynamic); everything below the LLVM IR |
 | **Exact int8 attention** | Launch schedule byte-identical to the proof; exact at every launch geometry and every order the atomics land; a proved softmax error bound. Certificate emitted. | **no** | `ptxas` is trusted; `KFix` is not checked at the launch boundary; the int8 `V` quantisation is not modelled |
-| **int8 tensor-core GEMM** | Schedule (block-size guard, grid stride) *and* the value: exact in int32, with the emitter refusing `K > 133,120` | **no** — opcode and loop-structure gaps | the proof-to-code tie is transcription plus a gate, not extraction; no shared-memory staging (0.40x cuBLASLt) |
-| **`exact_pv`** | Holds the source dot product; both its ceilings stated | **yes, at `-O1`** | **the one kernel both proved and validated**; `-O2`/`-O3` unroll and are not matched; neither ceiling is checked at launch |
+| **int8 tensor-core GEMM** | Schedule (block-size guard, grid stride) *and* the value: exact in int32, with the emitter refusing `K > 131,040` | **no** — opcode and loop-structure gaps | the proof-to-code tie is transcription plus a gate, not extraction; no shared-memory staging (0.40x cuBLASLt) |
+| **`exact_pv`** | Conditional source-dot-product model; index and accumulator ceilings | **yes, at `-O1`**; checked execution loads the SHA-256-bound cubin directly | Checked Rust/Python launches enforce positive dimensions, ceilings, exact geometry, buffer and device contracts on `sm_89`; model-to-PTX transcription remains trusted; general `-O2`/`-O3` unroll is not matched |
 | **`y_cpu_matmul`** (three nested loops) | nothing | **yes, at `-O1`**, by the nest validator | the first multi-loop kernel validated; at `-O3` it has a SASS opcode gap and `-O2` up unroll |
 | **f16 / fp8 tensor-core GEMMs** | the warp tile partition only (an illegal tile is refused) | no | **the value carries no proof: 923 of the 925 `mma.sync` this repository emits are floating point** |
 
@@ -257,9 +264,12 @@ multiplier identity is assumed, and its float and memory facts are refereed on
 one card rather than proved. What it cannot reach today: more than one loop at
 the same level (every `SEQUENTIAL` and `MIXED` kernel), a store before a child
 loop in the same iteration, float conversions, and `-O2`/`-O3` unrolling — which
-leaves most of the corpus outside it. And it models
-no fault: a misaligned 16- or 32-bit access faults on the device and the model
-says nothing about that program.
+leaves most of the corpus outside it. Supported accesses now check widths and
+natural alignment, including dead vector lanes; this is not a general proof of
+memory safety. Straight-line `-O2`/`-O3` translations can validate. Loop validators
+check entry guards, full load traces and strict instruction parsing, and refuse
+uncomposed header or cross-thread effects. See the
+[current source audit](docs/verification/deep_audit_2026-10-03.md).
 
 **Outside the kernels.** The ZK backend's control-flow lowering is proved in Rocq
 over a model of the emitter, and its range, bit-decomposition, comparison and
@@ -1265,6 +1275,17 @@ loop compiled cleanly and printed "Compilation Successful!".
 is looked for at `Y_Z3_PATH`, on `PATH`, and at `venv/bin/z3`, `.venv/bin/z3`,
 `z3/build/z3`, `$HOME/.local/bin/z3`.
 
+The integer model also checks representability: every modeled arithmetic
+intermediate and stored result must fit its signed machine width. Division
+truncates toward zero and remainder has the dividend's sign, matching execution.
+The checker refuses unsupported unsigned semantics and loop-local shadowing.
+For-loop proofs require signed i32-representable bounds, a positive stable
+step, and preservation of the index's lower bound. An invariant such as
+`acc >= 0` alone cannot justify an increment at every signed integer value;
+relating it to a bounded loop index, for example `acc == i && i >= 0`, supplies
+the missing upper bound. These checks apply to the expressions modeled for the
+invariant, rather than constituting a proof of the whole program.
+
 The SMT encoding itself was unsound until recently. `trace_body_statements`
 ended in `_ => {}`, so a statement it did not model was skipped — and dropping a
 body's effects makes the preservation obligation strictly *easier*. The
@@ -1329,7 +1350,10 @@ sound and would also ban the shape every real pipelined kernel is built from.
 
 `src/cpu_gemm.rs` emits a tiled, packed, K-split, multi-threaded AVX-512
 `vpdpwssd` GEMM. It is **bit-identical** to the naive triple loop it replaces,
-and that is a theorem rather than a test result:
+and that is a theorem rather than a test result. The replacement is decided when
+the program runs: the packed kernel runs only when the call's three buffers do
+not overlap and their extents fit in 64 bits, and otherwise the loop nest runs
+as written. The theorem:
 
 ```coq
 (* proofs/ExactGemmWhole.v *)
@@ -1552,10 +1576,13 @@ ambiguity that has already bitten this file once.
 
 **The obligation bites, which is what separates a certificate from paperwork.**
 The kernel reduces into a 64-bit accumulator, so exactness needs
-`S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize`; the certificate states
+`S * 2^28 * 127 < 2^63`. Y decides that in `usize`; the certificate states
 it over `Z` and `coqc` decides it — two tools, no shared code, no shared
 representation, and a boundary **one unit wide**: emitted and accepted at
-`seq_len = 270,549,122`, refused by both at `270,549,123`.
+`seq_len = 270,549,121`, refused by both at `270,549,122`. The maximum weight
+is `exp(0) = 2^28`; using `2^28 - 1` previously made both tools accept an
+overflowing equal-score input. The regression now derives its term from the
+actual integer exponential.
 
 The capstone the trust boundary mirrors is the dependency **root**, measured
 rather than guessed — `AttentionSchedule` ← `GridStrideSplit` ←
@@ -1578,21 +1605,22 @@ exact at split factors 1, 2, 3, 8, 17 and 64.
 
 **Writing the theorem is what forced its missing hypothesis into the open.** The
 combine starts from whatever `C` already holds, so choosing that value is part
-of stating the theorem — and the licence `K · 127² ≤ i32::MAX` is sufficient
+of stating the theorem — and the licence `K · 128² ≤ i32::MAX` is sufficient
 only when `C` starts at **zero**. The emitter's comment says a caller must zero
 it; nothing connected that to the licence.
 
 That is not academic. This kernel *accumulates* into `C` — which is exactly what
 lets the grid split the contraction — so a caller who instead splits K across
 **launches** into the same int32 buffer is doing the obvious thing with that
-property. Measured, each launch at half the licensed maximum so **the compiler
-accepts every one of them**:
+property. Measured with every operand −128 and K=65,504 per launch (half the
+licensed maximum rounded down to a whole K step), **the compiler accepts
+every one of them**:
 
 | launch | `C[0]` | exact | |
 |---|---|---|---|
-| 1 | 1,073,546,240 | 1,073,546,240 | ok |
-| 2 | 2,147,092,480 | 2,147,092,480 | ok |
-| 3 | **−1,074,328,576** | 3,220,638,720 | **wrapped** |
+| 1 | 1,073,217,536 | 1,073,217,536 | ok |
+| 2 | 2,146,435,072 | 2,146,435,072 | ok |
+| 3 | **−1,075,314,688** | 3,219,652,608 | **wrapped** |
 
 Every launch individually licensed; the accumulation not. The refusal message
 now names the repair it was silent about, and the proof carries the hypothesis
@@ -1673,8 +1701,8 @@ are floating point.
 **Writing the capstone forces its hypotheses to be stated, and one of them did
 not exist anywhere in the compiler.** `mma...s32.s8.s8.s32` accumulates into
 int32, this kernel has no flush, and there is nowhere to widen to because the
-*output* is int32 too — so the whole contraction must satisfy `K · 127² ≤
-i32::MAX`, i.e. `K ≤ 133 120`. Nothing checked it: not the emitter, whose only
+*output* is int32 too — so the whole contraction must satisfy `K · 128² ≤
+i32::MAX`, i.e. `K ≤ 131 040` for full-range I8 operands. Nothing checked it: not the emitter, whose only
 refusal was on `M % 16` / `N % 8` / `K % 32`, not `proofs/`, not any test.
 
 Measured on the device before the guard existed, every operand 127:
@@ -2036,10 +2064,14 @@ reads through stores* below.
 The validator refuses on loop *structure*, independently of opcodes, so closing
 every opcode gap would leave a kernel refused for a reason nobody had measured.
 `loopgap.py` is that census — possible only because the validator refuses by
-name — and it takes **none of the 48** kernels with control flow. **25 of the 48
-refuse for one reason: more than one loop at one level** (25 on the PTX side, 0
-on the SASS), including all 23 tensor-core GEMMs, which have three loops. So
-"21–27 opcodes each" understates them.
+name — and it takes **none of the 48** kernels with control flow. **33 of the 48
+refuse for one reason: a loop body holds a cross-thread operation** (32 on the PTX
+side, 1 on the SASS) — a shared store, a barrier, an async copy or an `mma`
+inside a loop, whose effect on other threads the loop relation does not carry,
+refused by name since the 2026-10-03 source audit. That includes all 23
+tensor-core GEMMs, which also have three loops, so "21–27 opcodes each"
+understates them twice over. (Before the audit this read "25 of the 48 refuse
+for one reason: more than one loop at one level".)
 
 **That census asked ONE member of a two-member suite, and three different
 blockers were hiding behind its biggest bucket.** `loopval` handles one loop and
@@ -2088,9 +2120,11 @@ tensor-core item and the back-edge item share a blocker.
 > in as a fifth layer: four field kernels (`bn254_fr_mul_fast`, `bn254_g1_add`,
 > `bn254_g1_dbl`, `bn254_ntt4_fused`) that the four-layer census called clear, that
 > never validated, and that are past the wall.
-> 66 kernels, 103 distinct blockers and 6 clear at `-O3`; 106 and **9**
+> 66 kernels, 104 distinct blockers and 6 clear at `-O3`; 107 and **9**
 > at `-O1` (106 / 5 and 109 / 8 until the u32 division estimate was modelled,
-> which took `ptx_integer_ops` to clear).
+> which took `ptx_integer_ops` to clear; 103 and 106 until the PTX reader began
+> refusing a nested lexical scope, a new setup blocker for five coprocessor
+> kernels).
 >
 > **And that census was itself a LOWER BOUND, for eight increments.** It crossed
 > three layers — opcodes, loop structure, setup — and not the fourth:
@@ -2333,6 +2367,17 @@ list of **shapes to grep for in the next pass you write.**
 ## Building
 
 Requires: Rust toolchain, clang.
+
+The focused verification workflow runs the SMT, Coq, translation, PTXAS,
+artifact and workflow gates with strict prerequisite checks and retains JSON
+results, logs and fresh PTXAS artifacts. Add `--full` to include all workspace tests. See the
+[verification workflow guide](docs/verification/workflow.md) for prerequisites,
+partial runs and report formats.
+
+```bash
+python3 tools/verify.py
+python3 tools/verify.py --full
+```
 
 ```bash
 cargo build --release

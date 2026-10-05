@@ -144,11 +144,11 @@ checked against nothing.
 
 * **The sequence ceiling was recorded in a test comment and enforced nowhere.**
   `attention_ptx` pasted `head_dim` and `seq_len` into the template unexamined.
-  Past `2^63 / ((2^28 - 1) * 127)` the 64-bit accumulator wraps — a wrong
+  Past `(2^63 - 1) / (2^28 * 127)` the 64-bit accumulator wraps — a wrong
   answer, not an imprecise one, and the same failure mode as the prototype's
   `K >= 133,153` int32 wrap. It is derived and refused now, and the test
   re-derives it so a change to the weight scale or V's width has to move it.
-  Worth stating plainly: this ceiling is **270,549,122 keys**, not the
+  Worth stating plainly: this ceiling is **270,549,121 keys**, not the
   prototype's 264,208 tokens. That number comes from recombining in float64;
   this kernel recombines in integers, so the two limits are unrelated and
   quoting the smaller one for the compiler path would be wrong.

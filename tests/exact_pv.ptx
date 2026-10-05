@@ -45,7 +45,7 @@
     mov.u32 %r14, 0;
     mov.u32 %r15, %r0;
     $LOOP_START_0:
-    setp.ge.u32 %p0, %r14, %r15;
+    setp.ge.s32 %p0, %r14, %r15;
     @%p0 bra $LOOP_END_1;
     mov.u32 %r16, 0;
     add.s32 %r17, %r11, %r14;

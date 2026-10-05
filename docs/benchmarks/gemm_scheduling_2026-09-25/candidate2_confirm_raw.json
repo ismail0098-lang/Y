@@ -1,0 +1,1258 @@
+[
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "1b6cb0310c74fdb42e69e62e6cf3de8c2693fded14c00705c1da04f1c246030b",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 31.951729999999998,
+        "after_wall_us": 31.975839999999998,
+        "before_event_us": 32.02303886413574,
+        "after_event_us": 34.1484808921814
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 32.013940000000005,
+        "after_wall_us": 33.332950000000004,
+        "before_event_us": 31.93471908569336,
+        "after_event_us": 31.95744037628174
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 32.37524,
+        "after_wall_us": 32.22783999999999,
+        "before_event_us": 33.87392044067383,
+        "after_event_us": 32.1945595741272
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 35.51716999999999,
+        "after_wall_us": 32.22613,
+        "before_event_us": 32.191359996795654,
+        "after_event_us": 32.6144003868103
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 32.17153,
+        "after_wall_us": 36.61619,
+        "before_event_us": 32.24575996398926,
+        "after_event_us": 33.74079942703247
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 31.99643,
+        "after_wall_us": 32.22954,
+        "before_event_us": 32.430078983306885,
+        "after_event_us": 32.13248014450073
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 35.54788,
+        "after_wall_us": 31.991239999999998,
+        "before_event_us": 31.928319931030273,
+        "after_event_us": 31.996800899505615
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.02373,
+        "after_wall_us": 32.44764,
+        "before_event_us": 31.897599697113037,
+        "after_event_us": 33.87392044067383
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 31.980139999999995,
+        "after_wall_us": 34.96356,
+        "before_event_us": 32.40959882736206,
+        "after_event_us": 32.17439889907837
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 32.19534,
+        "after_wall_us": 32.20214,
+        "before_event_us": 34.835519790649414,
+        "after_event_us": 32.184319496154785
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.19764,
+        "after_wall_us": 32.20684,
+        "before_event_us": 32.16383934020996,
+        "after_event_us": 32.225279808044434
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 32.20874,
+        "after_wall_us": 34.034459999999996,
+        "before_event_us": 32.248640060424805,
+        "after_event_us": 32.21503973007202
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 32.205929999999995,
+        "after_wall_us": 33.630250000000004,
+        "before_event_us": 33.94560098648071,
+        "after_event_us": 32.133119106292725
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.34644,
+        "after_wall_us": 31.99993,
+        "before_event_us": 31.969280242919922,
+        "after_event_us": 32.02784061431885
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 31.95683,
+        "after_wall_us": 32.14383,
+        "before_event_us": 31.938560009002686,
+        "after_event_us": 34.5088005065918
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 32.24114,
+        "after_wall_us": 33.58125,
+        "before_event_us": 32.177278995513916,
+        "after_event_us": 32.23104000091553
+      }
+    ],
+    "trial": 0
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "70f60c086f07e8896933dc7dec63282baff296cfdd3a62d989e57b45bd723702",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1822.4256,
+        "after_wall_us": 1804.35595,
+        "before_event_us": 1787.4944686889648,
+        "after_event_us": 1774.742317199707
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1788.06425,
+        "after_wall_us": 1784.3122499999997,
+        "before_event_us": 1794.553565979004,
+        "after_event_us": 1791.3423538208008
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1808.4839500000003,
+        "after_wall_us": 1784.0062000000003,
+        "before_event_us": 1794.3376541137695,
+        "after_event_us": 1788.2095336914062
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1801.7848999999999,
+        "after_wall_us": 1782.1822,
+        "before_event_us": 1780.3264617919922,
+        "after_event_us": 1810.2272033691406
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1828.9391499999997,
+        "after_wall_us": 1791.0117500000001,
+        "before_event_us": 1779.591941833496,
+        "after_event_us": 1777.137565612793
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1809.2184499999998,
+        "after_wall_us": 1785.7002499999999,
+        "before_event_us": 1775.0991821289062,
+        "after_event_us": 1803.264045715332
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1799.1663500000002,
+        "after_wall_us": 1830.1377,
+        "before_event_us": 1791.6927337646484,
+        "after_event_us": 1818.5216903686523
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1823.76315,
+        "after_wall_us": 1797.9553499999997,
+        "before_event_us": 1793.6464309692383,
+        "after_event_us": 1798.2463836669922
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1797.2303500000003,
+        "after_wall_us": 1785.5247,
+        "before_event_us": 1806.8479537963867,
+        "after_event_us": 1788.2623672485352
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1811.07145,
+        "after_wall_us": 1788.7772499999999,
+        "before_event_us": 1776.1280059814453,
+        "after_event_us": 1781.7951202392578
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1816.81705,
+        "after_wall_us": 1797.38335,
+        "before_event_us": 1779.8656463623047,
+        "after_event_us": 1811.667251586914
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1820.4271,
+        "after_wall_us": 1807.22845,
+        "before_event_us": 1795.123291015625,
+        "after_event_us": 1768.2432174682617
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1787.60625,
+        "after_wall_us": 1803.7264,
+        "before_event_us": 1799.4623184204102,
+        "after_event_us": 1823.2000350952148
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1796.1883000000003,
+        "after_wall_us": 1824.69915,
+        "before_event_us": 1800.0192642211914,
+        "after_event_us": 1801.8815994262695
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1801.4674000000002,
+        "after_wall_us": 1815.5520500000002,
+        "before_event_us": 1814.7327423095703,
+        "after_event_us": 1790.4735565185547
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1798.25635,
+        "after_wall_us": 1788.87775,
+        "before_event_us": 1816.1151885986328,
+        "after_event_us": 1793.894386291504
+      }
+    ],
+    "trial": 0
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "1b6cb0310c74fdb42e69e62e6cf3de8c2693fded14c00705c1da04f1c246030b",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 31.78473,
+        "after_wall_us": 32.21914,
+        "before_event_us": 31.84607982635498,
+        "after_event_us": 31.795198917388916
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 31.77743,
+        "after_wall_us": 37.0954,
+        "before_event_us": 32.21280097961426,
+        "after_event_us": 31.890881061553955
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 38.2656,
+        "after_wall_us": 31.912529999999997,
+        "before_event_us": 37.47200012207031,
+        "after_event_us": 32.40959882736206
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 41.11213,
+        "after_wall_us": 36.01908,
+        "before_event_us": 32.14335918426514,
+        "after_event_us": 31.979520320892334
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 32.44124,
+        "after_wall_us": 41.10873000000001,
+        "before_event_us": 35.14143943786621,
+        "after_event_us": 32.17407941818237
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 34.099560000000004,
+        "after_wall_us": 32.147240000000004,
+        "before_event_us": 37.143681049346924,
+        "after_event_us": 32.45984077453613
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 36.68849,
+        "after_wall_us": 35.97617,
+        "before_event_us": 33.410561084747314,
+        "after_event_us": 36.45440101623535
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.43404,
+        "after_wall_us": 42.815149999999996,
+        "before_event_us": 33.22880029678345,
+        "after_event_us": 32.07168102264404
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 35.77208,
+        "after_wall_us": 31.72073,
+        "before_event_us": 37.52959966659546,
+        "after_event_us": 32.1945595741272
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 36.526489999999995,
+        "after_wall_us": 34.63476,
+        "before_event_us": 31.897599697113037,
+        "after_event_us": 36.15744113922119
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 32.36504,
+        "after_wall_us": 36.231680000000004,
+        "before_event_us": 31.91807985305786,
+        "after_event_us": 31.91807985305786
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 38.1368,
+        "after_wall_us": 31.821839999999998,
+        "before_event_us": 37.32480049133301,
+        "after_event_us": 34.35456037521362
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 31.87703,
+        "after_wall_us": 33.31895,
+        "before_event_us": 32.280640602111816,
+        "after_event_us": 31.836159229278564
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.26203,
+        "after_wall_us": 41.72294,
+        "before_event_us": 35.02079963684082,
+        "after_event_us": 31.846399307250977
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 40.616330000000005,
+        "after_wall_us": 31.70573,
+        "before_event_us": 31.846399307250977,
+        "after_event_us": 32.1126389503479
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 36.23309,
+        "after_wall_us": 33.23775,
+        "before_event_us": 31.67840003967285,
+        "after_event_us": 36.761600971221924
+      }
+    ],
+    "trial": 1
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "70f60c086f07e8896933dc7dec63282baff296cfdd3a62d989e57b45bd723702",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1908.81605,
+        "after_wall_us": 1874.1966999999997,
+        "before_event_us": 1874.113655090332,
+        "after_event_us": 1880.575942993164
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1850.7194,
+        "after_wall_us": 1878.7427,
+        "before_event_us": 1895.1120376586914,
+        "after_event_us": 1881.1904907226562
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1867.3530999999998,
+        "after_wall_us": 1861.5900000000001,
+        "before_event_us": 1865.0623321533203,
+        "after_event_us": 1873.7152099609375
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1850.8264,
+        "after_wall_us": 1885.3447499999997,
+        "before_event_us": 1889.1263961791992,
+        "after_event_us": 1861.2895965576172
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1863.57105,
+        "after_wall_us": 1840.5812999999998,
+        "before_event_us": 1861.4784240722656,
+        "after_event_us": 1865.0272369384766
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1849.0199,
+        "after_wall_us": 1895.71085,
+        "before_event_us": 1861.9840621948242,
+        "after_event_us": 1863.7823104858398
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1901.0374499999998,
+        "after_wall_us": 1853.34245,
+        "before_event_us": 1880.8319091796875,
+        "after_event_us": 1874.8416900634766
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1855.00445,
+        "after_wall_us": 1899.1694,
+        "before_event_us": 1872.1792221069336,
+        "after_event_us": 1899.8367309570312
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1881.11875,
+        "after_wall_us": 1848.3758999999998,
+        "before_event_us": 1871.553611755371,
+        "after_event_us": 1878.8703918457031
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1849.2089,
+        "after_wall_us": 1876.7412,
+        "before_event_us": 1867.1615600585938,
+        "after_event_us": 1883.135986328125
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1875.5042,
+        "after_wall_us": 1886.4942999999998,
+        "before_event_us": 1874.519920349121,
+        "after_event_us": 1863.8336181640625
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1856.216,
+        "after_wall_us": 1910.7245500000001,
+        "before_event_us": 1862.8608703613281,
+        "after_event_us": 1871.544075012207
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1881.0997499999999,
+        "after_wall_us": 1868.3081000000002,
+        "before_event_us": 1886.2592697143555,
+        "after_event_us": 1890.355110168457
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1873.51915,
+        "after_wall_us": 1908.411,
+        "before_event_us": 1902.5087356567383,
+        "after_event_us": 1891.0720825195312
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1864.4300499999997,
+        "after_wall_us": 1877.90075,
+        "before_event_us": 1863.475227355957,
+        "after_event_us": 1878.3744812011719
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1882.3387500000001,
+        "after_wall_us": 1944.2119000000002,
+        "before_event_us": 1885.90087890625,
+        "after_event_us": 1859.6031188964844
+      }
+    ],
+    "trial": 1
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "1b6cb0310c74fdb42e69e62e6cf3de8c2693fded14c00705c1da04f1c246030b",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.17063,
+        "after_wall_us": 41.07903,
+        "before_event_us": 32.66560077667236,
+        "after_event_us": 32.12415933609009
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 34.275859999999994,
+        "after_wall_us": 36.08368,
+        "before_event_us": 32.532479763031006,
+        "after_event_us": 32.54271984100342
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 32.41874,
+        "after_wall_us": 32.90745,
+        "before_event_us": 35.4201602935791,
+        "after_event_us": 42.444801330566406
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 36.24718,
+        "after_wall_us": 32.33154,
+        "before_event_us": 32.63488054275513,
+        "after_event_us": 32.268478870391846
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 35.63768,
+        "after_wall_us": 32.12473,
+        "before_event_us": 32.208640575408936,
+        "after_event_us": 32.124478816986084
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 39.78632,
+        "after_wall_us": 32.57084,
+        "before_event_us": 32.05120086669922,
+        "after_event_us": 35.13279914855957
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 35.45837,
+        "after_wall_us": 37.2517,
+        "before_event_us": 32.90879964828491,
+        "after_event_us": 32.46079921722412
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 41.39683,
+        "after_wall_us": 35.73357,
+        "before_event_us": 32.133119106292725,
+        "after_event_us": 32.778239250183105
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 32.16854,
+        "after_wall_us": 32.53334,
+        "before_event_us": 35.932159423828125,
+        "after_event_us": 34.11967992782593
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 35.680479999999996,
+        "after_wall_us": 32.156530000000004,
+        "before_event_us": 32.51904010772705,
+        "after_event_us": 32.12287902832031
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 42.04024,
+        "after_wall_us": 32.48964,
+        "before_event_us": 32.44992017745972,
+        "after_event_us": 32.50335931777954
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 32.546640000000004,
+        "after_wall_us": 32.962450000000004,
+        "before_event_us": 32.101759910583496,
+        "after_event_us": 35.259199142456055
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 35.17327,
+        "after_wall_us": 35.91888,
+        "before_event_us": 32.50080108642578,
+        "after_event_us": 32.276480197906494
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.45554,
+        "after_wall_us": 36.03488,
+        "before_event_us": 34.173760414123535,
+        "after_event_us": 32.057600021362305
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 37.23939,
+        "after_wall_us": 32.56624,
+        "before_event_us": 35.95263957977295,
+        "after_event_us": 35.96927881240845
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 36.05678,
+        "after_wall_us": 38.1131,
+        "before_event_us": 32.4403190612793,
+        "after_event_us": 32.069759368896484
+      }
+    ],
+    "trial": 2
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "70f60c086f07e8896933dc7dec63282baff296cfdd3a62d989e57b45bd723702",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1856.741,
+        "after_wall_us": 1852.01495,
+        "before_event_us": 1913.907241821289,
+        "after_event_us": 1896.4576721191406
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1847.4184,
+        "after_wall_us": 1856.2279999999998,
+        "before_event_us": 1878.4543991088867,
+        "after_event_us": 1898.1887817382812
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1885.2408,
+        "after_wall_us": 1856.9645,
+        "before_event_us": 1873.2463836669922,
+        "after_event_us": 1864.6608352661133
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1875.7891499999998,
+        "after_wall_us": 1893.1569,
+        "before_event_us": 1860.2336883544922,
+        "after_event_us": 1842.2784805297852
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1894.4833999999998,
+        "after_wall_us": 1874.9532,
+        "before_event_us": 1901.260757446289,
+        "after_event_us": 1867.6271438598633
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1880.37925,
+        "after_wall_us": 1906.68805,
+        "before_event_us": 1850.5632400512695,
+        "after_event_us": 1888.9728546142578
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1926.25675,
+        "after_wall_us": 1862.14405,
+        "before_event_us": 1871.2783813476562,
+        "after_event_us": 1923.1231689453125
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1902.4999500000001,
+        "after_wall_us": 1924.8156999999999,
+        "before_event_us": 1839.0016555786133,
+        "after_event_us": 1873.9200592041016
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1941.7374,
+        "after_wall_us": 1837.7098,
+        "before_event_us": 1808.9471817016602,
+        "after_event_us": 1815.2959823608398
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1823.85565,
+        "after_wall_us": 1815.0560999999998,
+        "before_event_us": 1818.4703826904297,
+        "after_event_us": 1803.264045715332
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1818.7391,
+        "after_wall_us": 1816.03305,
+        "before_event_us": 1883.064079284668,
+        "after_event_us": 1830.963134765625
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1823.6411500000002,
+        "after_wall_us": 1819.3276,
+        "before_event_us": 1820.4032897949219,
+        "after_event_us": 1832.9599380493164
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1824.0786500000002,
+        "after_wall_us": 1832.18075,
+        "before_event_us": 1806.7968368530273,
+        "after_event_us": 1835.6159210205078
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1844.55635,
+        "after_wall_us": 1844.1083999999998,
+        "before_event_us": 1850.111961364746,
+        "after_event_us": 1822.2591400146484
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1832.3182499999998,
+        "after_wall_us": 1898.1168999999998,
+        "before_event_us": 1823.232078552246,
+        "after_event_us": 1853.798484802246
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1853.46345,
+        "after_wall_us": 1854.5349999999999,
+        "before_event_us": 1822.310447692871,
+        "after_event_us": 1830.0416946411133
+      }
+    ],
+    "trial": 2
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 100,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 64, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 3, num_warps: 4 }",
+    "before_ptx_sha256": "127e95402ffdcc910fa0f715d37f56ed39e1e95385620b26ea548de462049f97",
+    "after_ptx_sha256": "1b6cb0310c74fdb42e69e62e6cf3de8c2693fded14c00705c1da04f1c246030b",
+    "reference_outputs": 128,
+    "total_outputs": 1048576,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "final_relative_l2": [
+      1.6789554537312256e-06,
+      1.6789554537312256e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 32.069939999999995,
+        "after_wall_us": 35.54018,
+        "before_event_us": 32.081921100616455,
+        "after_event_us": 34.48832035064697
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 32.55714,
+        "after_wall_us": 34.82016,
+        "before_event_us": 42.5984001159668,
+        "after_event_us": 34.549760818481445
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 36.98509,
+        "after_wall_us": 35.04146,
+        "before_event_us": 32.32127904891968,
+        "after_event_us": 32.90751934051514
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 32.15884,
+        "after_wall_us": 41.12613,
+        "before_event_us": 32.09216117858887,
+        "after_event_us": 35.32799959182739
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 32.53214,
+        "after_wall_us": 34.83677,
+        "before_event_us": 34.33471918106079,
+        "after_event_us": 34.1484808921814
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 36.17078,
+        "after_wall_us": 32.41974,
+        "before_event_us": 31.91807985305786,
+        "after_event_us": 39.19647932052612
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 33.92495,
+        "after_wall_us": 38.77439999999999,
+        "before_event_us": 32.38624095916748,
+        "after_event_us": 31.948800086975098
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 32.40294,
+        "after_wall_us": 31.91384,
+        "before_event_us": 39.42399978637695,
+        "after_event_us": 33.84320020675659
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 34.88467,
+        "after_wall_us": 34.03387,
+        "before_event_us": 32.0579195022583,
+        "after_event_us": 32.51807928085327
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 34.53817,
+        "after_wall_us": 40.75192,
+        "before_event_us": 32.51199960708618,
+        "after_event_us": 35.15392065048218
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 36.69018,
+        "after_wall_us": 32.03393,
+        "before_event_us": 34.92863893508911,
+        "after_event_us": 34.33471918106079
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 34.773669999999996,
+        "after_wall_us": 32.46384,
+        "before_event_us": 32.030720710754395,
+        "after_event_us": 39.44447994232178
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 33.87486,
+        "after_wall_us": 39.35262,
+        "before_event_us": 32.47103929519653,
+        "after_event_us": 35.03103971481323
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 32.483540000000005,
+        "after_wall_us": 32.02754,
+        "before_event_us": 34.303998947143555,
+        "after_event_us": 32.04096078872681
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 34.76677,
+        "after_wall_us": 32.49574,
+        "before_event_us": 34.52928066253662,
+        "after_event_us": 39.342079162597656
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 34.45406,
+        "after_wall_us": 36.161680000000004,
+        "before_event_us": 32.37760066986084,
+        "after_event_us": 32.027199268341064
+      }
+    ],
+    "trial": 3
+  },
+  {
+    "mode": "compare",
+    "shape": [
+      4096,
+      4096,
+      4096
+    ],
+    "device": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "calls_per_batch": 20,
+    "rounds": 16,
+    "warmup_seconds": 3,
+    "candidate": "AutotuneCandidate { cta_m: 128, cta_n: 128, cta_k: 32, warps_m: 2, warps_n: 2, num_stages: 2, num_warps: 4 }",
+    "before_ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+    "after_ptx_sha256": "70f60c086f07e8896933dc7dec63282baff296cfdd3a62d989e57b45bd723702",
+    "reference_outputs": 128,
+    "total_outputs": 16777216,
+    "bitwise_equal": true,
+    "initial_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "final_relative_l2": [
+      6.460013664659553e-06,
+      6.460013664659553e-06
+    ],
+    "raw": [
+      {
+        "round": 0,
+        "first": "before",
+        "before_wall_us": 1885.4233,
+        "after_wall_us": 1919.97915,
+        "before_event_us": 1849.6511459350586,
+        "after_event_us": 1870.911979675293
+      },
+      {
+        "round": 1,
+        "first": "after",
+        "before_wall_us": 1893.8029,
+        "after_wall_us": 1920.7241999999999,
+        "before_event_us": 1911.142349243164,
+        "after_event_us": 1911.244773864746
+      },
+      {
+        "round": 2,
+        "first": "before",
+        "before_wall_us": 1891.2984000000001,
+        "after_wall_us": 1899.563,
+        "before_event_us": 1889.5360946655273,
+        "after_event_us": 1876.5312194824219
+      },
+      {
+        "round": 3,
+        "first": "after",
+        "before_wall_us": 1901.8245,
+        "after_wall_us": 1930.9678,
+        "before_event_us": 1865.5231475830078,
+        "after_event_us": 1920.921516418457
+      },
+      {
+        "round": 4,
+        "first": "before",
+        "before_wall_us": 1893.5234,
+        "after_wall_us": 1936.8893500000001,
+        "before_event_us": 1863.9711380004883,
+        "after_event_us": 1887.3344421386719
+      },
+      {
+        "round": 5,
+        "first": "after",
+        "before_wall_us": 1846.3503999999998,
+        "after_wall_us": 2001.2579999999998,
+        "before_event_us": 1910.6143951416016,
+        "after_event_us": 2185.5743408203125
+      },
+      {
+        "round": 6,
+        "first": "before",
+        "before_wall_us": 1870.01165,
+        "after_wall_us": 1875.2102,
+        "before_event_us": 1909.5087051391602,
+        "after_event_us": 1906.8927764892578
+      },
+      {
+        "round": 7,
+        "first": "after",
+        "before_wall_us": 1803.8584500000002,
+        "after_wall_us": 1780.8292000000001,
+        "before_event_us": 1781.6448211669922,
+        "after_event_us": 1790.8592224121094
+      },
+      {
+        "round": 8,
+        "first": "before",
+        "before_wall_us": 1894.3074000000001,
+        "after_wall_us": 1905.6035,
+        "before_event_us": 1911.6031646728516,
+        "after_event_us": 1868.6464309692383
+      },
+      {
+        "round": 9,
+        "first": "after",
+        "before_wall_us": 1896.45295,
+        "after_wall_us": 1944.3494499999997,
+        "before_event_us": 1925.5615234375,
+        "after_event_us": 1876.2752532958984
+      },
+      {
+        "round": 10,
+        "first": "before",
+        "before_wall_us": 1908.76305,
+        "after_wall_us": 1797.9488500000002,
+        "before_event_us": 1831.0800552368164,
+        "after_event_us": 1796.6032028198242
+      },
+      {
+        "round": 11,
+        "first": "after",
+        "before_wall_us": 1892.6358500000001,
+        "after_wall_us": 1807.9945,
+        "before_event_us": 1873.6160278320312,
+        "after_event_us": 1841.4079666137695
+      },
+      {
+        "round": 12,
+        "first": "before",
+        "before_wall_us": 1893.2923999999998,
+        "after_wall_us": 1872.5817,
+        "before_event_us": 1875.3536224365234,
+        "after_event_us": 1903.4624099731445
+      },
+      {
+        "round": 13,
+        "first": "after",
+        "before_wall_us": 1864.3615999999997,
+        "after_wall_us": 1892.1943500000002,
+        "before_event_us": 1761.4879608154297,
+        "after_event_us": 1888.0159378051758
+      },
+      {
+        "round": 14,
+        "first": "before",
+        "before_wall_us": 1795.2983499999998,
+        "after_wall_us": 1903.587,
+        "before_event_us": 1845.452880859375,
+        "after_event_us": 1849.2416381835938
+      },
+      {
+        "round": 15,
+        "first": "after",
+        "before_wall_us": 1934.6123499999999,
+        "after_wall_us": 1911.9666000000002,
+        "before_event_us": 1905.0495147705078,
+        "after_event_us": 1868.2880401611328
+      }
+    ],
+    "trial": 3
+  }
+]

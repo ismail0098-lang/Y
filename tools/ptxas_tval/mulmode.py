@@ -12,6 +12,40 @@ def canon(kind, a, b):  # noqa
        so `a*b` on one side and `b*a` on the other become one DAG node"""
     if a.get_id() > b.get_id(): a, b = b, a
     return direct(kind, a, b)
+
+def ordered(a, b):
+    """A commutative UF receives the same operand VALUES in either order.
+
+    Sorting only expression IDs does not survive aliases or substitution:
+    MUL(a,b) and MUL(b,a+0) can become different UF calls even though their
+    concrete products agree. The unsigned value order is a total order of bit
+    patterns, so every concrete multiplication remains an interpretation of
+    this abstraction. Lexical orientation just makes syntactic swaps share a
+    node before the solver runs; it imposes no arithmetic assumption.
+    """
+    a, b = orient(a, b)
+    before = ULE(a, b)
+    return If(before, a, b), If(before, b, a)
+
+
+def orient(a, b):
+    """A deterministic order for two operands that does not depend on how the
+    terms were built - only on what they ARE.
+
+    `hash()` is z3's STRUCTURAL hash: equal for equal structure, in any context,
+    whatever the construction history, and O(1) because the node caches it.
+    Comparing `sexpr()` instead - the first version - prints both operands in
+    full on every commutative call; in a field kernel those are large shared
+    DAGs, and the census of `bn254_g1_add` went from 44 s to more than 17
+    minutes. `sexpr` survives only to break a hash TIE between different terms,
+    which is rare and keeps the order total."""
+    ha, hb = a.hash(), b.hash()
+    if ha != hb:
+        return (b, a) if ha > hb else (a, b)
+    if a.eq(b):
+        return a, b
+    return (b, a) if a.sexpr() > b.sexpr() else (a, b)
+
 def uf_factory():
     """multiply as an uninterpreted function: SOUND for proving equivalence
        (every concrete model is a model of the abstraction), so an `unsat`
@@ -39,7 +73,7 @@ def uf_factory():
             #    stays OPAQUE.  z3's simplifier distributes a literal multiply
             #    over a sum with no option to stop it, and these literals meet
             #    130-term sums: measured 202 -> 7059 nodes in one expression.
-        if a.get_id() > b.get_id(): a, b = b, a
+        a, b = ordered(a, b)
         return (LO if kind=='lo' else HI)(a, b)
     return f
 def wide_factory():
@@ -68,7 +102,7 @@ def wide_factory():
                 if kind == 'lo':
                     return a if k == 0 else a << BitVecVal(k, W)
                 return BitVecVal(0, W) if k == 0 else LShR(a, BitVecVal(W - k, W))
-        if a.get_id() > b.get_id(): a, b = b, a
+        a, b = ordered(a, b)
         p = M(a, b)
         return Extract(W-1, 0, p) if kind == 'lo' else Extract(2*W-1, W, p)
     return f

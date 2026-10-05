@@ -62,7 +62,7 @@ row "N3 iteration stores uncompared"    nestval.py "$(sub "\"self.compare_stores
 row "N4 ENTRY not posed"                nestval.py "$(sub "\"r = self.prove(sass_skip == ptx_skip)\"" "\"r = 'unsat'\"")"
 row "N5 LOOPCOND not posed"             nestval.py "$(sub "\"r = self.prove(sass_cont == nxt, [cont], axioms)\"" "\"r = 'unsat'\"")"
 row "N6 no commutativity instances"     nestval.py "$(sub "\"so.add(comm_instances([claim] + list(extra)))\"" "\"pass\"")"
-row "N7 EXIT-guard refusal removed"     nestval.py "$(sub "\"if ST['root']['gkind'] == 'exit' and (pe.stores or se.stores):\"" "\"if False:\"")"
+row "N7 EXIT-guard refusal removed"     nestval.py "$(sub "\"if ST['root']['gkind'] == 'exit' and (pe.stores or se.stores or pe.loads or se.loads):\"" "\"if False:\"")"
 row "N8 BASE not posed"                 nestval.py "$(sub "\"pairs = [(a, b) for a, b in pairs if self.prove(p_out(a, pp) == s_out(b, sp)) == 'unsat']\"" "\"pairs = list(pairs)\"")"
 # N8 against w3 SURVIVED the first sweep: the proposer simulates from the real
 # entry values, so an accumulator starting at 1 against 0 is never PROPOSED and

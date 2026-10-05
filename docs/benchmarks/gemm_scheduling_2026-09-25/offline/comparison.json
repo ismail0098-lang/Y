@@ -1,0 +1,188 @@
+{
+  "toolchain": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:45:21_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0\n",
+  "variants": {
+    "before": {
+      "ptx_sha256": "844011dcd001e2fcfff96a6b2e0a0dad3faa0b44f9fe6e9de5b64216f935d864",
+      "cubin_sha256": "208bcbed49514e4ca559971544a942af1656bf6a7e707eaa7092287a26d22dd4",
+      "normalized_sass_sha256": "6a908b3217219374e9f50eaab21f21f4688f29784997b9abab95fcc572dfc51c",
+      "instructions": 960,
+      "opcodes": {
+        "IMAD.MOV.U32": 14,
+        "S2UR": 2,
+        "ULDC": 1,
+        "I2F.U32.RP": 6,
+        "IMAD.SHL.U32": 24,
+        "S2R": 34,
+        "CS2R": 64,
+        "IMAD.MOV": 4,
+        "MUFU.RCP": 6,
+        "IADD3": 108,
+        "UIMAD": 1,
+        "LOP3.LUT": 37,
+        "F2I.FTZ.U32.TRUNC.NTZ": 6,
+        "IMAD": 115,
+        "IMAD.HI.U32": 21,
+        "ULDC.64": 1,
+        "ISETP.GE.U32.AND": 35,
+        "IMAD.IADD": 6,
+        "ISETP.NE.U32.AND": 4,
+        "SEL": 4,
+        "IMNMX.U32": 1,
+        "IMAD.U32": 36,
+        "ISETP.GT.U32.AND": 14,
+        "ISETP.LT.U32.AND": 26,
+        "IMAD.WIDE.U32": 18,
+        "LDGSTS.E.BYPASS.128": 16,
+        "SHF.R.U32.HI": 34,
+        "LDGDEPBAR": 2,
+        "DEPBAR.LE": 3,
+        "BAR.SYNC.DEFER_BLOCKING": 7,
+        "LDS": 3,
+        "LDSM.16.MT88.2": 16,
+        "LDSM.16.M88.4": 8,
+        "HMMA.16816.F32": 64,
+        "BRA": 38,
+        "WARPSYNC": 34,
+        "STS.64": 128,
+        "BSSY": 2,
+        "LDS.128": 2,
+        "STG.E.128": 2,
+        "BSYNC": 2,
+        "LEA": 1,
+        "EXIT": 1,
+        "NOP": 9
+      },
+      "ptxas_output": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'y_autotune_probe' for 'sm_89'\nptxas info    : Function properties for y_autotune_probe\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 220 registers, used 1 barriers, 376 bytes cmem[0]\nptxas info    : Compile time = 35.140 ms\n",
+      "resources": "\nResource usage:\n Common:\n  GLOBAL:0\n Function y_autotune_probe:\n  REG:220 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0\n"
+    },
+    "candidate": {
+      "ptx_sha256": "16657cd05e778676892e1c2bbccbc961a9d4aa00c2893ea86f159ffa92eaaa87",
+      "cubin_sha256": "1b0e9285cfaa7f997aed7f04419481f26bf32cf73525084d4f334991f2857baa",
+      "normalized_sass_sha256": "af385935753ea60c355bc216f10ee65d4d1c96ea205a54cffab610b01dbc3b5e",
+      "instructions": 960,
+      "opcodes": {
+        "IMAD.MOV.U32": 14,
+        "S2UR": 2,
+        "ULDC": 1,
+        "I2F.U32.RP": 6,
+        "IMAD.SHL.U32": 24,
+        "S2R": 34,
+        "CS2R": 64,
+        "IMAD.MOV": 4,
+        "MUFU.RCP": 6,
+        "IADD3": 108,
+        "UIMAD": 1,
+        "LOP3.LUT": 37,
+        "F2I.FTZ.U32.TRUNC.NTZ": 6,
+        "IMAD": 115,
+        "IMAD.HI.U32": 21,
+        "ULDC.64": 1,
+        "ISETP.GE.U32.AND": 35,
+        "IMAD.IADD": 6,
+        "ISETP.NE.U32.AND": 4,
+        "SEL": 4,
+        "IMNMX.U32": 1,
+        "IMAD.U32": 36,
+        "ISETP.GT.U32.AND": 14,
+        "ISETP.LT.U32.AND": 26,
+        "IMAD.WIDE.U32": 18,
+        "LDGSTS.E.BYPASS.128": 16,
+        "SHF.R.U32.HI": 34,
+        "LDGDEPBAR": 2,
+        "DEPBAR.LE": 3,
+        "BAR.SYNC.DEFER_BLOCKING": 7,
+        "LDS": 3,
+        "LDSM.16.MT88.2": 16,
+        "LDSM.16.M88.4": 8,
+        "HMMA.16816.F32": 64,
+        "BRA": 38,
+        "WARPSYNC": 34,
+        "STS.64": 128,
+        "BSSY": 2,
+        "LDS.128": 2,
+        "STG.E.128": 2,
+        "BSYNC": 2,
+        "LEA": 1,
+        "EXIT": 1,
+        "NOP": 9
+      },
+      "ptxas_output": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'y_autotune_probe' for 'sm_89'\nptxas info    : Function properties for y_autotune_probe\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 220 registers, used 1 barriers, 376 bytes cmem[0]\nptxas info    : Compile time = 27.510 ms\n",
+      "resources": "\nResource usage:\n Common:\n  GLOBAL:0\n Function y_autotune_probe:\n  REG:220 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0\n"
+    }
+  },
+  "normalized_instructions_identical": false,
+  "first_instruction_difference": {
+    "index": 289,
+    "before": "SHF.R.U32.HI R183, RZ, 0x1, R3",
+    "candidate": "SHF.R.U32.HI R184, RZ, 0x1, R3"
+  },
+  "opcode_order_identical": false,
+  "instruction_skeleton_order_identical": false,
+  "changed_instruction_count": 41,
+  "non_register_operand_or_order_change_count": 12,
+  "first_non_register_difference": {
+    "index": 314,
+    "before": "IMAD R13, R185, 0x20, R207",
+    "candidate": "IMAD R13, R185.reuse, 0x20, R207"
+  },
+  "global_register_rename_consistent": false,
+  "global_register_rename_conflicts": [
+    {
+      "index": 298,
+      "before": "R6",
+      "prior": "R6",
+      "now": "R5"
+    },
+    {
+      "index": 301,
+      "before": "R6",
+      "prior": "R6",
+      "now": "R5"
+    },
+    {
+      "index": 312,
+      "before": "R17",
+      "prior": "R17",
+      "now": "R16"
+    },
+    {
+      "index": 315,
+      "before": "R17",
+      "prior": "R17",
+      "now": "R16"
+    },
+    {
+      "index": 316,
+      "before": "R16",
+      "prior": "R16",
+      "now": "R18"
+    },
+    {
+      "index": 320,
+      "before": "R203",
+      "prior": "R203",
+      "now": "R206"
+    },
+    {
+      "index": 320,
+      "before": "R16",
+      "prior": "R16",
+      "now": "R13"
+    },
+    {
+      "index": 328,
+      "before": "R17",
+      "prior": "R17",
+      "now": "R16"
+    }
+  ],
+  "tensor_compute_instruction_range": {
+    "first_ldsm": 397,
+    "last_hmma": 486,
+    "count": 90
+  },
+  "tensor_compute_instructions_identical": true,
+  "all_instructions_from_first_ldsm_identical": true,
+  "raw_sass_including_encoded_control_from_first_ldsm_identical": true,
+  "raw_sass_from_first_ldsm_difference_count": 0
+}

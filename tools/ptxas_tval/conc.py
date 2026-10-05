@@ -120,6 +120,14 @@ class Conc:
         if k == Z3_OP_ULEQ:  return a[0] <= a[1]
         if k == Z3_OP_UGT:   return a[0] >  a[1]
         if k == Z3_OP_UGEQ:  return a[0] >= a[1]
+        # SIGNED orderings: the PTX emitter tests a loop's I32 bounds signed
+        # (`setp.ge.s32`), as the invariant verifier models them. Operands are
+        # held as unsigned bit patterns, so read each at its own width.
+        if k in (Z3_OP_SLT, Z3_OP_SLEQ, Z3_OP_SGT, Z3_OP_SGEQ):
+            sw = ch[0].size()
+            x, y = (v - (1 << sw) if (v >> (sw - 1)) & 1 else v for v in a)
+            return {Z3_OP_SLT: x < y, Z3_OP_SLEQ: x <= y,
+                    Z3_OP_SGT: x > y, Z3_OP_SGEQ: x >= y}[k]
         if k == Z3_OP_SELECT:
             arr = ch[0].decl().name()
             return self.env['__mem__'](arr, a[1])

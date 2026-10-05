@@ -137,6 +137,9 @@ def main():
         versions[tool] = capture([tool, flag], root, env).strip()
     before_hashes = source_hashes(root)
     test_hashes = {target: sha256(root / "tests" / f"{target}.rs") for target in TARGETS}
+    runner_hash = sha256(Path(__file__))
+    profile = root / ".ysu_hw_profile"
+    profile_hash = sha256(profile) if profile.exists() else None
     baseline = output / "original"
     baseline.mkdir()
     archive = output / "original.tar"
@@ -148,9 +151,10 @@ def main():
     for target in TARGETS:
         shutil.copy2(root / "tests" / f"{target}.rs", baseline / "tests")
         assert sha256(baseline / "tests" / f"{target}.rs") == test_hashes[target]
-    profile = root / ".ysu_hw_profile"
     if profile.exists():
         shutil.copy2(profile, baseline)
+        if sha256(baseline / profile.name) != profile_hash:
+            raise RuntimeError("Hardware profile changed while preparing the audit")
     (output / "production.patch").write_text(capture(
         ["git", "diff", "--binary", BASELINE, "--", "src", "crates/y-gpu",
          "Cargo.toml", "Cargo.lock"], root,
@@ -171,6 +175,13 @@ def main():
         raise RuntimeError("Compiler source changed during the audit")
     if test_hashes != {target: sha256(root / "tests" / f"{target}.rs") for target in TARGETS}:
         raise RuntimeError("Regression source changed during the audit")
+    if runner_hash != sha256(Path(__file__)):
+        raise RuntimeError("Audit runner changed during the audit")
+    for checkout in (root, baseline):
+        checkout_profile = checkout / profile.name
+        current_hash = sha256(checkout_profile) if checkout_profile.exists() else None
+        if current_hash != profile_hash:
+            raise RuntimeError(f"Hardware profile changed during the audit: {checkout_profile}")
     if results["original"].keys() != results["patched"].keys():
         raise RuntimeError("The two revisions ran different test cases")
     transitions = {
@@ -178,9 +189,9 @@ def main():
         for case in results["original"]
     }
     report = {"baseline": BASELINE, "tools": versions, "test_sha256": test_hashes,
-              "runner_sha256": sha256(Path(__file__)),
+              "runner_sha256": runner_hash,
               "source_sha256": before_hashes,
-              "profile_sha256": sha256(profile) if profile.exists() else None,
+              "profile_sha256": profile_hash,
               "results": results, "transitions": transitions}
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     counts = {transition: list(transitions.values()).count(transition)

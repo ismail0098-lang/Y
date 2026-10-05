@@ -89,7 +89,7 @@ run 'G3 FNEG is the identity'
 # --- ERROR at the first `sub.f32` rather than a silent revert to two terms.
 M <<'P'
 s=open('fpmode.py').read()
-i=s.index("        if name == 'FSUB':"); j=s.index("        if name == 'FADD' and len(args) == 2")
+i=s.index("        if name == 'FSUB':"); j=s.index("        if name in ('FADD', 'FMAX')", i)
 open('fpmode.py','w').write(s[:i]+s[j:])
 P
 run 'G4 the FSUB == FADD(a,FNEG(b)) rewrite deleted'

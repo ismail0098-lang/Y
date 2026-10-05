@@ -1,0 +1,3 @@
+   Compiling Y-compiler v1.0.0 (/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y)
+   Compiling y-gpu v0.1.0 (/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/crates/y-gpu)
+    Finished `release` profile [optimized] target(s) in 6.25s

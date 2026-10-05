@@ -1,0 +1,42 @@
+   Compiling Y-compiler v1.0.0 (/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/adaptive_jit_ffi_gpu.rs (target/debug/deps/adaptive_jit_ffi_gpu-f31afd19ab46b0e1)
+
+running 3 tests
+test c_abi_deferred_tuning_reuses_external_buffers_and_preserves_host_context ... ok
+test c_abi_rejects_missing_or_different_context_and_allows_close_retry ... ok
+test c_abi_rejects_other_threads_without_consuming_handle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+     Running tests/adaptive_jit_gpu.rs (target/debug/deps/adaptive_jit_gpu-03e458306c247c77)
+
+running 10 tests
+test a_second_context_on_the_same_device_is_rejected_without_switching ... ok
+test baseline_hot_tuning_and_reuse_match_cpu_with_ragged_rows ... ok
+test cold_shapes_remain_separate_and_evict_the_least_recently_used ... ok
+test disabled_tuning_reuses_prepared_kernels_without_pending_work ... ok
+test disk_cache_failures_leave_successfully_tuned_kernels_usable ... ok
+test persisted_decisions_reuse_across_runtimes_and_invalid_records_fall_back ... ok
+test preparation_updates_lru_and_eviction_removes_pending_work ... ok
+test prepared_deferred_shapes_tune_only_during_explicit_maintenance ... ok
+test rejected_shapes_and_null_or_unaligned_pointers_leave_no_cache_entries ... ok
+test tuning_failure_retains_the_working_baseline_and_does_not_retry ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.51s
+
+     Running tests/adaptive_jit_screening_gpu.rs (target/debug/deps/adaptive_jit_screening_gpu-c872353fb6ec26da)
+
+running 1 test
+test screened_baseline_stays_correct_and_persists_without_repeated_tuning ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/gemm_compute_schedule_gpu.rs (target/debug/deps/gemm_compute_schedule_gpu-301c54fde94df362)
+
+running 2 tests
+test fused_swiglu_pipelined_shared_compute_matches_full_cpu_reference ... ok
+test fused_swiglu_synchronous_shared_compute_matches_full_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+

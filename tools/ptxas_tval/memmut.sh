@@ -62,7 +62,7 @@ M(){ ./restore.sh >/dev/null; python3 - || echo "PATCH DID NOT APPLY" | tee -a "
 M <<'P'
 s=open('memorder.py').read()
 a="    extend = insert = pop = remove = clear = sort = reverse = _grow_only\n"
-b="    __iadd__ = __setitem__ = __delitem__ = _grow_only\n"
+b="    __iadd__ = __imul__ = __setitem__ = __delitem__ = _grow_only\n"
 assert s.count(a+b)==1
 open('memorder.py','w').write(s.replace(a+b, b+a))
 P

@@ -207,9 +207,22 @@ fn emitted_cpu_gemm_matches_a_reference_on_ragged_shapes() {
         "the GEMM recogniser did not fire; this test would be measuring the \
          scalar fallback instead of the packed kernel"
     );
+    // NARROWED is the bug: a pointer cast to anything narrower than 64 bits.
+    // `ptrtoint ptr .. to i64` is how the buffer dispatch compares addresses
+    // to decide whether the operands overlap, and loses nothing.
+    let narrowed: Vec<&str> = ir
+        .lines()
+        .filter(|l| l.contains("ptrtoint ptr") && !l.trim_end().ends_with("to i64"))
+        .collect();
     assert!(
-        !ir.contains("ptrtoint ptr"),
-        "a pointer is still being narrowed through an integer in the kernel"
+        narrowed.is_empty(),
+        "a pointer is still being narrowed through an integer in the kernel:\n{}",
+        narrowed.join("\n")
+    );
+    assert!(
+        ir.contains("ptrtoint ptr"),
+        "the buffer dispatch compares no addresses, so the narrowing check above \
+         examined nothing"
     );
     // Same argument one level down, for the copy-free path. The packed path
     // computes identical numbers, so if the tiny dispatch stopped firing every
