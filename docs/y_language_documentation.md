@@ -898,7 +898,7 @@ fn complex_slow_path() {
 ### 9.9 `@safe` and `@unsafe`
 * **Syntax**: `@safe`, `@unsafe`
 * **Usage**: `@safe` on a block or a function; `@unsafe` on a function only.
-* **Function**: Toggles compile-time memory safety checks (e.g. pointer arithmetic and out-of-bounds array indexing).
+* **Function**: Every function and kernel is checked in strict mode unless it is `@unsafe`: every `let` initialised, no raw dereference, an `@invariant` on every loop (proved by z3), every fixed-size array index proved in bounds - including an array reached through a reference such as `a: &mut [I16; 4]`, which until October 2026 was neither proved nor checked. `@unsafe` turns these off; an array index it cannot prove is then checked when the program runs, and stops it. `@safe { }` turns strict mode back on inside an `@unsafe` function. An index into a pointer whose length the compiler does not know (a `GlobalMemory<T>` parameter) is checked neither way.
 * **Example**:
 ```ysu
 @unsafe

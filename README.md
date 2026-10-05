@@ -1228,9 +1228,14 @@ here because the previous version of it silently passed.
 
 ### `@safe` blocks and Z3-discharged invariants
 
-Code inside `@safe { }` must initialize all variables, cannot dereference raw
+Every function and kernel is checked in strict mode unless it is marked
+`@unsafe`, and `@safe { }` turns strict mode back on inside an `@unsafe`
+function. Strict code must initialize all variables, cannot dereference raw
 pointers, requires an `@invariant` on every loop, and must index arrays with
-bounds it can prove. `@bounds(min, max)` on a `let` is how a value the checker
+bounds it can prove; under `@unsafe` an index it cannot prove is checked when
+the program runs instead. Until October 2026 an array reached through a
+reference (`a: &mut [I16; 4]`) was neither proved nor checked: `a[9] = 1`
+compiled in strict mode and wrote past the array. `@bounds(min, max)` on a `let` is how a value the checker
 cannot bound gets a range, and **that range is taken on trust**: nothing checks
 it against the value, so a wrong annotation is an unguarded out-of-bounds access
 in code the checker calls safe.
@@ -2303,7 +2308,7 @@ up if you look.
 **In any pass whose output is a correctness claim, an unhandled AST node is a
 hard error — never a silent identity, no-op, or "close enough" substitution.**
 This is written down because the same bug keeps being found: the table of
-instances has **89 rows** — one a case averted before it shipped, two in code
+instances has **90 rows** — one a case averted before it shipped, two in code
 nothing called, one reached by no input the parser builds — each a `_ =>` arm that guessed instead of refusing, or, in the
 later cases, a correct guard consulted at a subset of the sites where its
 property has to hold. A pass

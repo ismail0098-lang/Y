@@ -2318,7 +2318,19 @@ impl TypeChecker {
                 let index_ty = self.check_expr(index);
                 self.reject_transfer_escape(&base_ty, &base.span(), "as an indexed value");
                 self.reject_transfer_escape(&index_ty, &index.span(), "as an index expression");
-                
+
+                // An array reached through a reference is the same array. The
+                // rule below used to match a plain `Array` only, so `a[k]`
+                // through `a: &mut [I16; 4]` was neither proved in bounds nor
+                // checked at run time - in strict mode, the default - and
+                // `a[9] = 1` compiled clean and wrote past the array. Member
+                // access already looked through one reference; this is the
+                // same rule at the other site.
+                let base_ty = match base_ty {
+                    SemanticType::Reference { inner, .. } => *inner,
+                    other => other,
+                };
+
                 if let SemanticType::Array { element, size } = &base_ty {
                     INDEX_ARRAY_SIZES.with(|map| {
                         map.borrow_mut().insert((span.line, span.col), *size);
