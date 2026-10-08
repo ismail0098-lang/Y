@@ -23,6 +23,7 @@ else:
     HAS_Z3 = True
     import intenc
     import mulmode
+    import sassexec
 
 
 @unittest.skipUnless(HAS_Z3, 'integer abstraction checks require z3-solver')
@@ -87,6 +88,112 @@ class MultiplierCongruence(unittest.TestCase):
                         literal = z3.BitVecVal(1 << shift, 32)
                         self.check(multiply(kind, self.x, literal),
                                    mulmode.direct(kind, self.x, literal), z3.unsat)
+
+
+@unittest.skipUnless(HAS_Z3, 'high-word accumulation checks require z3-solver')
+class HighWordAccumulation(unittest.TestCase):
+    def setUp(self):
+        self.a, self.b, self.low, self.high = z3.BitVecs(
+            'hi_acc_a hi_acc_b hi_acc_low hi_acc_high', 32)
+
+    def state(self, mode):
+        symbols = {} if mode is None else {'mul': mulmode.MODES[mode]()}
+        state = sassexec.Sass(symbols)
+        state.R = {10: self.low, 11: self.high}
+        return state
+
+    def check(self, formula, expected, *assumptions):
+        solver = z3.Solver()
+        solver.set(timeout=5000)
+        solver.add(*assumptions, formula)
+        self.assertEqual(solver.check(), expected, solver.reason_unknown())
+
+    def split(self, state, a, b, low=None):
+        # PTX's separate low-word addition propagates one bit into the
+        # high-word addition. The 33rd high-word bit is the full 64-bit carry.
+        product_low = state.mul_lo(a, b)
+        product_high = state.mul_hi(a, b)
+        low_sum = z3.ZeroExt(1, product_low) + z3.ZeroExt(
+            1, self.low if low is None else low)
+        carry = z3.Extract(32, 32, low_sum) == 1
+        high_sum = (z3.ZeroExt(1, product_high) + z3.ZeroExt(1, self.high) +
+                    z3.If(carry, z3.BitVecVal(1, 33), z3.BitVecVal(0, 33)))
+        return z3.Extract(31, 0, high_sum), z3.Extract(32, 32, high_sum) == 1
+
+    def differs(self, left, right):
+        return z3.Or(left[0] != right[0], left[1] != right[1])
+
+    def test_abstract_high_word_and_carry_match_split_product(self):
+        # This must hold for every interpretation of the selected multiplier,
+        # so a concrete multiplication hidden in mul_hi_wide breaks the proof.
+        for mode in ('uf', 'wide'):
+            with self.subTest(mode=mode):
+                state = self.state(mode)
+                actual = state.mul_hi_wide(self.a, self.b, 'R10')
+                expected = self.split(state, self.a, self.b)
+                self.check(self.differs(actual, expected), z3.unsat)
+
+    def test_direct_and_default_match_exact_65_bit_arithmetic(self):
+        # Keep one operand fixed to cover exact overflow boundaries without
+        # asking a regression test to prove a general multiplier identity.
+        for mode in ('direct', None):
+            state = self.state(mode)
+            for value in (0, 1, 2, 0x80000000, 0xffffffff):
+                with self.subTest(mode=mode, operand=value):
+                    b = z3.BitVecVal(value, 32)
+                    actual = state.mul_hi_wide(self.a, b, 'R10')
+                    total = (z3.ZeroExt(33, self.a) * z3.ZeroExt(33, b) +
+                             z3.ZeroExt(1, z3.Concat(self.high, self.low)))
+                    expected = (z3.Extract(63, 32, total),
+                                z3.Extract(64, 64, total) == 1)
+                    self.check(self.differs(actual, expected), z3.unsat)
+
+    def test_concrete_full_product_retains_one_wide_multiplier(self):
+        expected = z3.ZeroExt(32, self.a) * z3.ZeroExt(32, self.b)
+        for multiply in (None, mulmode.direct):
+            with self.subTest(multiply=multiply):
+                # Equivalent split products add a hard multiplier identity
+                # to later obligations. Keep the original concrete DAG root.
+                self.assertTrue(mulmode.full_product(multiply, self.a, self.b).eq(expected))
+        canonical = mulmode.full_product(mulmode.canon, self.a, self.b)
+        self.check(canonical != expected, z3.unsat)
+        for mode in ('direct', None):
+            state = self.state(mode)
+            state.R[0], state.R[1] = self.a, self.b
+            state.step('IMAD.WIDE.U32 R2, R0, R1, RZ')
+            self.assertTrue(state.R[3].eq(z3.simplify(z3.Extract(63, 32, expected))))
+
+    def test_literal_product_and_pair_edges_match_integer_oracle(self):
+        addends = (0, 1, 0xffffffff, 0x100000000,
+                   0x8000000000000000, 0xffffffffffffffff)
+        for mode in ('uf', 'wide', 'direct', None):
+            state = self.state(mode)
+            for a, b in ((0, 0), (0, 0xffffffff), (1, 0xffffffff),
+                         (2, 0x80000000), (0x7fffffff, 0x80000000),
+                         (0x80000000, 0x80000000), (0xffffffff, 0xffffffff)):
+                for addend in addends:
+                    with self.subTest(mode=mode, a=a, b=b, addend=addend):
+                        state.R[10] = z3.BitVecVal(addend & 0xffffffff, 32)
+                        state.R[11] = z3.BitVecVal(addend >> 32, 32)
+                        high, carry = state.mul_hi_wide(
+                            z3.BitVecVal(a, 32), z3.BitVecVal(b, 32), 'R10')
+                        total = a * b + addend
+                        self.assertEqual(z3.simplify(high).as_long(),
+                                         (total >> 32) & 0xffffffff)
+                        self.assertEqual(z3.is_true(z3.simplify(carry)),
+                                         total >= 1 << 64)
+
+    def test_wrong_low_addend_and_dropped_carry_are_refuted(self):
+        for mode in ('uf', 'wide', 'direct', None):
+            with self.subTest(mode=mode):
+                state = self.state(mode)
+                a = b = z3.BitVecVal(0xffffffff, 32)
+                actual = state.mul_hi_wide(a, b, 'R10')
+                wrong_low = self.split(state, a, b, z3.BitVecVal(0, 32))
+                self.check(self.differs(actual, wrong_low), z3.sat,
+                           self.low == 0xffffffff, self.high == 0)
+                self.check(actual[1] != z3.BoolVal(False), z3.sat,
+                           self.low == 0xffffffff, self.high == 0xffffffff)
 
 
 @unittest.skipUnless(HAS_Z3, 'exact integer encoding checks require z3-solver')

@@ -17,6 +17,23 @@ import sys, time, random, collections
 from z3 import *
 import sassexec, ptxexec, mulmode, params, batch, conc, memorder, intenc, smem, domain
 
+def boolean_cuts(term, symbol):
+    """Preserve a proved Boolean equality in either simplified polarity.
+
+    A consumer of ``Not(q)`` can simplify to ``If(q, b, a)``. A mask can
+    also turn ``If(bit == 1, 1, 0)`` into the bit itself. Record the Boolean
+    and one-bit forms in both polarities so these consumers keep the same
+    proved carry, even when their Boolean condition disappears.
+    Literal carries need no cut and must retain their known truth value.
+    """
+    if is_true(term) or is_false(term):
+        return []
+    cuts = [(term, symbol), (simplify(Not(term)), Not(symbol))]
+    one, zero = BitVecVal(1, 1), BitVecVal(0, 1)
+    for original, replacement in ((term, symbol), (Not(term), Not(symbol))):
+        cuts.append((simplify(If(original, one, zero)), If(replacement, one, zero)))
+    return cuts
+
 def build(ptxf, sassf, mode, layout, sf, inv, sinv, lrep=None):
     mul = mulmode.MODES[mode]()
     # Loads at one proved address share ONE base symbol, the initial memory there.
@@ -234,8 +251,10 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             rc = ask(cs, cp, B1); nobl+=1
             if rc=='unsat':
                 C=Bool(f'C{nv}')
-                subW[0].append((Sw.wide[j][3],C)); subW[1].append((Pw.wide[i][3],C))
-                subD[0].append((Sd.wide[j][3],C)); subD[1].append((Pd.wide[i][3],C))
+                subW[0].extend(boolean_cuts(Sw.wide[j][3], C))
+                subW[1].extend(boolean_cuts(Pw.wide[i][3], C))
+                subD[0].extend(boolean_cuts(Sd.wide[j][3], C))
+                subD[1].extend(boolean_cuts(Pd.wide[i][3], C))
                 okc+=1
         log(f'    sweep {rnd_pass}: {progress} values discharged, {len(again)} left, {time.time()-t0:.0f}s')
         todo=again
@@ -253,6 +272,22 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             st.extend(x.children())
         return False
     proved=[]; unspecified_stores={}
+    def check_store(sw, pw, sd, pd, extra, guardW, guardD):
+        nonlocal nobl
+        r=ask(sw,pw,B1,relevant(Sw.assume,sw,pw)+extra+[guardW]); nobl+=1
+        if r!='unsat':
+            facts=relevant(Sd.assume+proved,sd,pd)+extra+[guardD]
+            # Estimate obligations reach Int first; other unknown direct
+            # obligations use it as their final exact arithmetic rung.
+            if relevant(Sd.assume,sd,pd):
+                r=ask_int(sd,pd,B2,facts); nobl+=1
+                if r=='unsat': nint[0]+=1
+            if r!='unsat':
+                r=ask(sd,pd,B2,relevant(Sd.assume,sd,pd)+extra+[guardD], conditions=preD); nobl+=1
+                if r=='unknown':
+                    r=ask_int(sd,pd,B2,facts); nobl+=1
+                    if r=='unsat': nint[0]+=1
+        return r
     for k in range(len(Pd.stores)):
         guardW = Sw.stores[sperm[k]][2]
         guardD = Sd.stores[sperm[k]][2]
@@ -283,20 +318,17 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
                     bad = f'store {k}: the SASS stores a different value than another store of the same unspecified division'
             previous.append((sd, guardD, c))
         if bad: allok=False; log('  '+bad); continue
-        r=ask(sw,pw,B1,relevant(Sw.assume,sw,pw)+extra+[guardW]); nobl+=1
-        if r!='unsat':
-            facts=relevant(Sd.assume+proved,sd,pd)+extra+[guardD]
-            # An obligation about a division estimate goes to Int FIRST: over
-            # bitvectors its tail was `unknown` on six posings at up to 1200 s,
-            # so the direct rung there is a timeout spent for nothing.
-            if relevant(Sd.assume,sd,pd):
-                r=ask_int(sd,pd,B2,facts); nobl+=1
-                if r=='unsat': nint[0]+=1
-            if r!='unsat':
-                r=ask(sd,pd,B2,relevant(Sd.assume,sd,pd)+extra+[guardD], conditions=preD); nobl+=1
-                if r=='unknown':
-                    r=ask_int(sd,pd,B2,facts); nobl+=1
-                    if r=='unsat': nint[0]+=1
+        r=check_store(sw,pw,sd,pd,extra,guardW,guardD)
+        original = (Sw.stores[sperm[k]][1], Pw.stores[k][1],
+                    Sd.stores[sperm[k]][1], Pd.stores[k][1])
+        if r!='unsat' and any(not cut.eq(raw) for cut,raw in zip((sw,pw,sd,pd),original)):
+            # Simplification can flatten a proved root out of only one side,
+            # losing correlations with its fresh cut symbol. SAT/UNKNOWN of
+            # that overapproximation does not settle the original obligation.
+            # Retry the untouched values under the same guards and domain.
+            sw,pw,sd,pd = original
+            r=check_store(sw,pw,sd,pd,extra,guardW,guardD)
+            if r=='unsat': log(f'  store {k}: original terms proved after cut refinement')
         if r!='unsat': allok=False; log(f'  store {k}: {r}')
         else:
             # A PROVED store equality is a fact for the stores after it -- stated

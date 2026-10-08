@@ -204,6 +204,11 @@ class Ptx:
         if old is None: self.undef += 1; old = BitVec(f'ptx_undef_rd{i}', 64)
         self.rd[i] = simplify(If(g, v, old) if not is_true(g) else v)
     def widen(self, val, carry):
+        # Register and carry writes simplify their arithmetic. Record matching
+        # roots so a proved equality can replace them in later consumers.
+        # A guarded write keeps If(g, val, old); cutting the val child preserves
+        # that merge and the previous value on paths where g is false.
+        val = simplify(val); carry = simplify(carry)
         self.wide.append((self.pc,
                           simplify(Concat(If(carry, BitVecVal(1,1), BitVecVal(0,1)), val)),
                           val, carry))

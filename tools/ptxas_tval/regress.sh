@@ -255,7 +255,10 @@ for p in corpus/ptx_integer_ops idiv/no_second_corr idiv/rem_wrong idiv/rem_any_
   out=$(echo "$full" | tail -1)
   printf '%-22s %s\n' "$(basename $p)" "$out"
   case "$p" in
-    corpus/ptx_integer_ops) echo "$out" | grep -q '^VALIDATED .*3 over Int'                         || bad=$((bad+1)) ;;
+    # 2 over Int since mul_hi_wide builds the high word from the SELECTED product
+    # (docs/verification/ptxas_arithmetic_cuts_2026-10-08.md): the wide-product
+    # high-word store now proves over bitvectors, so it no longer needs Int.
+    corpus/ptx_integer_ops) echo "$out" | grep -q '^VALIDATED .*2 over Int'                         || bad=$((bad+1)) ;;
     idiv/no_second_corr)    { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'store 3: sat'; } || bad=$((bad+1)) ;;
     idiv/rem_wrong)         { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'store 4: sat'; } || bad=$((bad+1)) ;;
     idiv/rem_any_at_d0)     echo "$out" | grep -q '^VALIDATED'                                      || bad=$((bad+1)) ;;

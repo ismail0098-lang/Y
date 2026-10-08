@@ -10,6 +10,16 @@ produces a proof about a program nobody wrote.
 The write-up — method, results, findings, what is *not* claimed — is
 [`docs/ptxas_translation_validation.md`](../../docs/ptxas_translation_validation.md).
 
+The [October 8 arithmetic-cut review](../../docs/verification/ptxas_arithmetic_cuts_2026-10-08.md)
+records the latest strict PTXAS stage: 38 Rust tests and 162 Python tests passed,
+with no skips, and 111 fresh cases produced 46 `VALIDATED`, 41 `UNPROVED`,
+22 `REFUSED` and 2 `ASSEMBLY_REFUSED` results. The pipeline suite has 29 tests;
+the integer abstraction and integer semantics suites have 27 each. Validation
+remains licensed only for `sm_89`. This focused run does not establish full
+workspace or GPU execution: the NVIDIA driver was inaccessible. The final
+`bn254_fr_mul_fast` trial reached 24 access obligations and 276 value candidates
+before timing out at 120 seconds without a validation verdict.
+
 ## Requirements
 
 `python3` with `z3-solver`; `ptxas` and `nvdisasm` from the CUDA toolkit.
@@ -57,6 +67,15 @@ targets refuse: ABI/ISA and empirical float assumptions are currently licensed
 only on sm89. Cross-architecture assembly tests remain assembly evidence.
 Straight-line `-O2`/`-O3`
 output can validate; general unrolled loop correspondence remains unsupported.
+Arithmetic cut records use the same simplified terms as register writes.
+Proved carry cuts cover both Boolean polarities and one-bit encodings,
+preserving consumers whose conditions Z3 rewrites while simplifying. Failed
+cut queries retry the original store expressions when simplification has lost
+their correlations. `IMAD.HI.U32` uses the selected
+multiplier's shared product halves for its full 65-bit sum and carry, just as
+the other modeled multiply instructions do. The
+[arithmetic-cut review](../../docs/verification/ptxas_arithmetic_cuts_2026-10-08.md)
+describes the fresh controls and remaining field-kernel limit.
 `ptxsource.read` checks a full-line grammar before all specification scanners:
 executable text sharing directive/brace/label lines, unsupported directives and
 text outside the recognized body refuse. Pure repeated declarations are read
@@ -66,7 +85,7 @@ nested loops remain supported.
 
 ```sh
 ./build_corpus.sh    # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh         # ALL sixteen standing results, ~50 s
+./regress.sh         # standing positive/negative controls; needs generated corpus
 python3 fpsem_abi.py # referee the seven float facts against the device
 ```
 
@@ -114,7 +133,7 @@ shipped GEMM and it VALIDATES, because the emitter says `fma.rn.f32`;
 `FFMA` on a byte-identical instruction stream - and it is refuted. A run in
 which that row turns green is a regression, because a corpus containing
 nothing the validator refutes cannot be told apart from a validator that
-always says VALIDATED. `regress.sh` ASSERTS all sixteen standing results in the
+always says VALIDATED. `regress.sh` ASSERTS its standing results in the
 direction each reads and exits non-zero if any of them moves; `fpgate.py`
 asserts the same pair independently, and checks the doc's contraction count
 against the measurement.
@@ -134,8 +153,9 @@ modifier (a bit-exact sign flip, measured), and where it cannot it emits
 `FADD Rd, -Rx, -RZ`, which is arithmetic and canonicalises every NaN.
 
 `corpus/` and `o1/` are generated and not committed: a `.cubin` is a machine-specific ELF
-and a `.sass` is a disassembly of one. All 66 rebuild byte-identically to the
-ones the published results were measured on.
+and a `.sass` is a disassembly of one. The September write-up recorded 66
+byte-identical rebuilds with its original toolchain. The October continuation
+did not repeat that complete-corpus identity measurement.
 
 ## Layout
 

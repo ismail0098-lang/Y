@@ -1,5 +1,16 @@
 # PTXAS verification extension
 
+This document preserves the October 1 extension review and its historical suite
+and case counts. The [October 8 arithmetic-cut review](ptxas_arithmetic_cuts_2026-10-08.md)
+records the current focused PTXAS result: 38 Rust tests and 162 Python tests
+passed with no skips; 111 fresh cases produced 46 `VALIDATED`, 41 `UNPROVED`,
+22 `REFUSED` and 2 `ASSEMBLY_REFUSED` results. The pipeline suite now has 29 tests,
+and both integer suites have 27. Validation remains licensed only for `sm_89`;
+the run establishes neither full-workspace verification nor GPU execution.
+The NVIDIA driver was inaccessible, and the final `bn254_fr_mul_fast` trial
+reached 24 access obligations and 276 value candidates before timing out at
+120 seconds without a validation verdict.
+
 The focused workflow now includes a PTXAS stage. Run it on its own with:
 
 ```bash
@@ -51,7 +62,8 @@ or FMA contraction. The existing FADD/FMAX commutativity assumptions remain
 explicitly gated. Tests preserve distinctions between different operands,
 FMUL/FMIN operand orders and fused versus separately rounded arithmetic.
 
-The fresh pipeline has twenty-three tests producing eighty-two cases: thirty-eight
+At the October 1 snapshot, the fresh pipeline had twenty-three tests producing
+eighty-two cases: thirty-eight
 validations, thirty-two expected unproved results, ten named refusals and two
 assembler refusals. One validation is an equivalent multiplier operand swap,
 recorded as mutated SASS rather than a genuine disassembly.
@@ -62,15 +74,15 @@ word/subword/vector/float loads with positive and negative offsets, and instruct
 operand counts. The O0
 control explicitly refuses unmodeled `LDC.64`;
 the run still passes because that refusal is the declared test expectation.
-The validator suite has sixteen tests and includes genuine assembled controls;
+The validator suite had sixteen tests and included genuine assembled controls;
 separate integer abstraction and executor suites check solver congruence, exact
 SAT/UNSAT agreement, guarded CC initialization and unsupported operands. The
-integer abstraction suite has twenty-two tests and the executor suite fourteen.
+integer abstraction suite had twenty-two tests and the executor suite fourteen.
 The arithmetic controls cover nary addition/multiplication, modular wrapping,
 masks, shift boundaries, sign extension and wide-product extracts. Quantifiers,
 bound variables and unsupported array forms return unknown without a proof claim.
 The emitted assembly
-gates contain twenty-eight tests and cover `sm_80`, `sm_86`, `sm_89`, `sm_90`,
+gates contained twenty-eight tests and covered `sm_80`, `sm_86`, `sm_89`, `sm_90`,
 `sm_100` and `sm_120` with the installed CUDA 13.4 toolchain.
 
 Negative cases assert their specific diagnostic, so a timeout cannot satisfy a
@@ -108,10 +120,11 @@ reporting regressions exercise these failures, including rehashed corrupt files
 and a solver timeout presented as a refutation. Timed-out or signal-terminated
 assembler processes cannot count as expected syntax or target rejections.
 
-The command-reporting suite now has thirty-six tests. It includes matching but
-invalid uncertainty and equal-structure diagnostics, specific accepted SAT and
+At that snapshot, the command-reporting suite had thirty-six tests. It included
+matching but invalid uncertainty and equal-structure diagnostics, specific accepted SAT and
 structural failures, substituted validator code and executables, command ordering,
 independent transcript types and abandoned inventories. A registration check
 compares every Rust-invoked Python suite with both workflow plans. The additional integer
 controls are registered in both the focused PTXAS stage and full-workspace plan.
-All source and documentation edits precede the final verification snapshot.
+All source and documentation edits in that review preceded its final verification
+snapshot.

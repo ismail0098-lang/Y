@@ -33,10 +33,31 @@ check. This restriction does not prove those trusted sm89 assumptions.
 
 ## What is validated today
 
-Measured on 2026-09-07, on this machine (RTX 4070 Ti SUPER, sm_89, CUDA 13.3,
-z3 5.0.0), reproduced from a clean `tools/ptxas_tval/` by `./regress.sh`, which
-ASSERTS every row below in the direction it reads and exits non-zero if any of
-them moves — the two UNPROVED rows included.
+The [2026-10-08 arithmetic-cut continuation](verification/ptxas_arithmetic_cuts_2026-10-08.md)
+passed strict PTXAS verification: **38 Rust tests, 162 Python tests and 111
+retained artifact cases**, with no failures or skips. The case verdicts are
+46 VALIDATED, 41 expected UNPROVED, 22 REFUSED and two ASSEMBLY_REFUSED.
+This selected-stage result covers fresh assembly/disassembly and symbolic
+validation, not GPU execution or the full workspace. The four standing integer
+controls also validate: `bn254_permute` (30 obligations), `bn254_sub_vec` (62),
+`ptx_carry_chain` (100) and `ptx_integer_ops` (66). Carry cuts now preserve
+complemented and one-bit consumers; failed cut queries retry the original store
+expressions, and unsigned wide products share the selected multiplication model.
+
+`bn254_fr_mul_fast` still has no completed proof. Its final bounded trial timed
+out after 120 seconds without finishing a sweep or returning a verdict; the
+24 discharged access obligations and 276 proposed pairs are partial progress.
+Matching `sm_89` targets and the existing trusted assumptions remain required.
+The inaccessible NVIDIA driver prevented device execution and ABI-probe reruns.
+
+### Historical standing measurements — September 2026
+
+The following table preserves the September measurements (RTX 4070 Ti SUPER,
+sm_89, CUDA 13.3, Z3 5.0.0), including the later subword and integer additions.
+Its obligation counts and timings are historical. The October continuation
+did not rerun the complete corpus or establish a new aggregate obligation count.
+`./regress.sh` asserts the expected directions, including negative controls;
+an UNPROVED control becoming VALIDATED is a regression.
 
 | kernel | verdict | obligations | time | what makes it interesting |
 |---|---|---|---|---|
@@ -59,8 +80,8 @@ them moves — the two UNPROVED rows included.
 | `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
 | `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Fifteen kernels validated, **457 obligations**, and three UNPROVED rows that
-are results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
+The historical table lists fifteen validated kernels and three UNPROVED controls
+that are results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
 The last three rows are one experiment: one kernel, three PTX spellings.
@@ -413,11 +434,16 @@ that an abstraction is too weak.
 
 ## The wall, and what is actually blocking this
 
-Every scope census here counted *opcodes*, which silently assumes the executors
-are what gate the corpus. The standing table says otherwise: `ptx_carry_chain`
-has 29 multiplies and validates in 24 s; `bn254_fr_mul_fast` has 65 and is
-UNPROVED with **no `sat`**: at default budgets its first sweep closes 17 of 276
-partial sums in 16,237 s.
+The measurements in this section are historical. The October 8 continuation
+improved intermediate proof reuse but did not recalibrate the per-region
+solver-wall thresholds. Its final 120-second `bn254_fr_mul_fast` trial completed
+no sweep and returned no verdict; it does not reproduce or replace the longer
+September run below.
+
+The September scope censuses counted *opcodes*, assuming the executors gated
+the corpus. At that checkpoint, `ptx_carry_chain` had 29 multiplies and validated
+in 24 seconds; `bn254_fr_mul_fast` had 65 and was UNPROVED with **no `sat`**:
+at default budgets its first sweep closed 17 of 276 partial sums in 16,237 seconds.
 
 > **This paragraph used to say "UNPROVED after 9,705 s with 261 of 276 cut points
 > closed", and that does not reproduce.** Re-measured 2026-09-19 with today's

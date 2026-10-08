@@ -13,6 +13,19 @@ def canon(kind, a, b):  # noqa
     if a.get_id() > b.get_id(): a, b = b, a
     return direct(kind, a, b)
 
+def full_product(multiply, a, b):
+    """A 64-bit product in the selected representation.
+
+    Concrete modes retain one wide multiply. Splitting its low word into a
+    separate 32-bit multiply makes consumers re-prove a multiplier identity.
+    Abstract modes compose the selected halves, retaining their shared model.
+    """
+    if multiply is None or multiply is direct or multiply is canon:
+        if multiply is canon and a.get_id() > b.get_id():
+            a, b = b, a
+        return ZeroExt(W, a) * ZeroExt(W, b)
+    return Concat(multiply('hi', a, b), multiply('lo', a, b))
+
 def ordered(a, b):
     """A commutative UF receives the same operand VALUES in either order.
 

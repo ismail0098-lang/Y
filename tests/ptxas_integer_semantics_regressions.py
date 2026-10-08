@@ -18,6 +18,7 @@ else:
     HAS_Z3 = True
     import ptxexec
     import sassexec
+    import tval
 
 
 @unittest.skipUnless(HAS_Z3, 'integer executor checks require z3-solver')
@@ -199,6 +200,118 @@ class IntegerSemantics(unittest.TestCase):
                           else left.P[0] != right.P[0])
             solver = z3.Solver(); solver.set(timeout=3000); solver.add(difference)
             self.assertEqual(solver.check(), z3.sat, solver.reason_unknown())
+
+    def test_widen_records_the_simplified_register_and_carry_terms(self):
+        x, y = z3.BitVecs('widen_x widen_y', 32)
+        ptx, sass = self.state(), sassexec.Sass({})
+        ptx.r[0], ptx.r[1] = x, y
+        sass.R[0], sass.R[1] = x, y
+        ptx.step('add.cc.u32 %r2, %r0, %r1')
+        sass.step('IADD3 R2, P0, R0, R1, RZ')
+        for state, value, carry in ((ptx, ptx.r[2], ptx.cc),
+                                    (sass, sass.R[2], sass.P[0])):
+            with self.subTest(side=type(state).__name__):
+                recorded = state.wide[0]
+                # Cuts match exact DAG roots, so semantic equality alone does
+                # not establish that the recorded root can replace a consumer.
+                self.assertTrue(recorded[2].eq(value))
+                self.assertTrue(recorded[3].eq(carry))
+                self.prove(recorded[1] == z3.Concat(
+                    z3.If(carry, z3.BitVecVal(1, 1), z3.BitVecVal(0, 1)), value))
+
+    def test_guarded_widen_cuts_preserve_the_old_register_and_carry(self):
+        x, y, old_value = z3.BitVecs('guarded_widen_x guarded_widen_y guarded_widen_old', 32)
+        guard, old_carry = z3.Bools('guarded_widen_guard guarded_widen_old_carry')
+        value_cut, carry_cut = z3.BitVec('guarded_widen_cut', 32), z3.Bool('guarded_widen_carry_cut')
+        ptx, sass = self.state(), sassexec.Sass({})
+        ptx.r[0], ptx.r[1], ptx.r[2] = x, y, old_value
+        ptx.p[0], ptx.cc, ptx.cc_defined = guard, old_carry, z3.BoolVal(True)
+        sass.R[0], sass.R[1], sass.R[2] = x, y, old_value
+        sass.P[0], sass.P[1] = old_carry, guard
+        ptx.step('@%p0 add.cc.u32 %r2, %r0, %r1')
+        sass.step('@P1 IADD3 R2, P0, R0, R1, RZ')
+        for state, value, carry in ((ptx, ptx.r[2], ptx.cc),
+                                    (sass, sass.R[2], sass.P[0])):
+            with self.subTest(side=type(state).__name__):
+                recorded = state.wide[0]
+                self.assertFalse(recorded[2].eq(value))
+                self.assertFalse(recorded[3].eq(carry))
+                self.prove(z3.And(z3.Implies(guard, value == recorded[2]),
+                                  z3.Implies(guard, carry == recorded[3]),
+                                  z3.Implies(z3.Not(guard), value == old_value),
+                                  z3.Implies(z3.Not(guard), carry == old_carry)))
+                cuts = [(recorded[2], value_cut)] + tval.boolean_cuts(recorded[3], carry_cut)
+                self.prove(z3.And(
+                    z3.substitute(value, *cuts) == z3.If(guard, value_cut, old_value),
+                    z3.substitute(carry, *cuts) == z3.If(guard, carry_cut, old_carry)))
+
+    def test_boolean_cuts_leave_constant_predicates_intact(self):
+        cut = z3.Bool('constant_carry_cut')
+        for literal in (z3.BoolVal(False), z3.BoolVal(True)):
+            with self.subTest(literal=literal):
+                self.assertEqual(tval.boolean_cuts(literal, cut), [])
+
+    def test_boolean_cuts_cover_simplified_complemented_consumers(self):
+        predicate, cut = z3.Bools('complemented_carry_predicate complemented_carry_cut')
+        for carry in (predicate, z3.Not(predicate)):
+            with self.subTest(carry=carry):
+                cuts = tval.boolean_cuts(carry, cut)
+                self.assertEqual(len(cuts), 4)
+                for invert in (False, True):
+                    consumer = z3.simplify(z3.If(
+                        z3.Not(carry) if invert else carry,
+                        z3.BitVecVal(0, 32), z3.BitVecVal(1, 32)))
+                    expected = z3.If(z3.Not(cut) if invert else cut,
+                                     z3.BitVecVal(0, 32), z3.BitVecVal(1, 32))
+                    self.prove(z3.substitute(consumer, *cuts) == expected)
+
+    def test_boolean_cuts_preserve_one_bit_carry_encodings_and_masks(self):
+        bit = z3.BitVec('encoded_carry_bit', 1)
+        cut = z3.Bool('encoded_carry_cut')
+        for carry in (bit == 0, bit == 1):
+            with self.subTest(carry=carry):
+                cuts = tval.boolean_cuts(carry, cut)
+                for width, mask in ((1, 1), (32, 0xf0000001), (33, 1), (35, 1)):
+                    for invert in (False, True):
+                        predicate = z3.Not(carry) if invert else carry
+                        consumer = z3.simplify(z3.If(
+                            predicate, z3.BitVecVal(mask, width), z3.BitVecVal(0, width)))
+                        expected = z3.If(z3.Not(cut) if invert else cut,
+                                         z3.BitVecVal(mask, width), z3.BitVecVal(0, width))
+                        self.prove(z3.substitute(consumer, *cuts) == expected)
+                # A reversed mask must remain observably different after the
+                # same carry proof, including the low bit whose predicate was
+                # eliminated during simplification.
+                correct = z3.simplify(z3.If(carry, z3.BitVecVal(0xf0000001, 32),
+                                           z3.BitVecVal(0, 32)))
+                wrong = z3.simplify(z3.If(carry, z3.BitVecVal(0, 32),
+                                         z3.BitVecVal(0xf0000001, 32)))
+                solver = z3.Solver(); solver.set(timeout=3000)
+                solver.add(z3.substitute(correct, *cuts) != z3.substitute(wrong, *cuts))
+                self.assertEqual(solver.check(), z3.sat, solver.reason_unknown())
+
+    def test_carry_chain_remains_equal_after_value_and_boolean_cuts(self):
+        x, y = z3.BitVecs('cut_chain_x cut_chain_y', 32)
+        value_cut, carry_cut = z3.BitVec('cut_chain_value', 32), z3.Bool('cut_chain_carry')
+        ptx, sass = self.state(), sassexec.Sass({})
+        ptx.r[0], ptx.r[1] = x, y
+        sass.R[0], sass.R[1] = x, y
+        ptx.step('add.cc.u32 %r2, %r0, %r1')
+        ptx.step('addc.u32 %r3, 0, 0')
+        sass.step('IADD3 R2, P0, R0, R1, RZ')
+        sass.step('SEL R3, RZ, 0x1, !P0')
+        sass.step('SEL R4, RZ, 0x1, P0')
+        self.prove(ptx.wide[0][3] == sass.wide[0][3])
+        ptx_cuts = [(ptx.wide[0][2], value_cut)] + tval.boolean_cuts(ptx.wide[0][3], carry_cut)
+        sass_cuts = [(sass.wide[0][2], value_cut)] + tval.boolean_cuts(sass.wide[0][3], carry_cut)
+        self.prove(z3.And(
+            z3.substitute(ptx.r[2], *ptx_cuts) == z3.substitute(sass.R[2], *sass_cuts),
+            z3.substitute(ptx.r[3], *ptx_cuts) == z3.substitute(sass.R[3], *sass_cuts)))
+        # The same cuts must retain a counterexample when SEL's carry polarity
+        # changes; a successful cut proof cannot authorize the wrong branch.
+        solver = z3.Solver(); solver.set(timeout=3000)
+        solver.add(z3.substitute(ptx.r[3], *ptx_cuts) != z3.substitute(sass.R[4], *sass_cuts))
+        self.assertEqual(solver.check(), z3.sat, solver.reason_unknown())
 
     def test_first_carry_read_refuses_in_each_family(self):
         for instruction in ('addc.u32 %r0, 1, 2', 'subc.u32 %r0, 1, 2',

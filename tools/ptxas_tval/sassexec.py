@@ -13,7 +13,7 @@ output is a correctness claim must reject.)
 import re, sys
 from z3 import *
 import smem
-import memorder, divest
+import memorder, divest, mulmode
 
 W = 32
 def bv(n): return BitVecVal(n, W)
@@ -347,6 +347,11 @@ class Sass:
             self.assume.append(divest.lemma_a(v, d))
 
     def widen(self, val, carry):
+        # Register and predicate writes simplify their arithmetic. Record
+        # matching roots so proved equalities can replace later consumers.
+        # A guarded write keeps If(g, val, old); cutting the val child preserves
+        # that merge and the previous value on paths where g is false.
+        val = simplify(val); carry = simplify(carry)
         self.wide.append((self.pc,
                           simplify(Concat(If(carry, BitVecVal(1,1), BitVecVal(0,1)), val)),
                           val, carry))
@@ -409,7 +414,10 @@ class Sass:
 
     def mul_hi_wide(self, a, b, caddr):
         """high word of a*b + {Rc,Rc+1}, and the carry out of that 64-bit add"""
-        prod = ZeroExt(1, ZeroExt(W, a) * ZeroExt(W, b))
+        # Use the same product halves as IMAD.WIDE.U32 and the PTX executor.
+        # Bypassing the selected multiplier here made a wide-mode obligation
+        # compare a concrete product with MUL64, forcing direct refinement.
+        prod = ZeroExt(1, mulmode.full_product(self.sym.get('mul'), a, b))
         s = prod + ZeroExt(1, self.pair(caddr))
         return Extract(2*W-1, W, Extract(2*W-1, 0, s)), (Extract(2*W, 2*W, s) == BitVecVal(1,1))
 
@@ -654,7 +662,7 @@ class Sass:
             # high half here identifies IMAD.WIDE with IMAD.WIDE.U32 and can
             # validate a translation that changed the instruction's signedness.
             prod = (SignExt(W, a) * SignExt(W, b) if sgn else
-                    Concat(self.mul_hi(a, b), self.mul_lo(a, b)))
+                    mulmode.full_product(self.sym.get('mul'), a, b))
             res = simplify(prod + self.pair(ops[3]))
             d = self.register_span(ops[0], 2, 'wide destination')[0]
             self.wr(f'R{d}',   Extract(W-1, 0, res), g)

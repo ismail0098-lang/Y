@@ -592,6 +592,66 @@ ld.param.u32 %r1, [Y];
                             self.mutate_instruction(case, pattern, replacement)
                         case.validate(sass_name="mutated.sass" if mutation else "kernel.sass")
 
+    def test_high_product_addend_and_carry_use_the_shared_multiplier(self):
+        # Keeping only the high word makes PTXAS select IMAD.HI.U32. The
+        # independent scalar loads keep its 64-bit addend in a register pair.
+        source = integer_kernel("high_product_carry",
+                                ".param .u64 O, .param .u64 A, .param .u64 B, "
+                                ".param .u32 X, .param .u32 Y", """
+ld.param.u64 %rd0, [O];
+ld.param.u64 %rd1, [A];
+ld.param.u64 %rd2, [B];
+ld.param.u32 %r0, [X];
+ld.param.u32 %r1, [Y];
+ld.global.u32 %r2, [%rd1];
+ld.global.u32 %r3, [%rd2];
+mad.lo.cc.u32 %r6, %r0, %r1, %r2;
+madc.hi.cc.u32 %r7, %r0, %r1, %r3;
+addc.u32 %r8, 0, 0;
+st.global.v2.u32 [%rd0], {%r7,%r8};
+""")
+        for mutation in (None, "zero-product", "dropped-carry"):
+            with self.subTest(mutation=mutation):
+                with self.case("high-product-carry-o1-" + (mutation or "genuine"),
+                               "UNPROVED" if mutation else "VALIDATED",
+                               role="mutated" if mutation else "genuine",
+                               expected_detail=(r"store 0: sat" if mutation == "zero-product"
+                                                else r"store 1: sat" if mutation else "")) as case:
+                    case.assemble(source)
+                    if mutation == "zero-product":
+                        self.mutate_instruction(case, r"(IMAD\.HI\.U32 R\d+, P0), R\d+, (.*)",
+                                                r"\1, RZ, \2")
+                    elif mutation == "dropped-carry":
+                        self.mutate_instruction(case, r"(IMAD\.HI\.U32 R\d+), P0, (.*)",
+                                                r"\1, PT, \2")
+                    result = case.validate(sass_name="mutated.sass" if mutation else "kernel.sass")
+                    if not mutation:
+                        self.assertIn("1 by abstraction, 0 refined, 1 carries", result["log"])
+                        # Eight access obligations, one value cut, one carry
+                        # cut and two stores: no concrete refinement query.
+                        self.assertEqual(result["obligations"], 12)
+
+    def test_carry_probe_rechecks_original_values_after_flattened_cuts(self):
+        source = (REPO / "tests" / "ptx_carry_chain.ptx").read_bytes()
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate):
+                with self.case("carry-probe-o3-" + ("zero-high-word" if mutate else "genuine"),
+                               "UNPROVED" if mutate else "VALIDATED", optimization=3,
+                               role="mutated" if mutate else "genuine",
+                               expected_detail=r"store 11: sat" if mutate else "") as case:
+                    case.assemble(source)
+                    stores = [body for body in instruction_stream(
+                        (case.directory / "kernel.sass").read_text())
+                        if re.fullmatch(r"@!?P\d+ STG\.E .*|STG\.E .*", body)]
+                    self.assertEqual(len(stores), 16)
+                    if mutate:
+                        original = stores[11]
+                        self.mutate_instruction(case, re.escape(original),
+                                                original.rsplit(",", 1)[0] + ", RZ")
+                    result = case.validate(sass_name="mutated.sass" if mutate else "kernel.sass")
+                    if not mutate:
+                        self.assertIn("store 11: original terms proved after cut refinement", result["log"])
+
     def test_uninitialized_carry_refuses_genuine_and_forced_zero(self):
         source = integer_kernel("uninitialized_carry", ".param .u64 O, .param .u32 X, .param .u32 Y", """
 ld.param.u64 %rd0, [O];
