@@ -650,7 +650,16 @@ st.global.v2.u32 [%rd0], {%r7,%r8};
                                                 original.rsplit(",", 1)[0] + ", RZ")
                     result = case.validate(sass_name="mutated.sass" if mutate else "kernel.sass")
                     if not mutate:
-                        self.assertIn("store 11: original terms proved after cut refinement", result["log"])
+                        # Store 11 used to fail under a cut that simplification had
+                        # flattened out of one side, and was proved only by the
+                        # retry on the original terms. Cuts now survive
+                        # simplification and are applied only where both sides
+                        # contain their term (tval.symmetric_cuts), so it proves
+                        # directly and the retry is not reached by this fixture.
+                        # The VALIDATED verdict above is the claim; this pins that
+                        # no store needed the retry or was reported unproved.
+                        self.assertNotIn("store 11:", result["log"].replace(
+                            "store 11: proved with the cuts both sides contain", ""))
 
     def test_uninitialized_carry_refuses_genuine_and_forced_zero(self):
         source = integer_kernel("uninitialized_carry", ".param .u64 O, .param .u32 X, .param .u32 Y", """
