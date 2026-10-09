@@ -540,6 +540,85 @@ rather than run the unpatched validator), and the pair rows never recorded each
 fail by name; **the compound that removes the proved-something check and silences
 the engine is green**, which is that check's justification.
 
+#### ...and part of it was the CUTS, not the solver
+
+tval discharges a partial-sum pair, then replaces it by one fresh symbol on both
+sides (a "cut"), so later pairs ask a smaller question. A cut is applied by
+substitution, and substitution only replaces the term it was given. When the S
+side of a later obligation contains the pair's S term and the P side computes
+the same value in a *different spelling*, the S side gets the symbol and the P
+side keeps the raw term. The obligation then asks whether a free 32-bit symbol
+equals an expression, and the answer is `sat`. That is a spurious refutation of
+a pair that is in fact equal.
+
+That was checked rather than assumed. On those pairs the raw, uncut posing is
+`unknown`, never `sat`. Refinement then shows the cut is to blame: every `sat`
+model it found violates the definition of a cut, i.e. the free symbol takes a
+value its own term cannot.
+
+`symmetric_cuts` keeps a cut only when both sides of the obligation contain
+their side's term, or neither does. Dropping a cut is sound for the same reason
+applying one is: the obligation with fewer cuts is an instance of the one with
+more. Measured on the first 60 partial-sum pairs of `bn254_fr_mul_fast`, budget
+5/10 s, same harness both arms:
+
+    sweep 1, every cut applied         14 discharged, 46 left
+    sweep 1, symmetric cuts only       49 discharged, 11 left
+
+It is gated by `python3 tval.py --selftest`, which is now `regress.sh`'s first
+row. The selftest builds an obligation whose answer is known both ways: the
+asymmetric cut gives the spurious `sat`, dropping it proves, and a cut both
+sides contain must still be applied. `symmut.sh` is its mutation table, control
+row first and BASE at both ends:
+
+- drop nothing (the state before this change), drop everything, keep exactly
+  the asymmetric cuts, and consult only the S side: each fails the selftest by
+  name;
+- the compound that also disables the selftest is green, which is the
+  selftest's justification;
+- the wiring into the sweep's direct posing and into the store retry is green
+  on every fast gate. No standing fixture has a cut only one side contains,
+  and the kernel where it matters takes hours per run. That is a stated limit,
+  not coverage.
+
+**Whether it moves the field kernels' verdicts is not measured yet.** A full
+run of `bn254_fr_mul_fast` with the filter was still in its first sweep after
+two hours; at the previous commit the first sweep alone took 16,237 s at default
+budgets and discharged 17 of 276 pairs. The 14 -> 49 above is the first 60
+pairs at a 5/10 s budget, and it is not a prediction of the whole run.
+
+#### What did not help, measured
+
+The eleven pairs still open after the fix (of the first 60) were attacked five
+ways. None proved more than one of them:
+
+- **Commutative re-association of the cut terms.** z3 flattens `c*a*b`, so a cut
+  of `a*b` can fail to match. An AC-aware substitution gives identical counts
+  (49 / 11).
+- **Applying the symmetric filter to the direct posing as well as the wide
+  one**: no change.
+- **Counterexample-guided refinement** (add back the definition of each cut
+  the `sat` model violates, and repeat). In the direct model it turns the
+  `sat`s into `unknown`. In the wide model it proves the other pairs only by
+  re-adding nearly every definition, i.e. by undoing the cuts.
+- **Generalisation.** A value-ordered `MUL64(If(c,x,y), If(c,y,x))` becomes
+  an uninterpreted symmetric `MULC(x,y)`, and each guarded load
+  `If(g, 0, L)` becomes a fresh variable shared by both sides. Both are sound
+  for `unsat` only. It proves one hard pair raw (pair 36, 3 s, `unknown` at
+  30 s before). Pairs 42, 48 and 51 stay `unknown`, and pairs 44, 52, 53 and
+  54 are `sat` under the uninterpreted multiply. The diff for 44 shows why:
+  Montgomery's `m = t0 * nprime` is applied to two sums spelled differently,
+  and an uninterpreted function cannot relate them.
+- **Interpreting a product with a literal operand** (nprime, p0) as the real
+  multiply. It turns those four `sat`s into `unknown` and proves nothing new.
+  Combined with also canonicalising every ordering condition (not only
+  `ULE`), it loses pair 36 again.
+
+So what is left is the solver: two spellings of a Montgomery reduction step,
+whose equality needs carry-level reasoning, in either theory. And because a CIOS
+chain is serial, every partial sum after the first one left uncut contains it raw
+on one side.
+
 ### `sat` and `unknown` are not the same result
 
 `sat` means the two programs provably can differ — a refutation, and a finding.

@@ -34,6 +34,73 @@ def boolean_cuts(term, symbol):
         cuts.append((simplify(If(original, one, zero)), If(replacement, one, zero)))
     return cuts
 
+def _ids(t):
+    seen=set(); st=[t]
+    while st:
+        x=st.pop()
+        if x.get_id() in seen: continue
+        seen.add(x.get_id()); st.extend(x.children())
+    return seen
+
+def symmetric_cuts(cutsS, cutsP, rawS, rawP):
+    """The cuts that occur on BOTH sides of one obligation, or on neither.
+
+    A proved pair is substituted as one fresh symbol on both sides.  When the
+    S side of an obligation contains the pair's S term and the P side does not
+    contain the pair's P term, the P side computes that value in some OTHER
+    spelling, which the substitution leaves alone -- so the obligation now asks
+    whether a free symbol equals a term, and the answer is a spurious `sat`.
+    Dropping such a cut puts the raw term back on the side that had it.  That
+    is sound for the same reason the cut is: the obligation with fewer cuts is
+    an instance of the one with more.  Measured on bn254_fr_mul_fast: sweep 1
+    discharges 14 of the first 60 pairs with every cut and 49 with only these.
+    """
+    iS, iP = _ids(rawS), _ids(rawP)
+    keep = [k for k in range(len(cutsS))
+            if (cutsS[k][0].get_id() in iS) == (cutsP[k][0].get_id() in iP)]
+    return [cutsS[k] for k in keep], [cutsP[k] for k in keep], len(cutsS) - len(keep)
+
+def subst(t, cuts):
+    return substitute(t, *cuts) if cuts else t
+
+def selftest_cuts():
+    """`symmetric_cuts` against an obligation whose answer is known both ways.
+
+    Private context, run only when asked: building z3 terms at import is what
+    once reordered operands in unrelated kernels.  S spells a product `a*b`, P
+    spells it `b*a` (two nodes), and the pair (a*b, a*b) is a proved cut whose
+    P term P does not contain.  Substituted on S alone the obligation is a free
+    symbol against `b*a` -- `sat`, a spurious refutation -- and with the cut
+    dropped it is `unsat`.  A cut both sides contain must be KEPT and applied,
+    or "drop every cut" passes; so must one neither side contains.
+    """
+    C = Context()
+    a, b, d, e = (BitVec(n, 32, C) for n in 'abde')
+    V0, V1, V2 = (BitVec(f'V{k}', 32, C) for k in range(3))
+    ab, ba, d1 = a*b, b*a, d + 1
+    assert ab.get_id() != ba.get_id()
+    def posed(x, y):
+        sv = Solver(ctx=C); sv.add(x != y); return str(sv.check())
+    bad = []
+    for flip in (False, True):
+        rawS, rawP = ab + d1, ba + d1
+        cutsS = [(ab, V0), (d1, V1), (e, V2)]
+        cutsP = [(ab, V0), (d1, V1), (e, V2)]
+        if flip:   # the asymmetric cut on the P side instead
+            rawS, rawP = rawP, rawS
+        full = posed(subst(rawS, cutsS), subst(rawP, cutsP))
+        cS, cP, nd = symmetric_cuts(cutsS, cutsP, rawS, rawP)
+        sym_S, sym_P = subst(rawS, cS), subst(rawP, cP)
+        sym = posed(sym_S, sym_P)
+        kept = [t.get_id() for t, _ in cS]
+        if full != 'sat': bad.append(f'flip={flip}: every cut gave {full}, expected the spurious sat')
+        if nd != 1 or kept != [d1.get_id(), e.get_id()]:
+            bad.append(f'flip={flip}: dropped {nd}, kept {kept}; expected only the asymmetric cut dropped')
+        if sym != 'unsat': bad.append(f'flip={flip}: the symmetric cuts gave {sym}, expected unsat')
+        if V1.get_id() not in _ids(sym_S) or V1.get_id() not in _ids(sym_P):
+            bad.append(f'flip={flip}: the cut both sides contain was not applied')
+    return bad
+
 def build(ptxf, sassf, mode, layout, sf, inv, sinv, lrep=None):
     mul = mulmode.MODES[mode]()
     # Loads at one proved address share ONE base symbol, the initial memory there.
@@ -235,9 +302,13 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             sw=substitute(Sw.wide[j][2], *subW[0]) if subW[0] else Sw.wide[j][2]
             pw=substitute(Pw.wide[i][2], *subW[1]) if subW[1] else Pw.wide[i][2]
             r = ask(sw, pw, B1); nobl+=1; how='wide'
+            if r!='unsat' and subW[0]:
+                cS, cP, nd = symmetric_cuts(subW[0], subW[1], Sw.wide[j][2], Pw.wide[i][2])
+                if nd:
+                    r = ask(subst(Sw.wide[j][2], cS), subst(Pw.wide[i][2], cP), B1); nobl+=1; how='wide'
             if r!='unsat':
-                sd=substitute(Sd.wide[j][2], *subD[0]) if subD[0] else Sd.wide[j][2]
-                pd=substitute(Pd.wide[i][2], *subD[1]) if subD[1] else Pd.wide[i][2]
+                cS, cP, _ = symmetric_cuts(subD[0], subD[1], Sd.wide[j][2], Pd.wide[i][2])
+                sd=subst(Sd.wide[j][2], cS); pd=subst(Pd.wide[i][2], cP)
                 r = ask(sd, pd, B2, conditions=preD); nobl+=1; how='direct'
             if r!='unsat': again.append((j,i)); continue
             V=BitVec(f'V{nv}',32); nv+=1
@@ -319,6 +390,14 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
             previous.append((sd, guardD, c))
         if bad: allok=False; log('  '+bad); continue
         r=check_store(sw,pw,sd,pd,extra,guardW,guardD)
+        if r!='unsat' and subW[0]:
+            cSw, cPw, ndw = symmetric_cuts(subW[0], subW[1], Sw.stores[sperm[k]][1], Pw.stores[k][1])
+            cSd, cPd, ndd = symmetric_cuts(subD[0], subD[1], Sd.stores[sperm[k]][1], Pd.stores[k][1])
+            if ndw or ndd:
+                sw=subst(Sw.stores[sperm[k]][1], cSw); pw=subst(Pw.stores[k][1], cPw)
+                sd=subst(Sd.stores[sperm[k]][1], cSd); pd=subst(Pd.stores[k][1], cPd)
+                r=check_store(sw,pw,sd,pd,extra,guardW,guardD)
+                if r=='unsat': log(f'  store {k}: proved with the cuts both sides contain')
         original = (Sw.stores[sperm[k]][1], Pw.stores[k][1],
                     Sd.stores[sperm[k]][1], Pd.stores[k][1])
         if r!='unsat' and any(not cut.eq(raw) for cut,raw in zip((sw,pw,sd,pd),original)):
@@ -339,7 +418,12 @@ def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     xi = f', {nint[0]} over Int' if nint[0] else ''
     return ('VALIDATED' if allok else 'UNPROVED'), f'{len(Pd.stores)} stores, {len(Pd.loads)} loads{xi}, {dt:.1f}s', nobl
 
-if __name__=='__main__':
+if __name__=='__main__' and sys.argv[1:] == ['--selftest']:
+    bad = selftest_cuts()
+    for x in bad: print('FAIL: symmetric_cuts: '+x)
+    print('ok: symmetric_cuts drops exactly the asymmetric cut, in both directions' if not bad else '')
+    sys.exit(1 if bad else 0)
+elif __name__=='__main__':
     v,msg,n = run(sys.argv[1], sys.argv[2],
                   int(sys.argv[3]) if len(sys.argv)>3 else 8,
                   int(sys.argv[4]) if len(sys.argv)>4 else 5,

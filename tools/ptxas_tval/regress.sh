@@ -8,6 +8,12 @@ cd "$(dirname "$0")"
 rm -rf __pycache__
 
 bad=0
+# tval's symmetric-cut filter against an obligation whose answer is known both
+# ways (a cut only one side contains gives a spurious sat; dropping it proves).
+# No fixture row can isolate it: the field kernels it was measured on take hours.
+st=$(timeout 120 python3 tval.py --selftest 2>&1)
+printf '%-22s %s\n' "tval --selftest" "$(echo "$st" | tail -1)"
+echo "$st" | grep -q '^ok: symmetric_cuts' || bad=$((bad+1))
 for pair in "fma/rn.ptx fma/rn.sass" "fma/plain.ptx fma/plain.sass" \
             "neg/folded.ptx neg/folded.sass" "neg/sub.ptx neg/sub.sass" \
             "neg/unfoldable.ptx neg/unfoldable.sass" \
