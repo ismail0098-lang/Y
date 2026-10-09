@@ -1,0 +1,12 @@
+@unsafe
+fn fibonacci(n: I32) -> I32 {
+    if n < 2 { return n; }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+fn main() -> I32 {
+    println("Y CPU JIT: fibonacci(10)");
+    print_int(fibonacci(10));
+    println("");
+    return 0;
+}

@@ -17,8 +17,9 @@
 // and the 26 blanket `#![allow(dead_code)]` attributes existed to silence them.
 // The two module lists had already drifted apart.
 use y::{
-    ast, autotuner, coprocessor_scheduler, cpu_emitter, debug_info, exact_gemm_certificate, guarantees, ir_grapher, lexer,
-    llvm_emitter, native_emitter, parser, ptx_emitter, require, sentinel, type_checker, zero_drift,
+    ast, autotuner, coprocessor_scheduler, cpu_emitter, debug_info, exact_gemm_certificate,
+    guarantees, ir_grapher, lexer, llvm_emitter, native_emitter, parser, ptx_emitter, require,
+    sentinel, type_checker, zero_drift,
 };
 
 #[cfg(feature = "zk")]
@@ -136,10 +137,10 @@ use ast::Item;
 use cpu_emitter::CpuEmitter;
 use lexer::Lexer;
 use llvm_emitter::LlvmEmitter;
+use native_emitter::NativeEmitter;
 use parser::Parser;
 use ptx_emitter::PtxEmitter;
 use type_checker::TypeChecker;
-use native_emitter::NativeEmitter;
 
 macro_rules! log_info {
     ($($arg:tt)*) => {
@@ -176,7 +177,9 @@ fn emit_verifier_cli(args: &[String], pos: usize) {
     let vkey_path = match args.get(pos + 1) {
         Some(p) if !p.starts_with('-') => p.clone(),
         _ => {
-            log_error!("--emit-verifier needs a verification key: Y --emit-verifier verification_key.json");
+            log_error!(
+                "--emit-verifier needs a verification key: Y --emit-verifier verification_key.json"
+            );
             exit(1);
         }
     };
@@ -240,7 +243,11 @@ fn emit_verifier_cli(args: &[String], pos: usize) {
 /// Values keep their source text: a field element routinely exceeds 2^53 and
 /// parsing through `f64` would round it silently.
 #[cfg(feature = "zk")]
-fn flatten_inputs(prefix: &str, v: &mini_json::Json, out: &mut Vec<(String, String)>) -> Result<(), String> {
+fn flatten_inputs(
+    prefix: &str,
+    v: &mini_json::Json,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
     match v {
         mini_json::Json::Str(t) | mini_json::Json::Num(t) => {
             out.push((prefix.to_string(), t.clone()));
@@ -314,7 +321,11 @@ fn solve_and_write_witness(
 ) -> Result<usize, String> {
     let json = fs::read_to_string(inputs_path)
         .map_err(|e| format!("Failed to read {}: {}", inputs_path, e))?;
-    let root = mini_json::P { b: json.as_bytes(), i: 0 }.value()?;
+    let root = mini_json::P {
+        b: json.as_bytes(),
+        i: 0,
+    }
+    .value()?;
     let mini_json::Json::Obj(fields) = &root else {
         return Err(
             "expected a JSON object of circuit inputs, e.g. {\"x\": 3, \"in\": [1, 2]}".into(),
@@ -340,7 +351,12 @@ fn solve_and_write_witness(
     let pub_ordered = bind_inputs(&pub_names, &supplied, &mut used, inputs_path, &all)?;
     let ordered = bind_inputs(&priv_names, &supplied, &mut used, inputs_path, &all)?;
 
-    if let Some((k, _)) = supplied.iter().zip(&used).find(|(_, u)| !**u).map(|(kv, _)| kv) {
+    if let Some((k, _)) = supplied
+        .iter()
+        .zip(&used)
+        .find(|(_, u)| !**u)
+        .map(|(kv, _)| kv)
+    {
         return Err(format!(
             "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
             inputs_path,
@@ -354,8 +370,13 @@ fn solve_and_write_witness(
     // make, and memory is what bounds circuit size here.
     let circuit = emitter.view();
     let ir = emitter.build_witness_ir();
-    let (witness, satisfied) =
-        zk_witness::solve_r1cs_witness(circuit.constraints, &ir, circuit.num_variables, &pub_ordered, &ordered);
+    let (witness, satisfied) = zk_witness::solve_r1cs_witness(
+        circuit.constraints,
+        &ir,
+        circuit.num_variables,
+        &pub_ordered,
+        &ordered,
+    );
     if !satisfied {
         return Err(format!(
             "no satisfying witness exists for these inputs. A range check almost \
@@ -572,14 +593,22 @@ fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
             "      -> {:>9}: {:>9.0} ps/acc  {}",
             repr.name(),
             ps,
-            if repr.is_exact() { "exact" } else { "not exact (never selected)" }
+            if repr.is_exact() {
+                "exact"
+            } else {
+                "not exact (never selected)"
+            }
         );
     }
 
     // Append rather than rewrite: this file also holds the sentinel probe and
     // the autotuner's measurements.
     use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PROFILE) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(PROFILE)
+    {
         let _ = writeln!(f, "{}", zero_drift::serialize_costs(&costs, gpu_name));
     }
     costs
@@ -688,9 +717,7 @@ fn write_attention_certificate(head_dim: usize, seq_len: usize) {
     let cert = y::exact_attention_certificate::Certificate { head_dim, seq_len };
     let stem = y::exact_attention_certificate::file_stem(&cert);
     if env::var("Y_NO_CERTIFICATE").is_ok() {
-        eprintln!(
-            "      -> attention certificate ({stem}.v) suppressed by Y_NO_CERTIFICATE"
-        );
+        eprintln!("      -> attention certificate ({stem}.v) suppressed by Y_NO_CERTIFICATE");
         return;
     }
     let source = format!("--emit-attention-ptx {head_dim} {seq_len}");
@@ -717,6 +744,32 @@ fn write_attention_certificate(head_dim: usize, seq_len: usize) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let jit_mode = args.iter().any(|a| a == "--jit" || a == "--target=jit");
+    if jit_mode {
+        if let Some(flag) = args.iter().find(|a| {
+            (a.starts_with("--emit-") || a.starts_with("--target=")) && a.as_str() != "--target=jit"
+                || matches!(
+                    a.as_str(),
+                    "-g" | "--debug"
+                        | "--portable"
+                        | "--autotune"
+                        | "--autotune-force"
+                        | "--no-autotune"
+                        | "--lineinfo"
+                        | "--emit-guarantees"
+                        | "--c"
+                        | "-o"
+                        | "--output"
+                        | "-l"
+                        | "--link"
+                )
+                || a.starts_with("--output=")
+                || a.starts_with("-l")
+        }) {
+            log_error!("--jit cannot be combined with {}: it runs CPU code in this process and accepts -O0 through -O3 and import paths (-I)", flag);
+            exit(1);
+        }
+    }
 
     // `-g`: DWARF debug information, so the program can be debugged as Y in
     // gdb. `--debug` is `-g` plus starting gdb on the result. Both are the
@@ -730,10 +783,23 @@ fn main() {
     // Every backend that is not the LLVM one: none of them produces debug
     // information, and none has a `clang` step for `-O` to set.
     const NOT_LLVM: &[&str] = &[
-        "--emit-attention-ptx", "--emit-c", "--c", "--target=c",
-        "--emit-coprocessor", "--target=coprocessor", "--emit-cpu", "--target=cpu",
-        "--emit-native", "--target=native", "--emit-ptx", "--target=ptx",
-        "--emit-r1cs", "--target=r1cs", "--emit-verifier", "--emit-zk-ptx", "--target=zk-ptx",
+        "--emit-attention-ptx",
+        "--emit-c",
+        "--c",
+        "--target=c",
+        "--emit-coprocessor",
+        "--target=coprocessor",
+        "--emit-cpu",
+        "--target=cpu",
+        "--emit-native",
+        "--target=native",
+        "--emit-ptx",
+        "--target=ptx",
+        "--emit-r1cs",
+        "--target=r1cs",
+        "--emit-verifier",
+        "--emit-zk-ptx",
+        "--target=zk-ptx",
     ];
     if debug_info {
         let flag = if launch_debugger { "--debug" } else { "-g" };
@@ -755,7 +821,11 @@ fn main() {
             log_error!("{} applies to Y source; the circom front end produces R1CS, which has no debug information.", flag);
             exit(1);
         }
-        if launch_debugger && args.iter().any(|a| a == "--emit-llvm" || a == "--target=llvm") {
+        if launch_debugger
+            && args
+                .iter()
+                .any(|a| a == "--emit-llvm" || a == "--target=llvm")
+        {
             log_error!(
                 "--debug builds a program and starts the debugger on it; to write LLVM IR \
                  with debug information use -g --emit-llvm."
@@ -785,7 +855,10 @@ fn main() {
             exit(1);
         }
         if args.iter().any(|a| a.ends_with(".circom")) {
-            log_error!("{} applies to Y source compiled by the LLVM backend; circom input produces R1CS.", o);
+            log_error!(
+                "{} applies to Y source compiled by the LLVM backend; circom input produces R1CS.",
+                o
+            );
             exit(1);
         }
     }
@@ -795,6 +868,7 @@ fn main() {
         Some("-O2") => 2,
         Some("-O3") => 3,
         _ if debug_info => 0,
+        _ if jit_mode => 3,
         _ => 2,
     };
 
@@ -803,7 +877,11 @@ fn main() {
     // backend's alone: the LLVM backend's line table comes with `-g`, and no
     // other backend maps its output to Y lines. Refused there by name.
     let line_info = args.iter().any(|a| a == "--lineinfo");
-    if line_info && !args.iter().any(|a| a == "--emit-ptx" || a == "--target=ptx") {
+    if line_info
+        && !args
+            .iter()
+            .any(|a| a == "--emit-ptx" || a == "--target=ptx")
+    {
         match args.iter().find(|a| NOT_LLVM.contains(&a.as_str())) {
             Some(other) => {
                 log_error!(
@@ -940,7 +1018,11 @@ fn main() {
     }
 
     // Phase 0: Sentinel Hardware Probe
-    let mut hw_profile = sentinel::check_or_probe_hardware();
+    let mut hw_profile = if jit_mode {
+        y::cpu_jit::host_profile()
+    } else {
+        sentinel::check_or_probe_hardware()
+    };
     if args.iter().any(|a| a == "--portable") {
         hw_profile.has_avx = false;
         hw_profile.has_avx512 = false;
@@ -959,14 +1041,46 @@ fn main() {
     /// not here, and does not begin with one of `KNOWN_FLAG_PREFIXES`, is a
     /// hard error -- see the check after the loop.
     const KNOWN_FLAGS: &[&str] = &[
-        "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
-        "-g", "--debug", "-O0", "-O1", "-O2", "-O3", "--lineinfo", "--emit-guarantees",
-        "--portable", "--autotune", "--autotune-force", "--no-autotune",
-        "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
-        "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
-        "--emit-verifier", "--emit-zk-ptx", "--c",
-        "--target=c", "--target=coprocessor", "--target=cpu", "--target=llvm",
-        "--target=native", "--target=ptx", "--target=r1cs", "--target=zk-ptx",
+        "-o",
+        "--output",
+        "-I",
+        "-l",
+        "--link",
+        "--name",
+        "--witness",
+        "-g",
+        "--debug",
+        "-O0",
+        "-O1",
+        "-O2",
+        "-O3",
+        "--lineinfo",
+        "--emit-guarantees",
+        "--portable",
+        "--autotune",
+        "--autotune-force",
+        "--no-autotune",
+        "--emit-attention-ptx",
+        "--emit-c",
+        "--emit-coprocessor",
+        "--emit-cpu",
+        "--emit-llvm",
+        "--emit-native",
+        "--emit-ptx",
+        "--emit-r1cs",
+        "--jit",
+        "--emit-verifier",
+        "--emit-zk-ptx",
+        "--c",
+        "--target=c",
+        "--target=coprocessor",
+        "--target=cpu",
+        "--target=llvm",
+        "--target=native",
+        "--target=ptx",
+        "--target=r1cs",
+        "--target=zk-ptx",
+        "--target=jit",
     ];
     /// Options that carry their value in the same argument.
     const KNOWN_FLAG_PREFIXES: &[&str] = &["--output=", "--lib-path=", "-I", "-l"];
@@ -983,7 +1097,9 @@ fn main() {
             lib_paths.push(std::path::PathBuf::from(&args[i][2..]));
             i += 1;
         } else if args[i].starts_with("--lib-path=") {
-            lib_paths.push(std::path::PathBuf::from(args[i].trim_start_matches("--lib-path=")));
+            lib_paths.push(std::path::PathBuf::from(
+                args[i].trim_start_matches("--lib-path="),
+            ));
             i += 1;
         } else if args[i].starts_with('-') {
             if !KNOWN_FLAGS.contains(&args[i].as_str())
@@ -1170,7 +1286,10 @@ fn main() {
 
     // Resolve imports recursively
     let parent_dir = if let Some(ref sf) = source_file {
-        std::path::Path::new(sf).parent().unwrap_or(std::path::Path::new("")).to_path_buf()
+        std::path::Path::new(sf)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf()
     } else {
         std::path::PathBuf::from("")
     };
@@ -1232,13 +1351,21 @@ fn main() {
                                         queue.extend(sub_prog.items);
                                     }
                                     Err(e) => {
-                                        log_error!("Syntax Error in imported module {}:\n    {}", target_file.display(), e);
+                                        log_error!(
+                                            "Syntax Error in imported module {}:\n    {}",
+                                            target_file.display(),
+                                            e
+                                        );
                                         exit(1);
                                     }
                                 }
                             }
                             Err(e) => {
-                                log_error!("Failed to read imported file {}: {}", target_file.display(), e);
+                                log_error!(
+                                    "Failed to read imported file {}: {}",
+                                    target_file.display(),
+                                    e
+                                );
                                 exit(1);
                             }
                         }
@@ -1252,7 +1379,43 @@ fn main() {
     }
 
     // Filter out Item::Import from the final list of items
-    ast.items = queue.into_iter().filter(|item| !matches!(item, Item::Import(_))).collect();
+    ast.items = queue
+        .into_iter()
+        .filter(|item| !matches!(item, Item::Import(_)))
+        .collect();
+
+    if jit_mode {
+        log_step!("3/4", "Checking and JIT-compiling CPU functions...");
+        let jit = match y::cpu_jit::CpuJit::compile_program(
+            &ast,
+            y::cpu_jit::JitOptions {
+                opt_level,
+                ..y::cpu_jit::JitOptions::default()
+            },
+        ) {
+            Ok(jit) => jit,
+            Err(e) => {
+                log_error!("CPU JIT: {}", e);
+                exit(1);
+            }
+        };
+        eprintln!(
+            "[CPU JIT] LLVM {}, {} functions, compile {:.3} ms",
+            jit.llvm_version(),
+            jit.functions().count(),
+            jit.compile_duration().as_secs_f64() * 1000.0
+        );
+        log_step!("4/4", "Running main...");
+        let status = match unsafe { jit.run_main() } {
+            Ok(status) => status,
+            Err(e) => {
+                log_error!("CPU JIT: {}", e);
+                exit(1);
+            }
+        };
+        drop(jit);
+        exit(status);
+    }
 
     // ────────────────────────────────────────────────────────
     // Phase 3: Semantic Type Checking & Math Verifiers
@@ -1260,12 +1423,16 @@ fn main() {
     log_step!("3/4", "Running Semantic Type-Checker...");
     let mut type_checker = TypeChecker::new();
     type_checker.set_zk_target(
-        args.iter().any(|a| a == "--emit-r1cs" || a == "--target=r1cs"),
+        args.iter()
+            .any(|a| a == "--emit-r1cs" || a == "--target=r1cs"),
     );
     type_checker.check_program(&ast);
 
     if !type_checker.errors.is_empty() {
-        log_error!("The Type-Checker caught {} semantic errors:", type_checker.errors.len());
+        log_error!(
+            "The Type-Checker caught {} semantic errors:",
+            type_checker.errors.len()
+        );
         for err in type_checker.errors {
             eprintln!("    \x1b[1;31m[Error]\x1b[0m {}", err);
         }
@@ -1290,7 +1457,6 @@ fn main() {
     // "insert a software compensation path" - while inserting nothing. It is a
     // real lowering now, chosen per device, and the backends report what they
     // actually selected. See src/zero_drift.rs.
-
 
     // ────────────────────────────────────────────────────────
     // Phase 4: Backend Emission
@@ -1334,7 +1500,12 @@ fn main() {
     let mut guarantees = std::mem::take(&mut type_checker.guarantees);
     guarantees.facts.extend(require::facts(&ast, &hw_profile));
     if emit_guarantees {
-        write_guarantees(&guarantees, source_file.as_deref(), &imported_items, explicit_output.as_deref());
+        write_guarantees(
+            &guarantees,
+            source_file.as_deref(),
+            &imported_items,
+            explicit_output.as_deref(),
+        );
         return;
     }
 
@@ -1458,7 +1629,10 @@ fn main() {
         // without a word. It is refused here, where the module is built, and
         // by every other backend except --emit-ptx at its own entry.
         if let Some(site) = ast::cache_policy_sites(&ast).first() {
-            log_error!("{}", ast::cache_policy_refusal("Co-processor backend", site));
+            log_error!(
+                "{}",
+                ast::cache_policy_refusal("Co-processor backend", site)
+            );
             exit(1);
         }
 
@@ -1474,7 +1648,10 @@ fn main() {
         println!("         RT Core nodes:     {}", rt_count);
         println!("         Tensor Core nodes: {}", tensor_count);
         println!("         Cross-pipe edges:  {}", cross_edges);
-        println!("         Sequential total:  {:.0} cycles", ir_graph.total_sequential_cycles());
+        println!(
+            "         Sequential total:  {:.0} cycles",
+            ir_graph.total_sequential_cycles()
+        );
 
         // Nothing to fuse is not something to fuse anyway.
         //
@@ -1513,10 +1690,19 @@ fn main() {
         scheduler.schedule(&ir_graph, &hw_profile);
 
         let sched = &scheduler.schedule;
-        println!("         SMEM budget:       {} bytes", sched.total_smem_bytes);
+        println!(
+            "         SMEM budget:       {} bytes",
+            sched.total_smem_bytes
+        );
         println!("         Sync barriers:     {}", sched.sync_barriers.len());
-        println!("         Est. parallel cy:  {:.0}", sched.estimated_total_cycles);
-        println!("         Overlap savings:   {:.0} cycles", sched.overlap_savings_cycles);
+        println!(
+            "         Est. parallel cy:  {:.0}",
+            sched.estimated_total_cycles
+        );
+        println!(
+            "         Overlap savings:   {:.0} cycles",
+            sched.overlap_savings_cycles
+        );
 
         for (i, barrier) in sched.sync_barriers.iter().enumerate() {
             if barrier.needs_quantization {
@@ -1609,8 +1795,12 @@ fn main() {
         full_ptx.push_str("// =======================================================\n");
         full_ptx.push_str("// Y Compiler - Dual-Accelerator Co-Processing Backend\n");
         full_ptx.push_str(&format!("// Hardware: {}\n", hw_profile.gpu_name));
-        full_ptx.push_str(&format!("// RT Nodes: {} | Tensor Nodes: {} | Barriers: {}\n",
-            rt_count, tensor_count, sched.sync_barriers.len()));
+        full_ptx.push_str(&format!(
+            "// RT Nodes: {} | Tensor Nodes: {} | Barriers: {}\n",
+            rt_count,
+            tensor_count,
+            sched.sync_barriers.len()
+        ));
         full_ptx.push_str("// =======================================================\n\n");
         full_ptx.push_str(&shared_decls);
         full_ptx.push('\n');
@@ -1657,43 +1847,45 @@ fn main() {
         }
     } else if emit_c {
         log_error!("The C backend has been removed. Y now uses LLVM as its primary backend.");
-        eprintln!("    To compile your code to a native binary (default behavior), omit backend flags.");
+        eprintln!(
+            "    To compile your code to a native binary (default behavior), omit backend flags."
+        );
         eprintln!("    To emit LLVM IR, use --emit-llvm.");
         exit(1);
     }
 
     let mut output_path = explicit_output.clone().unwrap_or_else(|| {
-            if emit_native {
-                "output_bin".to_string()
-            } else if emit_llvm {
-                if let Some(ref sf) = source_file {
-                    let path = std::path::Path::new(sf);
-                    let mut p = path.to_path_buf();
-                    p.set_extension("ll");
-                    p.to_string_lossy().to_string()
-                } else {
-                    "output.ll".to_string()
-                }
-            } else if emit_r1cs {
-                if let Some(ref sf) = source_file {
-                    let path = std::path::Path::new(sf);
-                    let mut p = path.to_path_buf();
-                    p.set_extension("r1cs");
-                    p.to_string_lossy().to_string()
-                } else {
-                    "output.r1cs".to_string()
-                }
+        if emit_native {
+            "output_bin".to_string()
+        } else if emit_llvm {
+            if let Some(ref sf) = source_file {
+                let path = std::path::Path::new(sf);
+                let mut p = path.to_path_buf();
+                p.set_extension("ll");
+                p.to_string_lossy().to_string()
             } else {
-                if let Some(ref sf) = source_file {
-                    let path = std::path::Path::new(sf);
-                    let mut p = path.to_path_buf();
-                    p.set_extension("");
-                    p.to_string_lossy().to_string()
-                } else {
-                    "output".to_string()
-                }
+                "output.ll".to_string()
             }
-        });
+        } else if emit_r1cs {
+            if let Some(ref sf) = source_file {
+                let path = std::path::Path::new(sf);
+                let mut p = path.to_path_buf();
+                p.set_extension("r1cs");
+                p.to_string_lossy().to_string()
+            } else {
+                "output.r1cs".to_string()
+            }
+        } else {
+            if let Some(ref sf) = source_file {
+                let path = std::path::Path::new(sf);
+                let mut p = path.to_path_buf();
+                p.set_extension("");
+                p.to_string_lossy().to_string()
+            } else {
+                "output".to_string()
+            }
+        }
+    });
 
     if output_path.starts_with('-') {
         output_path = format!("./{}", output_path);
@@ -1758,7 +1950,9 @@ fn main() {
                         (a1.1 - alloc0.1) as f64 / 1e9
                     );
                 } else {
-                    eprintln!("[Y ZK TIMING] emit allocations       (build with --features alloc-stats)");
+                    eprintln!(
+                        "[Y ZK TIMING] emit allocations       (build with --features alloc-stats)"
+                    );
                 }
             }
             match emitted {
@@ -1770,7 +1964,8 @@ fn main() {
                     );
 
                     // Write binary R1CS format directly to output_path
-                    let written = phase!("write_r1cs_binary", emitter.write_r1cs_binary(&output_path));
+                    let written =
+                        phase!("write_r1cs_binary", emitter.write_r1cs_binary(&output_path));
                     match written {
                         Ok(_) => {
                             println!("      -> R1CS binary target compiled successfully.");
@@ -1784,7 +1979,9 @@ fn main() {
 
                             // Also write human-readable constraints text to .r1cs.txt
                             let txt_path = format!("{}.r1cs.txt", prefix);
-                            phase!("write_r1cs_txt", { let _ = fs::write(&txt_path, &r1cs_text); });
+                            phase!("write_r1cs_txt", {
+                                let _ = fs::write(&txt_path, &r1cs_text);
+                            });
 
                             if timing {
                                 let (muls, adds) = zk_emitter::field_op_counts();
@@ -1819,7 +2016,10 @@ fn main() {
                                     }
                                 }
                             }
-                            println!("      -> Written human-readable constraints to: {}", txt_path);
+                            println!(
+                                "      -> Written human-readable constraints to: {}",
+                                txt_path
+                            );
                         }
                         Err(e) => {
                             log_error!("Failed to write binary R1CS output: {}", e);
@@ -1871,7 +2071,12 @@ fn main() {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
         if debug_info {
-            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
+            enable_debug_info(
+                &mut emitter,
+                source_file.as_deref(),
+                &imported_items,
+                opt_level > 0,
+            );
             emitter.set_guarantees(guarantees.clone());
         }
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
@@ -1906,7 +2111,10 @@ fn main() {
             opt_level, &output_path
         );
     } else if emit_ptx {
-        log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
+        log_step!(
+            "4/4",
+            "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes..."
+        );
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
         println!("      -> Pass 2: Automated Grid Block Swizzling Pass (grouped-raster L2 locality, group size {})", ptx_emitter::GEMM_SWIZZLE_GROUP_SIZE);
         println!(
@@ -1943,10 +2151,18 @@ fn main() {
                             _ => None,
                         }
                     }
-                    if let (Some(m), Some(n), Some(k_dim)) =
-                        (as_u32(&t.block_m), as_u32(&t.block_n), t.block_k.as_deref().and_then(as_u32))
-                    {
-                        let tuned_config = autotuner::Autotuner::autotune(m, n, k_dim, &hw_profile, autotuner::Precision::F16);
+                    if let (Some(m), Some(n), Some(k_dim)) = (
+                        as_u32(&t.block_m),
+                        as_u32(&t.block_n),
+                        t.block_k.as_deref().and_then(as_u32),
+                    ) {
+                        let tuned_config = autotuner::Autotuner::autotune(
+                            m,
+                            n,
+                            k_dim,
+                            &hw_profile,
+                            autotuner::Precision::F16,
+                        );
                         println!("         [JIT Autotuner Result] `{}` (M={}, N={}, K={}): CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
                             k.name, m, n, k_dim, tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
                         printed_any_tune = true;
@@ -1955,7 +2171,9 @@ fn main() {
             }
         }
         if !printed_any_tune {
-            println!("         [JIT Autotuner] No @tile'd kernel in this source - nothing to autotune.");
+            println!(
+                "         [JIT Autotuner] No @tile'd kernel in this source - nothing to autotune."
+            );
         }
 
         let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
@@ -2040,7 +2258,12 @@ fn main() {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
         if debug_info {
-            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
+            enable_debug_info(
+                &mut emitter,
+                source_file.as_deref(),
+                &imported_items,
+                opt_level > 0,
+            );
             emitter.set_guarantees(guarantees.clone());
         }
         let ll_output = emitter.emit_program(&ast, &hw_profile);
@@ -2083,7 +2306,7 @@ fn main() {
             }
         };
 
-// `-lX11` is needed ONLY by the optional GUI surface, and linking it
+        // `-lX11` is needed ONLY by the optional GUI surface, and linking it
         // unconditionally made every headless machine - CI, containers, a
         // server without libX11 - unable to compile any Y program at all.
         // Try with it, and if X11 is what is missing, retry.
@@ -2104,16 +2327,24 @@ fn main() {
         // runtime is compiled WITHOUT debug information, so `step` stays in Y
         // code instead of descending into the allocator behind `print_int`.
         let opt = format!("-O{}", opt_level);
-        let base = [opt.as_str(), "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
+        let base = [
+            opt.as_str(),
+            "-o",
+            output_path.as_str(),
+            ll_path.as_str(),
+            runtime_path.as_str(),
+            "-lm",
+        ];
         let with_x11 = std::process::Command::new("clang")
             .args(base)
             .arg("-lX11")
             .output();
         let clang_result = match with_x11 {
-            Ok(o) if !o.status.success() && {
-                let e = String::from_utf8_lossy(&o.stderr);
-                e.contains("-lX11") || e.contains("X11/Xlib.h")
-            } =>
+            Ok(o)
+                if !o.status.success() && {
+                    let e = String::from_utf8_lossy(&o.stderr);
+                    e.contains("-lX11") || e.contains("X11/Xlib.h")
+                } =>
             {
                 println!("      -> libX11 not present; linking without it (GUI calls will refuse at runtime).");
                 std::process::Command::new("clang")
@@ -2128,7 +2359,10 @@ fn main() {
             Ok(output) => {
                 if output.status.success() {
                     let _ = fs::remove_file(&ll_path);
-                    println!("      \x1b[1;32mCompiled successfully to native binary:\x1b[0m {}", output_path);
+                    println!(
+                        "      \x1b[1;32mCompiled successfully to native binary:\x1b[0m {}",
+                        output_path
+                    );
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     log_error!("clang failed:\n{}", stderr);
@@ -2163,13 +2397,23 @@ fn write_guarantees(
     imported: &[(String, std::path::PathBuf)],
     output: Option<&str>,
 ) {
-    let source = source.expect("--emit-guarantees without a source file is refused after option parsing");
+    let source =
+        source.expect("--emit-guarantees without a source file is refused after option parsing");
     let abs = |p: &std::path::Path| {
-        fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+        fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
     };
     let main_file = abs(std::path::Path::new(source));
-    let files: std::collections::HashMap<String, String> = imported.iter().map(|(n, p)| (n.clone(), abs(p))).collect();
-    let json = g.to_json(&|item| files.get(item).cloned().unwrap_or_else(|| main_file.clone()));
+    let files: std::collections::HashMap<String, String> =
+        imported.iter().map(|(n, p)| (n.clone(), abs(p))).collect();
+    let json = g.to_json(&|item| {
+        files
+            .get(item)
+            .cloned()
+            .unwrap_or_else(|| main_file.clone())
+    });
     let path = output
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(source).with_extension("guarantees.json"));
@@ -2206,8 +2450,15 @@ fn enable_debug_info(
 /// program's stack before calling the Y one - so `break main` in gdb stops in
 /// the runtime first, with no source to show.
 fn run_debugger(binary: &str) -> i32 {
-    let path = if binary.contains('/') { binary.to_string() } else { format!("./{}", binary) };
-    println!("[*] Starting gdb on {} (stopped at the first line of `fn main`)...", path);
+    let path = if binary.contains('/') {
+        binary.to_string()
+    } else {
+        format!("./{}", binary)
+    };
+    println!(
+        "[*] Starting gdb on {} (stopped at the first line of `fn main`)...",
+        path
+    );
     println!("    break FILE.ysu:LINE / next / step / print VAR / bt / continue / quit");
     // gdb runs the Y extension embedded in the program (pretty-printers, the
     // stack-trace filter) only for a file in its auto-load safe path; this
@@ -2228,7 +2479,10 @@ fn run_debugger(binary: &str) -> i32 {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             log_error!("could not start gdb: {}", e);
-            eprintln!("    {} carries DWARF debug information; any DWARF debugger can load it", path);
+            eprintln!(
+                "    {} carries DWARF debug information; any DWARF debugger can load it",
+                path
+            );
             eprintln!("    (lldb: `breakpoint set -n ysu_main`).");
             1
         }

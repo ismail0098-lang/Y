@@ -1,0 +1,133 @@
+// CPU kernels compiled in memory by the benchmark worker. Inputs come from
+// the host at runtime; every return value and every memory write is checked.
+
+@unsafe
+fn integer_branch(n: I64, seed: I64) -> I64 {
+    let mut x: I64 = seed;
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        x = (x * 48271) % 2147483647;
+        if (x & 7) < 3 {
+            sum = sum + x;
+        } else {
+            sum = sum - x;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+@unsafe
+fn recursive_fib(n: I64) -> I64 {
+    if n < 2 { return n; }
+    return recursive_fib(n - 1) + recursive_fib(n - 2);
+}
+
+@unsafe
+fn float_recurrence(n: I64, seed: F64) -> F64 {
+    let mut x: F64 = seed;
+    let mut i: I64 = 0;
+    while i < n {
+        x = x * 1.000001 + 0.0000003;
+        if x > 2.0 { x = x - 1.9999; }
+        i = i + 1;
+    }
+    return x;
+}
+
+@unsafe
+fn indexed_memory(data: GlobalMemory<I64>, n: I64, seed: I64) -> I64 {
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        let index: I64 = (i * 17 + seed) & 65535;
+        let value: I64 = (data[index] * 3 + 7) & 65535;
+        data[index] = value;
+        sum = sum + value;
+        i = i + 1;
+    }
+    return sum;
+}
+
+@unsafe
+fn unsigned_mix(n: I64, seed: U64) -> U64 {
+    let mut x: U64 = seed;
+    let mut i: I64 = 0;
+    while i < n {
+        x = x ^ (x >> 12);
+        x = x ^ (x << 25);
+        x = x ^ (x >> 27);
+        x = x * 2685821657736338717;
+        x = (x << 13) | (x >> 51);
+        i = i + 1;
+    }
+    return x;
+}
+
+@unsafe
+fn float_dot(a: GlobalMemory<F64>, b: GlobalMemory<F64>, n: I64, seed: I64) -> F64 {
+    let mut sum: F64 = 0.0;
+    let mut i: I64 = 0;
+    while i < n {
+        let index: I64 = (i + seed) & 65535;
+        sum = sum + a[index] * b[index];
+        i = i + 1;
+    }
+    return sum;
+}
+
+@unsafe
+fn bump_if(counters: GlobalMemory<I64>, value: I64) -> bool {
+    counters[0] = counters[0] + 1;
+    return (value & 7) < 3;
+}
+
+@unsafe
+fn short_circuit(counters: GlobalMemory<I64>, n: I64, seed: I64) -> I64 {
+    let mut x: I64 = seed;
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        x = (x * 48271) % 2147483647;
+        if ((x & 1) == 0) && bump_if(counters, x) {
+            counters[1] = counters[1] + 1;
+            sum = sum + x;
+        }
+        if ((x & 3) == 3) || bump_if(counters, x) {
+            counters[2] = counters[2] + 1;
+            sum = sum - x;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+@unsafe
+fn binary_search(data: GlobalMemory<I64>, n: I64, seed: I64) -> I64 {
+    let mut x: I64 = seed;
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        x = (x * 48271) % 2147483647;
+        let target: I64 = x % 196608;
+        let mut lower: I64 = 0;
+        let mut upper: I64 = 65535;
+        let mut found: I64 = -1;
+        while lower <= upper {
+            let middle: I64 = (lower + upper) / 2;
+            let value: I64 = data[middle];
+            if value == target {
+                found = middle;
+                break;
+            } else if value < target {
+                lower = middle + 1;
+            } else {
+                upper = middle - 1;
+            }
+        }
+        sum = sum + found;
+        i = i + 1;
+    }
+    return sum;
+}

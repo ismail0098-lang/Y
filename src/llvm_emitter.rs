@@ -22,9 +22,8 @@
 //    &mut T         ptr
 // ============================================================
 
-
 use crate::ast::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 
 /// A literal's value, for reading `@bounds` at compile time.
@@ -32,36 +31,47 @@ fn const_f64_of(expr: &Expr) -> Option<f64> {
     match expr {
         Expr::IntLit(v, _) => Some(*v as f64),
         Expr::FloatLit(v, _) => Some(*v),
-        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => const_f64_of(operand).map(|v| -v),
+        Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => const_f64_of(operand).map(|v| -v),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeObjectKind {
+    String,
+    Vector,
 }
 
 /// Symbols this module `declare`s in its own prelude, so a call to one needs no
 /// extra declaration.
 const PRELUDE_DECLARED: &[&str] = &[
-            "exit",
-            "free",
-            "llvm.memset.p0.i64",
-            "llvm.prefetch.p0",
-            "load",
-            "malloc",
-            "print_int",
-            "printf",
-            "println",
-            "yfile_read_to_string",
-            "yfile_write",
-            "ystr_char_at",
-            "ystr_clone",
-            "ystr_eq_cstr",
-            "ystr_len",
-            "ystr_new",
-            "ystr_push",
-            "ystr_push_str",
-            "yvec_get",
-            "yvec_len",
-            "yvec_new",
-            "yvec_push",
+    "exit",
+    "free",
+    "llvm.memset.p0.i64",
+    "llvm.memmove.p0.p0.i64",
+    "llvm.prefetch.p0",
+    "load",
+    "malloc",
+    "print_int",
+    "printf",
+    "println",
+    "yfile_read_to_string",
+    "yfile_write",
+    "ystr_char_at",
+    "ystr_clone",
+    "ystr_eq_cstr",
+    "ystr_len",
+    "ystr_new",
+    "ystr_push",
+    "ystr_push_str",
+    "yvec_get",
+    "yvec_len",
+    "yvec_new",
+    "yvec_push",
 ];
 
 /// Symbols libc provides, which every host link already resolves.
@@ -70,9 +80,7 @@ const PRELUDE_DECLARED: &[&str] = &[
 /// `c_src/runtime.c`, and a libc name is not defined there. Deliberately
 /// short: each entry is a promise that the symbol exists on every host this
 /// backend targets, so it is not a place to park a name that merely ought to.
-pub const LIBC_SYMBOLS: &[&str] = &[
-            "usleep",
-];
+pub const LIBC_SYMBOLS: &[&str] = &["usleep"];
 
 /// Six names were removed from this list in the same change that added the
 /// ShadowPlay surface, for the opposite reason: `init_allocator`,
@@ -101,84 +109,84 @@ pub const LIBC_SYMBOLS: &[&str] = &[
 /// silently - the same "assert the producers AGREE" device the `.version` gate
 /// uses.
 pub const RUNTIME_SYMBOLS: &[&str] = &[
-            "Expr_BinaryExpr",
-            "Expr_BoolLit",
-            "Expr_Call",
-            "Expr_CharLit",
-            "Expr_FloatLit",
-            "Expr_Ident",
-            "Expr_Index",
-            "Expr_IntLit",
-            "Expr_MemberAccess",
-            "Expr_Path",
-            "Expr_StringLit",
-            "Expr_StructLit",
-            "Expr_UnaryExpr",
-            "MatchPattern_EnumVariant",
-            "MatchPattern_Ident",
-            "MatchPattern_Literal",
-            "Stmt_Assign",
-            "Stmt_CompoundAssign",
-            "Stmt_ExprStmt",
-            "Stmt_For",
-            "Stmt_If",
-            "Stmt_Let",
-            "Stmt_Match",
-            "Stmt_Return",
-            "Stmt_SafeBlock",
-            "Stmt_While",
-            "String_new",
-            "TokenKind_AtUnknown",
-            "TokenKind_CharLit",
-            "TokenKind_FloatLit",
-            "TokenKind_HardwareTarget",
-            "TokenKind_Ident",
-            "TokenKind_IntLit",
-            "TokenKind_MmaMod",
-            "TokenKind_StringLit",
-            "TokenKind_Unknown",
-            "cleanup_shadowplay_gui",
-            "get_broadcast_state",
-            "get_capture_failure_count",
-            "get_codec_state",
-            "get_file_format_state",
-            "get_indicator_state",
-            "get_instant_replay_state",
-            "get_microphone_index",
-            "get_microphone_name",
-            "get_quality_state",
-            "get_recording_state",
-            "get_replay_duration",
-            "get_replay_duration_idx",
-            "get_voice_recording_state",
-            "init_shadowplay_gui",
-            "is_overlay_visible",
-            "print",
-            "print_int",
-            "print_microphone_label",
-            "println",
-            "str_to_i64",
-            "update_shadowplay_gui",
-            "ychar_to_ascii",
-            "yfile_read_to_string",
-            "yfile_write",
-            "ymalloc",
-            "yrealloc",
-            "ystr_char_at",
-            "ystr_clone",
-            "ystr_eq",
-            "ystr_eq_cstr",
-            "ystr_free",
-            "ystr_len",
-            "ystr_new",
-            "ystr_push",
-            "ystr_push_str",
-            "yvec_free",
-            "yvec_get",
-            "yvec_get_char",
-            "yvec_len",
-            "yvec_new",
-            "yvec_push",
+    "Expr_BinaryExpr",
+    "Expr_BoolLit",
+    "Expr_Call",
+    "Expr_CharLit",
+    "Expr_FloatLit",
+    "Expr_Ident",
+    "Expr_Index",
+    "Expr_IntLit",
+    "Expr_MemberAccess",
+    "Expr_Path",
+    "Expr_StringLit",
+    "Expr_StructLit",
+    "Expr_UnaryExpr",
+    "MatchPattern_EnumVariant",
+    "MatchPattern_Ident",
+    "MatchPattern_Literal",
+    "Stmt_Assign",
+    "Stmt_CompoundAssign",
+    "Stmt_ExprStmt",
+    "Stmt_For",
+    "Stmt_If",
+    "Stmt_Let",
+    "Stmt_Match",
+    "Stmt_Return",
+    "Stmt_SafeBlock",
+    "Stmt_While",
+    "String_new",
+    "TokenKind_AtUnknown",
+    "TokenKind_CharLit",
+    "TokenKind_FloatLit",
+    "TokenKind_HardwareTarget",
+    "TokenKind_Ident",
+    "TokenKind_IntLit",
+    "TokenKind_MmaMod",
+    "TokenKind_StringLit",
+    "TokenKind_Unknown",
+    "cleanup_shadowplay_gui",
+    "get_broadcast_state",
+    "get_capture_failure_count",
+    "get_codec_state",
+    "get_file_format_state",
+    "get_indicator_state",
+    "get_instant_replay_state",
+    "get_microphone_index",
+    "get_microphone_name",
+    "get_quality_state",
+    "get_recording_state",
+    "get_replay_duration",
+    "get_replay_duration_idx",
+    "get_voice_recording_state",
+    "init_shadowplay_gui",
+    "is_overlay_visible",
+    "print",
+    "print_int",
+    "print_microphone_label",
+    "println",
+    "str_to_i64",
+    "update_shadowplay_gui",
+    "ychar_to_ascii",
+    "yfile_read_to_string",
+    "yfile_write",
+    "ymalloc",
+    "yrealloc",
+    "ystr_char_at",
+    "ystr_clone",
+    "ystr_eq",
+    "ystr_eq_cstr",
+    "ystr_free",
+    "ystr_len",
+    "ystr_new",
+    "ystr_push",
+    "ystr_push_str",
+    "yvec_free",
+    "yvec_get",
+    "yvec_get_char",
+    "yvec_len",
+    "yvec_new",
+    "yvec_push",
 ];
 
 pub struct LlvmEmitter {
@@ -208,6 +216,8 @@ pub struct LlvmEmitter {
     /// there would read as the SIGNED `i16` operand of `vpdpwssd`. Indexing
     /// needs only the width.
     mem_storage_types: BTreeMap<String, String>,
+    /// Source element types retain signedness after LLVM erases it.
+    mem_ast_types: BTreeMap<String, String>,
     /// Map function names to their LLVM parameter types and return type
     functions: BTreeMap<String, (Vec<String>, String)>,
     /// Each program-defined function's parameter types AS ITS DEFINITION
@@ -222,6 +232,25 @@ pub struct LlvmEmitter {
     /// rather than a lowering: the call site then keeps its old answer, a type
     /// clang refuses, instead of agreeing with the definition on a wrong one.
     fn_llvm_params: BTreeMap<String, Vec<Option<String>>>,
+    /// Source return types, needed for unsigned arithmetic on call results.
+    fn_ast_returns: BTreeMap<String, String>,
+    /// Extra runtime symbols supplied by an embedding host such as CpuJit.
+    /// AOT leaves this empty because its C runtime provides fewer aliases.
+    host_runtime_symbols: HashSet<String>,
+    /// Recognize exact unsigned rotate idioms before generic expression lowering.
+    recognize_rotates: bool,
+    /// Only the CPU JIT's pointer/i64 runtime has these header layouts.
+    /// AOT's runtime uses a different ABI and leaves this disabled.
+    optimize_runtime: bool,
+    optimize_runtime_mutations: bool,
+    optimize_runtime_copies: bool,
+    optimize_helper_effects: bool,
+    /// Source helpers proved to access only their scalar parameters/locals.
+    scalar_runtime_helpers: HashSet<String>,
+    /// Local slots whose fresh allocation, uses and lifetime are proven.
+    runtime_locals: BTreeMap<String, RuntimeObjectKind>,
+    runtime_vector_sizes: BTreeMap<String, u64>,
+    native_string_handle_normalizer: Option<usize>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
     structs: BTreeMap<String, Vec<(String, String)>>,
     /// Track struct fields AST Types: StructName -> Vec<(FieldName, ASTType)>
@@ -419,26 +448,94 @@ impl LlvmEmitter {
         );
         functions.insert("print".into(), (vec!["&String".to_string()], "void".into()));
         functions.insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
+        functions.insert(
+            "str_to_i64".into(),
+            (vec!["&String".to_string()], "i64".into()),
+        );
+        functions.insert(
+            "ychar_to_ascii".into(),
+            (vec!["char".to_string()], "i32".into()),
+        );
         functions.insert("sqrtf".into(), (vec!["F32".to_string()], "float".into()));
-        functions.insert("math_sqrt".into(), (vec!["F32".to_string()], "float".into()));
-        functions.insert("math_fmin".into(), (vec!["F32".to_string(), "F32".to_string()], "float".into()));
-        functions.insert("math_fmax".into(), (vec!["F32".to_string(), "F32".to_string()], "float".into()));
+        functions.insert(
+            "math_sqrt".into(),
+            (vec!["F32".to_string()], "float".into()),
+        );
+        functions.insert(
+            "math_fmin".into(),
+            (vec!["F32".to_string(), "F32".to_string()], "float".into()),
+        );
+        functions.insert(
+            "math_fmax".into(),
+            (vec!["F32".to_string(), "F32".to_string()], "float".into()),
+        );
 
         // --- Standard Library namespaced methods ---
         functions.insert("Vec_new".into(), (vec!["I32".to_string()], "ptr".into()));
-        functions.insert("Vec_push".into(), (vec!["&mut Vec".to_string(), "&char".to_string()], "void".into()));
-        functions.insert("Vec_free".into(), (vec!["&mut Vec".to_string()], "void".into()));
+        functions.insert(
+            "Vec_push".into(),
+            (
+                vec!["&mut Vec".to_string(), "&char".to_string()],
+                "void".into(),
+            ),
+        );
+        functions.insert(
+            "Vec_free".into(),
+            (vec!["&mut Vec".to_string()], "void".into()),
+        );
         functions.insert("Vec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
-        functions.insert("Vec_get_char".into(), (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()));
+        functions.insert(
+            "Vec_get_char".into(),
+            (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()),
+        );
 
-        functions.insert("String_len".into(), (vec!["&String".to_string()], "i64".into()));
-        functions.insert("String_clone".into(), (vec!["&String".to_string()], "ptr".into()));
-        functions.insert("String_push".into(), (vec!["&mut String".to_string(), "char".to_string()], "void".into()));
-        functions.insert("String_push_str".into(), (vec!["&mut String".to_string(), "&String".to_string()], "void".into()));
-        functions.insert("String_eq".into(), (vec!["&String".to_string(), "&String".to_string()], "i1".into()));
-        functions.insert("String_eq_cstr".into(), (vec!["&String".to_string(), "&char".to_string()], "i1".into()));
-        functions.insert("String_char_at".into(), (vec!["&String".to_string(), "usize".to_string()], "i8".into()));
-        functions.insert("String_free".into(), (vec!["&mut String".to_string()], "void".into()));
+        functions.insert(
+            "String_len".into(),
+            (vec!["&String".to_string()], "i64".into()),
+        );
+        functions.insert(
+            "String_clone".into(),
+            (vec!["&String".to_string()], "ptr".into()),
+        );
+        functions.insert(
+            "String_push".into(),
+            (
+                vec!["&mut String".to_string(), "char".to_string()],
+                "void".into(),
+            ),
+        );
+        functions.insert(
+            "String_push_str".into(),
+            (
+                vec!["&mut String".to_string(), "&String".to_string()],
+                "void".into(),
+            ),
+        );
+        functions.insert(
+            "String_eq".into(),
+            (
+                vec!["&String".to_string(), "&String".to_string()],
+                "i1".into(),
+            ),
+        );
+        functions.insert(
+            "String_eq_cstr".into(),
+            (
+                vec!["&String".to_string(), "&char".to_string()],
+                "i1".into(),
+            ),
+        );
+        functions.insert(
+            "String_char_at".into(),
+            (
+                vec!["&String".to_string(), "usize".to_string()],
+                "i8".into(),
+            ),
+        );
+        functions.insert(
+            "String_free".into(),
+            (vec!["&mut String".to_string()], "void".into()),
+        );
 
         Self {
             output: String::new(),
@@ -452,8 +549,20 @@ impl LlvmEmitter {
             pointee_types: BTreeMap::new(),
             mem_elem_types: BTreeMap::new(),
             mem_storage_types: BTreeMap::new(),
+            mem_ast_types: BTreeMap::new(),
             functions,
             fn_llvm_params: BTreeMap::new(),
+            fn_ast_returns: BTreeMap::new(),
+            host_runtime_symbols: HashSet::new(),
+            recognize_rotates: true,
+            optimize_runtime: false,
+            optimize_runtime_mutations: false,
+            optimize_runtime_copies: false,
+            optimize_helper_effects: false,
+            scalar_runtime_helpers: HashSet::new(),
+            runtime_locals: BTreeMap::new(),
+            runtime_vector_sizes: BTreeMap::new(),
+            native_string_handle_normalizer: None,
             structs: BTreeMap::new(),
             ast_structs: HashMap::new(),
             struct_field_attrs: HashMap::new(),
@@ -496,6 +605,46 @@ impl LlvmEmitter {
 
     /// What the front end checked, proved or assumed, for the program to
     /// carry under `-g` (`ydb verify` reads it). A no-op without `-g`.
+    /// Permit calls to runtime entrypoints the embedding host actually owns.
+    pub fn register_host_runtime_symbols(&mut self, names: &[&str]) {
+        self.host_runtime_symbols
+            .extend(names.iter().map(|name| (*name).to_string()));
+    }
+
+    /// Enable exact rotate recognition; disabling it preserves generic shifts.
+    pub fn set_recognize_rotates(&mut self, enabled: bool) {
+        self.recognize_rotates = enabled;
+    }
+
+    /// Enable closed local String/Vec reads for the CPU JIT runtime ABI.
+    /// Host runtime symbols must also be registered; AOT leaves this false.
+    pub fn set_optimize_runtime(&mut self, enabled: bool) {
+        self.optimize_runtime = enabled;
+    }
+
+    /// Inline guarded appends to closed local CPU JIT objects with capacity.
+    pub fn set_optimize_runtime_mutations(&mut self, enabled: bool) {
+        self.optimize_runtime_mutations = enabled;
+    }
+
+    /// Extend guarded appends to exact-width dynamic Vec sizes and bulk
+    /// String copies. Mutation optimization must also be enabled.
+    pub fn set_optimize_runtime_copies(&mut self, enabled: bool) {
+        self.optimize_runtime_copies = enabled;
+    }
+
+    /// Preserve closed runtime-object proofs across proved scalar-only source
+    /// helpers. Calls retain their original evaluation and lowering.
+    pub fn set_optimize_helper_effects(&mut self, enabled: bool) {
+        self.optimize_helper_effects = enabled;
+    }
+
+    /// Supply the CPU runtime's ptr -> ptr normalizer for typed String refs.
+    /// This remains unset for AOT and is independent of query optimization.
+    pub fn set_native_string_handle_normalizer(&mut self, address: usize) {
+        self.native_string_handle_normalizer = (address != 0).then_some(address);
+    }
+
     pub fn set_guarantees(&mut self, g: crate::guarantees::Guarantees) {
         if let Some(d) = self.debug.as_mut() {
             d.set_guarantees(g);
@@ -525,8 +674,15 @@ impl LlvmEmitter {
         let Some(d) = self.debug.as_mut() else { return };
         if d.move_to(line, col) {
             let scope = d.scope_code();
-            writeln!(&mut self.output, "{}{} {} {}", crate::debug_info::LOC_MARKER, line, col, scope)
-                .unwrap();
+            writeln!(
+                &mut self.output,
+                "{}{} {} {}",
+                crate::debug_info::LOC_MARKER,
+                line,
+                col,
+                scope
+            )
+            .unwrap();
         }
     }
 
@@ -639,7 +795,12 @@ impl LlvmEmitter {
         self.emit_load_with_attrs(ptr, ty, None)
     }
 
-    fn emit_load_with_attrs(&mut self, ptr: &str, ty: &str, attrs: Option<Vec<FieldAttrKind>>) -> String {
+    fn emit_load_with_attrs(
+        &mut self,
+        ptr: &str,
+        ty: &str,
+        attrs: Option<Vec<FieldAttrKind>>,
+    ) -> String {
         let tmp = self.fresh_tmp();
         let mut is_atomic = false;
         let mut atomic_ordering = "seq_cst".to_string();
@@ -689,7 +850,12 @@ impl LlvmEmitter {
             writeln!(
                 &mut self.output,
                 "  {} = load atomic {}, ptr {}{} {}{}",
-                tmp, ty, ptr, if is_volatile { " volatile" } else { "" }, atomic_ordering, align_str
+                tmp,
+                ty,
+                ptr,
+                if is_volatile { " volatile" } else { "" },
+                atomic_ordering,
+                align_str
             )
             .unwrap();
         } else {
@@ -713,7 +879,13 @@ impl LlvmEmitter {
         self.emit_store_with_attrs(val, ptr, ty, None)
     }
 
-    fn emit_store_with_attrs(&mut self, val: &str, ptr: &str, ty: &str, attrs: Option<Vec<FieldAttrKind>>) {
+    fn emit_store_with_attrs(
+        &mut self,
+        val: &str,
+        ptr: &str,
+        ty: &str,
+        attrs: Option<Vec<FieldAttrKind>>,
+    ) {
         let mut is_atomic = false;
         let mut atomic_ordering = "seq_cst".to_string();
         let mut is_volatile = false;
@@ -762,7 +934,12 @@ impl LlvmEmitter {
             writeln!(
                 &mut self.output,
                 "  store atomic {} {}, ptr {}{} {}{}",
-                ty, val, ptr, if is_volatile { " volatile" } else { "" }, atomic_ordering, align_str
+                ty,
+                val,
+                ptr,
+                if is_volatile { " volatile" } else { "" },
+                atomic_ordering,
+                align_str
             )
             .unwrap();
         } else {
@@ -814,10 +991,7 @@ impl LlvmEmitter {
     /// This used to be the rule's only copy. The PTX backend had no equivalent
     /// at all, so `acc = acc + e` was an f32 accumulation there long after it
     /// was fixed here - `feedback-gotchas-apply-to-every-backend`, found again.
-    fn drift_running_sum<'e>(
-        target: &Expr,
-        value: &'e Expr,
-    ) -> Option<(BinaryOp, &'e Expr)> {
+    fn drift_running_sum<'e>(target: &Expr, value: &'e Expr) -> Option<(BinaryOp, &'e Expr)> {
         crate::zero_drift::running_sum(target, value)
     }
 
@@ -825,7 +999,12 @@ impl LlvmEmitter {
         let ity = repr.llvm_type();
         if repr.frac_bits() == 0 {
             let out = self.fresh_tmp();
-            writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, val, ity).unwrap();
+            writeln!(
+                &mut self.output,
+                "  {} = fptosi double {} to {}",
+                out, val, ity
+            )
+            .unwrap();
             return out;
         }
         let scaled = self.fresh_tmp();
@@ -838,7 +1017,12 @@ impl LlvmEmitter {
         )
         .unwrap();
         let is_neg = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = fcmp olt double {}, 0.0", is_neg, scaled).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = fcmp olt double {}, 0.0",
+            is_neg, scaled
+        )
+        .unwrap();
         let bias = self.fresh_tmp();
         writeln!(
             &mut self.output,
@@ -847,9 +1031,19 @@ impl LlvmEmitter {
         )
         .unwrap();
         let rounded = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = fadd double {}, {}", rounded, scaled, bias).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = fadd double {}, {}",
+            rounded, scaled, bias
+        )
+        .unwrap();
         let out = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, rounded, ity).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = fptosi double {} to {}",
+            out, rounded, ity
+        )
+        .unwrap();
         out
     }
 
@@ -857,7 +1051,12 @@ impl LlvmEmitter {
     fn emit_from_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
         let ity = repr.llvm_type();
         let as_f = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = sitofp {} {} to double", as_f, ity, val).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = sitofp {} {} to double",
+            as_f, ity, val
+        )
+        .unwrap();
         if repr.frac_bits() == 0 {
             return as_f;
         }
@@ -903,30 +1102,110 @@ impl LlvmEmitter {
         self.emit_coerce(&v, &t, "double")
     }
 
-    /// Is this expression's Y-level type unsigned?
-    ///
-    /// LLVM has no unsigned integer types -- `U32` and `I32` are both `i32` --
-    /// so `emit_type` erases the one bit that decides between `zext` and
-    /// `sext`. `locals_ast_type` still has it for a binding, which is enough
-    /// for the shapes that matter: a named value, a unary or binary
-    /// expression over named values, and a parenthesised form of either.
-    ///
-    /// Defaults to `false` (signed), which is the previous behaviour, so an
-    /// expression this cannot classify is no worse off than before.
+    /// Recover the signedness LLVM's integer types erase. Comparisons produce
+    /// booleans; their operands' signedness must not propagate to the result.
     fn expr_is_unsigned(&self, e: &Expr) -> bool {
         match e {
-            Expr::Ident(name, _) => self
-                .locals_ast_type
-                .get(name)
-                .is_some_and(|t| matches!(t.as_str(), "U8" | "U16" | "U32" | "U64" | "usize")),
-            // If either side is unsigned the value is being computed in
-            // unsigned terms; widening it must not invent a sign bit.
-            Expr::BinaryOp { left, right, .. } => {
-                self.expr_is_unsigned(left) || self.expr_is_unsigned(right)
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                !matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::Gt
+                        | BinaryOp::Le
+                        | BinaryOp::Ge
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                ) && self.binary_is_unsigned(op, left, right)
             }
-            Expr::UnaryOp { operand, .. } => self.expr_is_unsigned(operand),
-            _ => false,
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => self.expr_is_unsigned(operand),
+            _ => matches!(
+                self.infer_ast_type(e).as_str(),
+                "U8" | "U16" | "U32" | "U64" | "u8" | "u16" | "u32" | "u64" | "usize"
+            ),
         }
+    }
+
+    /// Mixed integers use the wider width. At equal widths unsigned wins;
+    /// a wider signed type can represent every value of the unsigned type.
+    /// A shift's interpretation depends only on the value being shifted.
+    fn binary_is_unsigned(&self, op: &BinaryOp, left: &Expr, right: &Expr) -> bool {
+        let l_unsigned = self.expr_is_unsigned(left);
+        if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+            return l_unsigned;
+        }
+        let l_ty = self.infer_type(left);
+        let r_ty = self.infer_type(right);
+        if [l_ty.as_str(), r_ty.as_str()]
+            .iter()
+            .any(|t| matches!(*t, "float" | "double" | "half"))
+        {
+            return false;
+        }
+        let r_unsigned = self.expr_is_unsigned(right);
+        match (l_unsigned, r_unsigned) {
+            (true, true) => true,
+            (true, false) => Self::int_bits(&l_ty) >= Self::int_bits(&r_ty),
+            (false, true) => Self::int_bits(&r_ty) >= Self::int_bits(&l_ty),
+            (false, false) => false,
+        }
+    }
+
+    fn common_operand_type(left: &str, right: &str) -> String {
+        // Boolean arithmetic uses 0/1 at a real integer width.
+        let left = if left == "i1" { "i32" } else { left };
+        let right = if right == "i1" { "i32" } else { right };
+        let float_bits = |ty| match ty {
+            "double" => 64,
+            "float" => 32,
+            "half" => 16,
+            _ => 0,
+        };
+        let l_float = float_bits(left);
+        let r_float = float_bits(right);
+        if l_float != 0 || r_float != 0 {
+            if l_float >= r_float {
+                left
+            } else {
+                right
+            }
+        } else if Self::int_bits(left) >= Self::int_bits(right) {
+            left
+        } else {
+            right
+        }
+        .to_string()
+    }
+
+    /// Binary expressions and compound assignments must use the same operand
+    /// widths and independently extend each source with its own signedness.
+    fn promote_binary_values(
+        &mut self,
+        op: &BinaryOp,
+        left: &Expr,
+        right: &Expr,
+        l_value: &str,
+        r_value: &str,
+    ) -> (String, String, String) {
+        let l_ty = self.infer_type(left);
+        let r_ty = self.infer_type(right);
+        let common = if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            "i1".to_string()
+        } else {
+            Self::common_operand_type(&l_ty, &r_ty)
+        };
+        let l_unsigned = self.expr_is_unsigned(left);
+        let r_unsigned = self.expr_is_unsigned(right);
+        let l_value = self.emit_coerce_from(l_value, &l_ty, &common, l_unsigned);
+        let r_value = self.emit_coerce_from(r_value, &r_ty, &common, r_unsigned);
+        (l_value, r_value, common)
     }
 
     fn emit_coerce(&mut self, val: &str, src_ty: &str, dst_ty: &str) -> String {
@@ -992,11 +1271,15 @@ impl LlvmEmitter {
             )
             .unwrap();
         } else if src_int && dst_float {
-            // integer -> float (signed)
+            // Unsigned high-bit values must stay positive when converted.
             writeln!(
                 &mut self.output,
-                "  {} = sitofp {} {} to {}",
-                tmp, src_ty, val, dst_ty
+                "  {} = {} {} {} to {}",
+                tmp,
+                if src_unsigned { "uitofp" } else { "sitofp" },
+                src_ty,
+                val,
+                dst_ty
             )
             .unwrap();
         } else if src_float && dst_float {
@@ -1444,23 +1727,85 @@ impl LlvmEmitter {
             .insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
 
         // --- Standard Library namespaced methods ---
-        self.functions.insert("Vec_new".into(), (vec!["I32".to_string()], "ptr".into()));
-        self.functions.insert("Vec_push".into(), (vec!["&mut Vec".to_string(), "&char".to_string()], "void".into()));
-        self.functions.insert("Vec_free".into(), (vec!["&mut Vec".to_string()], "void".into()));
-        self.functions.insert("Vec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
-        self.functions.insert("Vec_get_char".into(), (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()));
+        self.functions
+            .insert("Vec_new".into(), (vec!["I32".to_string()], "ptr".into()));
+        self.functions.insert(
+            "Vec_push".into(),
+            (
+                vec!["&mut Vec".to_string(), "&char".to_string()],
+                "void".into(),
+            ),
+        );
+        self.functions.insert(
+            "Vec_free".into(),
+            (vec!["&mut Vec".to_string()], "void".into()),
+        );
+        self.functions
+            .insert("Vec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
+        self.functions.insert(
+            "Vec_get_char".into(),
+            (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()),
+        );
 
-        self.functions.insert("String_len".into(), (vec!["&String".to_string()], "i64".into()));
-        self.functions.insert("String_clone".into(), (vec!["&String".to_string()], "ptr".into()));
-        self.functions.insert("String_push".into(), (vec!["&mut String".to_string(), "char".to_string()], "void".into()));
-        self.functions.insert("String_push_str".into(), (vec!["&mut String".to_string(), "&String".to_string()], "void".into()));
-        self.functions.insert("String_eq".into(), (vec!["&String".to_string(), "&String".to_string()], "i1".into()));
-        self.functions.insert("String_eq_cstr".into(), (vec!["&String".to_string(), "&char".to_string()], "i1".into()));
-        self.functions.insert("String_char_at".into(), (vec!["&String".to_string(), "usize".to_string()], "i8".into()));
-        self.functions.insert("String_free".into(), (vec!["&mut String".to_string()], "void".into()));
+        self.functions.insert(
+            "String_len".into(),
+            (vec!["&String".to_string()], "i64".into()),
+        );
+        self.functions.insert(
+            "String_clone".into(),
+            (vec!["&String".to_string()], "ptr".into()),
+        );
+        self.functions.insert(
+            "String_push".into(),
+            (
+                vec!["&mut String".to_string(), "char".to_string()],
+                "void".into(),
+            ),
+        );
+        self.functions.insert(
+            "String_push_str".into(),
+            (
+                vec!["&mut String".to_string(), "&String".to_string()],
+                "void".into(),
+            ),
+        );
+        self.functions.insert(
+            "String_eq".into(),
+            (
+                vec!["&String".to_string(), "&String".to_string()],
+                "i1".into(),
+            ),
+        );
+        self.functions.insert(
+            "String_eq_cstr".into(),
+            (
+                vec!["&String".to_string(), "&char".to_string()],
+                "i1".into(),
+            ),
+        );
+        self.functions.insert(
+            "String_char_at".into(),
+            (
+                vec!["&String".to_string(), "usize".to_string()],
+                "i8".into(),
+            ),
+        );
+        self.functions.insert(
+            "String_free".into(),
+            (vec!["&mut String".to_string()], "void".into()),
+        );
 
-        self.functions.insert("File_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
-        self.functions.insert("File_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
+        self.functions.insert(
+            "File_read_to_string".into(),
+            (vec!["&String".to_string()], "ptr".into()),
+        );
+        self.functions.insert(
+            "File_write".into(),
+            (
+                vec!["&String".to_string(), "&String".to_string()],
+                "void".into(),
+            ),
+        );
 
         // Phase 0a: register every struct and enum FIRST.
         //
@@ -1494,7 +1839,8 @@ impl LlvmEmitter {
                     for f in &s.fields {
                         fields.push((f.name.clone(), self.emit_field_type(&f.ty)));
                         ast_fields.push((f.name.clone(), ast_type_to_string(&f.ty)));
-                        let attrs: Vec<FieldAttrKind> = f.attrs.iter().map(|attr| attr.kind.clone()).collect();
+                        let attrs: Vec<FieldAttrKind> =
+                            f.attrs.iter().map(|attr| attr.kind.clone()).collect();
                         field_attrs.insert(f.name.clone(), attrs);
                     }
                     self.structs.insert(s.name.clone(), fields);
@@ -1517,6 +1863,10 @@ impl LlvmEmitter {
                     let param_tys: Vec<String> =
                         f.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions.insert(f.name.clone(), (param_tys, ret_ty));
+                    if let Some(ret) = &f.ret_ty {
+                        self.fn_ast_returns
+                            .insert(f.name.clone(), ast_type_to_string(ret));
+                    }
                     let llvm = self.definition_param_types(&f.params);
                     self.fn_llvm_params.insert(f.name.clone(), llvm);
                 }
@@ -1531,6 +1881,10 @@ impl LlvmEmitter {
                             m.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                         let name = format!("{}_{}", imp.target_type, m.name);
                         self.functions.insert(name.clone(), (param_tys, ret_ty));
+                        if let Some(ret) = &m.ret_ty {
+                            self.fn_ast_returns
+                                .insert(name.clone(), ast_type_to_string(ret));
+                        }
                         let llvm = self.definition_param_types(&m.params);
                         self.fn_llvm_params.insert(name, llvm);
                     }
@@ -1546,6 +1900,8 @@ impl LlvmEmitter {
                 _ => {}
             }
         }
+
+        self.scalar_runtime_helpers = self.prove_scalar_runtime_helpers(prog);
 
         if let Some(d) = &mut self.debug {
             d.register_types(prog, &self.structs);
@@ -1602,14 +1958,20 @@ impl LlvmEmitter {
 
         self.wln("; --- External Runtime Declarations ---");
         self.wln("declare ptr @ystr_new(ptr)");
-        self.wln("declare void @ystr_push(ptr, i8)");
-        self.wln("declare void @ystr_push_str(ptr, ptr)");
+        if !self.fn_llvm_params.contains_key("ystr_push") {
+            self.wln("declare void @ystr_push(ptr, i8)");
+        }
+        if !self.fn_llvm_params.contains_key("ystr_push_str") {
+            self.wln("declare void @ystr_push_str(ptr, ptr)");
+        }
         self.wln("declare i1 @ystr_eq_cstr(ptr, ptr)");
         self.wln("declare i64 @ystr_len(ptr)");
         self.wln("declare i8 @ystr_char_at(ptr, i64)");
         self.wln("declare ptr @ystr_clone(ptr)");
         self.wln("declare ptr @yvec_new(i64)");
-        self.wln("declare void @yvec_push(ptr, ptr)");
+        if !self.fn_llvm_params.contains_key("yvec_push") {
+            self.wln("declare void @yvec_push(ptr, ptr)");
+        }
         self.wln("declare ptr @yvec_get(ptr, i64)");
         self.wln("declare i64 @yvec_len(ptr)");
         self.wln("declare ptr @yfile_read_to_string(ptr)");
@@ -1625,8 +1987,22 @@ impl LlvmEmitter {
         // prelude, and so every module this backend emits, is unchanged.
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
         self.wln("declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)");
+        if self
+            .called_functions
+            .iter()
+            .any(|name| name == "llvm.memmove.p0.p0.i64")
+        {
+            self.wln("declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)");
+        }
         self.wln("declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)");
         self.wln("declare { i64, i1 } @llvm.uadd.with.overflow.i64(i64, i64)");
+        for ty in ["i8", "i16", "i32", "i64"] {
+            for intrinsic in ["fshl", "fshr"] {
+                self.wln(&format!(
+                    "declare {ty} @llvm.{intrinsic}.{ty}({ty}, {ty}, {ty})"
+                ));
+            }
+        }
         self.wln("");
 
         // Emit all collected string constants at module scope
@@ -1655,6 +2031,7 @@ impl LlvmEmitter {
             .iter()
             .chain(LIBC_SYMBOLS.iter())
             .copied()
+            .chain(self.host_runtime_symbols.iter().map(String::as_str))
             .collect();
 
         let defined_set: std::collections::HashSet<String> =
@@ -1690,8 +2067,7 @@ impl LlvmEmitter {
                     if ret_ty.starts_with('%') {
                         writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
                     } else {
-                        writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname)
-                            .unwrap();
+                        writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
                     }
                 } else {
                     // Neither declared above, nor defined here, nor present in
@@ -1838,10 +2214,1168 @@ impl LlvmEmitter {
         self.pointee_types.clear();
         self.mem_elem_types.clear();
         self.mem_storage_types.clear();
+        self.mem_ast_types.clear();
         self.zero_drift.clear();
         self.loop_exit_stack.clear();
         self.block_terminated = false;
         self.current_load_hint = None;
+        self.runtime_locals.clear();
+        self.runtime_vector_sizes.clear();
+    }
+
+    fn runtime_arg_local(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Ident(name, _) => Some(name),
+            Expr::UnaryOp {
+                op: UnaryOp::Ref { .. },
+                operand,
+                ..
+            } => match &**operand {
+                Expr::Ident(name, _) => Some(name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn host_runtime_call(&self, name: &str) -> bool {
+        self.host_runtime_symbols.contains(name) && !self.fn_llvm_params.contains_key(name)
+    }
+
+    fn scalar_helper_type(&self, ty: &Type) -> bool {
+        let name = match ty {
+            Type::Primitive(name, _) | Type::Ident(name, _) => name,
+            _ => return false,
+        };
+        !self.structs.contains_key(name)
+            && !self.enums.contains_key(name)
+            && primitive_llvm_type(name).is_some_and(|ty| ty != "ptr")
+    }
+
+    fn scalar_helper_expr(
+        expr: &Expr,
+        locals: &HashSet<String>,
+        proved: &HashSet<String>,
+        arities: &BTreeMap<String, usize>,
+    ) -> bool {
+        match expr {
+            Expr::IntLit(..) | Expr::FloatLit(..) | Expr::CharLit(..) | Expr::BoolLit(..) => true,
+            Expr::Ident(name, _) => locals.contains(name),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::scalar_helper_expr(left, locals, proved, arities)
+                    && Self::scalar_helper_expr(right, locals, proved, arities)
+            }
+            Expr::UnaryOp {
+                op: UnaryOp::Neg | UnaryOp::Not,
+                operand,
+                ..
+            } => Self::scalar_helper_expr(operand, locals, proved, arities),
+            Expr::Call { func, args, .. } => {
+                let Expr::Ident(name, _) = &**func else {
+                    return false;
+                };
+                proved.contains(name)
+                    && arities.get(name) == Some(&args.len())
+                    && args
+                        .iter()
+                        .all(|arg| Self::scalar_helper_expr(arg, locals, proved, arities))
+            }
+            // These expressions may allocate, address memory, name globals,
+            // use an unresolved type/callee, or contain hidden statements.
+            Expr::StringLit(..)
+            | Expr::GenericCall { .. }
+            | Expr::Index { .. }
+            | Expr::MemberAccess { .. }
+            | Expr::Path { .. }
+            | Expr::UnaryOp { .. }
+            | Expr::BlockExpr(..)
+            | Expr::SelfLit(..)
+            | Expr::StructLit { .. }
+            | Expr::ZeroInit(..) => false,
+        }
+    }
+
+    fn scalar_helper_block(
+        &self,
+        block: &Block,
+        outer: &HashSet<String>,
+        proved: &HashSet<String>,
+        arities: &BTreeMap<String, usize>,
+    ) -> bool {
+        // Lexical scope matters: a local inside one branch cannot authorize
+        // an unbound/global identifier used after that branch.
+        let mut locals = outer.clone();
+        for stmt in &block.stmts {
+            let pure_expr = |expr: &Expr| Self::scalar_helper_expr(expr, &locals, proved, arities);
+            let pure = match stmt {
+                Stmt::Let {
+                    name,
+                    ty,
+                    init: Some(init),
+                    cache_policy: None,
+                    zero_drift: None,
+                    bounds: None,
+                    ..
+                } => {
+                    if !ty.as_ref().is_none_or(|ty| self.scalar_helper_type(ty)) || !pure_expr(init)
+                    {
+                        return false;
+                    }
+                    locals.insert(name.clone());
+                    true
+                }
+                Stmt::Assign {
+                    target: Expr::Ident(name, _),
+                    value,
+                    ..
+                }
+                | Stmt::CompoundAssign {
+                    target: Expr::Ident(name, _),
+                    value,
+                    ..
+                } => locals.contains(name) && pure_expr(value),
+                Stmt::Expr(expr) | Stmt::Return(Some(expr), _) => pure_expr(expr),
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    pure_expr(condition)
+                        && self.scalar_helper_block(then_block, &locals, proved, arities)
+                        && else_block.as_ref().is_none_or(|block| {
+                            self.scalar_helper_block(block, &locals, proved, arities)
+                        })
+                }
+                Stmt::While {
+                    condition,
+                    body,
+                    invariant,
+                    ..
+                } => {
+                    pure_expr(condition)
+                        && invariant.as_ref().is_none_or(|expr| pure_expr(expr))
+                        && self.scalar_helper_block(body, &locals, proved, arities)
+                }
+                Stmt::For {
+                    loop_var,
+                    start,
+                    end,
+                    step,
+                    body,
+                    invariant,
+                    tile: None,
+                    prefetch_stride: None,
+                    ..
+                } => {
+                    if !pure_expr(start)
+                        || !pure_expr(end)
+                        || !step.as_ref().is_none_or(|expr| pure_expr(expr))
+                    {
+                        return false;
+                    }
+                    let mut loop_locals = locals.clone();
+                    loop_locals.insert(loop_var.clone());
+                    invariant.as_ref().is_none_or(|expr| {
+                        Self::scalar_helper_expr(expr, &loop_locals, proved, arities)
+                    }) && self.scalar_helper_block(body, &loop_locals, proved, arities)
+                }
+                Stmt::SafeBlock(body, _) => {
+                    self.scalar_helper_block(body, &locals, proved, arities)
+                }
+                Stmt::Break { .. } => true,
+                // In particular, refuse indirect stores, uninitialized or
+                // non-scalar bindings, inline assembly and backend directives.
+                Stmt::Let { .. }
+                | Stmt::TypeAlias { .. }
+                | Stmt::For { .. }
+                | Stmt::Assign { .. }
+                | Stmt::CompoundAssign { .. }
+                | Stmt::Return(None, _)
+                | Stmt::Chisel(..)
+                | Stmt::Match { .. }
+                | Stmt::GhostBlock(..)
+                | Stmt::ClockDomainBlock { .. }
+                | Stmt::CompileTimeAssert { .. }
+                | Stmt::HintBlock { .. } => false,
+            };
+            if !pure {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Grow the set from scalar leaves to their proved callers. Recursion and
+    /// unresolved source/runtime calls never enter the set. No call is moved
+    /// or removed and no LLVM memory/effect attributes are asserted here.
+    fn prove_scalar_runtime_helpers(&self, program: &Program) -> HashSet<String> {
+        let mut proved = HashSet::new();
+        if !self.optimize_helper_effects {
+            return proved;
+        }
+        let mut functions = BTreeMap::new();
+        let mut duplicate_names = HashSet::new();
+        for item in &program.items {
+            match item {
+                Item::Func(function) => {
+                    if functions.insert(function.name.clone(), function).is_some() {
+                        duplicate_names.insert(function.name.clone());
+                    }
+                }
+                Item::Impl(implementation) => {
+                    for method in &implementation.methods {
+                        duplicate_names
+                            .insert(format!("{}_{}", implementation.target_type, method.name));
+                    }
+                }
+                Item::Kernel(kernel) => {
+                    duplicate_names.insert(kernel.name.clone());
+                }
+                _ => {}
+            }
+        }
+        // `main` lowers to a different entry name. Do not summarize that
+        // mapping or a top-level function that could collide with its body.
+        if functions.contains_key("main") {
+            duplicate_names.insert("ysu_main".into());
+        }
+        duplicate_names.insert("main".into());
+        functions.retain(|name, _| {
+            !duplicate_names.contains(name)
+                // These names use special intrinsic dispatch even when a
+                // source definition exists. Its scalar body therefore does
+                // not establish the effects of the call actually emitted.
+                && !matches!(
+                    name.as_str(),
+                    "load"
+                        | "make_block_ptr2d"
+                        | "block_ptr2d_load"
+                        | "block_ptr2d_store"
+                        | "block_ptr3d_load"
+                        | "block_ptr3d_store"
+                )
+        });
+        let arities = functions
+            .iter()
+            .map(|(name, function)| (name.clone(), function.params.len()))
+            .collect();
+        loop {
+            let mut changed = false;
+            for (name, function) in &functions {
+                if proved.contains(name)
+                    || !function.is_safe
+                    || function.is_zk_safe
+                    || function.is_zk_allow_unconstrained
+                    || function.is_ptx_emit
+                    || function.is_ghost
+                    || function.is_hdl_emit
+                    || function.tile.is_some()
+                    || !function
+                        .ret_ty
+                        .as_ref()
+                        .is_some_and(|ty| self.scalar_helper_type(ty))
+                    || !function
+                        .params
+                        .iter()
+                        .all(|param| self.scalar_helper_type(&param.ty))
+                {
+                    continue;
+                }
+                let locals = function
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect();
+                if self.scalar_helper_block(&function.body, &locals, &proved, &arities) {
+                    proved.insert(name.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                return proved;
+            }
+        }
+    }
+
+    fn fresh_runtime_object(&self, expr: &Expr) -> Option<RuntimeObjectKind> {
+        match expr {
+            Expr::StringLit(..) if self.host_runtime_call("ystr_new") => {
+                Some(RuntimeObjectKind::String)
+            }
+            Expr::Call { func, .. } => {
+                let name = self.emit_call_target(func);
+                if !self.host_runtime_call(&name) {
+                    return None;
+                }
+                match name.as_str() {
+                    "String_new"
+                    | "String_clone"
+                    | "ystr_new"
+                    | "ystr_clone"
+                    | "File_read_to_string"
+                    | "yfile_read_to_string" => Some(RuntimeObjectKind::String),
+                    "Vec_new" | "yvec_new" => Some(RuntimeObjectKind::Vector),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A direct argument to these callbacks does not escape the header or its
+    /// local slot. Mutators retain the header address; free clears the slot.
+    fn runtime_argument_kind(name: &str, index: usize) -> Option<RuntimeObjectKind> {
+        match (name, index) {
+            (
+                "String_new"
+                | "String_clone"
+                | "ystr_clone"
+                | "String_len"
+                | "ystr_len"
+                | "String_char_at"
+                | "ystr_char_at"
+                | "String_push"
+                | "ystr_push"
+                | "String_free"
+                | "ystr_free"
+                | "File_read_to_string"
+                | "yfile_read_to_string"
+                | "print"
+                | "println"
+                | "yprint_str"
+                | "yprintln_str"
+                | "str_to_i64",
+                0,
+            )
+            | (
+                "String_eq" | "ystr_eq" | "String_eq_cstr" | "ystr_eq_cstr" | "String_push_str"
+                | "ystr_push_str" | "File_write" | "yfile_write",
+                0 | 1,
+            ) => Some(RuntimeObjectKind::String),
+            (
+                "Vec_push" | "yvec_push" | "Vec_get" | "yvec_get" | "Vec_get_char"
+                | "yvec_get_char" | "Vec_len" | "yvec_len" | "Vec_free" | "yvec_free",
+                0,
+            ) => Some(RuntimeObjectKind::Vector),
+            _ => None,
+        }
+    }
+
+    fn inspect_runtime_expr(
+        &self,
+        expr: &Expr,
+        candidates: &BTreeMap<String, RuntimeObjectKind>,
+        rejected: &mut HashSet<String>,
+        opaque: &mut bool,
+    ) {
+        match expr {
+            Expr::Ident(name, _) => {
+                if candidates.contains_key(name) {
+                    rejected.insert(name.clone());
+                }
+            }
+            Expr::Call { func, args, .. } => {
+                let name = self.emit_call_target(func);
+                let host_call = self.host_runtime_call(&name);
+                // Even an unknown call without an object argument can invoke
+                // code with hidden state. Keep the whole function opaque.
+                if !host_call
+                    && !self.scalar_runtime_helpers.contains(&name)
+                    && !(name == "load" && !self.fn_llvm_params.contains_key(&name))
+                {
+                    *opaque = true;
+                }
+                let freeing = host_call
+                    && matches!(
+                        name.as_str(),
+                        "String_free" | "ystr_free" | "Vec_free" | "yvec_free"
+                    );
+                for (index, arg) in args.iter().enumerate() {
+                    let protected = if host_call {
+                        Self::runtime_arg_local(arg).and_then(|local| {
+                            let kind = candidates.get(local)?;
+                            (Some(*kind) == Self::runtime_argument_kind(&name, index))
+                                .then_some(local)
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(local) = protected {
+                        // Direct-handle free leaves the caller's slot stale.
+                        // Only a direct mutable slot reference is proven safe.
+                        if freeing
+                            && !matches!(
+                                arg,
+                                Expr::UnaryOp {
+                                    op: UnaryOp::Ref { mutable: true },
+                                    ..
+                                }
+                            )
+                        {
+                            rejected.insert(local.to_string());
+                        }
+                    } else {
+                        self.inspect_runtime_expr(arg, candidates, rejected, opaque);
+                    }
+                }
+            }
+            Expr::GenericCall { args, .. } => {
+                *opaque = true;
+                for arg in args {
+                    self.inspect_runtime_expr(arg, candidates, rejected, opaque);
+                }
+            }
+            Expr::Index { base, index, .. }
+            | Expr::BinaryOp {
+                left: base,
+                right: index,
+                ..
+            } => {
+                self.inspect_runtime_expr(base, candidates, rejected, opaque);
+                self.inspect_runtime_expr(index, candidates, rejected, opaque);
+            }
+            Expr::MemberAccess { base, .. } | Expr::UnaryOp { operand: base, .. } => {
+                self.inspect_runtime_expr(base, candidates, rejected, opaque);
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, value) in fields {
+                    self.inspect_runtime_expr(value, candidates, rejected, opaque);
+                }
+            }
+            // A statement-bearing argument can free a slot between capturing
+            // a direct argument and callback resolution. Keep those functions
+            // opaque rather than assuming an evaluation/lifetime ordering.
+            Expr::BlockExpr(..) => *opaque = true,
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::CharLit(..)
+            | Expr::Path { .. }
+            | Expr::BoolLit(..)
+            | Expr::SelfLit(..)
+            | Expr::ZeroInit(..) => {}
+        }
+    }
+
+    /// Prove closed ownership for a whole renamed function before emitting any
+    /// reads. This handles loops and branches without optimistic flow merges:
+    /// assignments, aliases, escapes and opaque calls rule out the fast path.
+    fn prove_runtime_locals(&self, function: &FuncDecl) -> BTreeMap<String, RuntimeObjectKind> {
+        if !self.optimize_runtime && !self.optimize_runtime_mutations {
+            return BTreeMap::new();
+        }
+        let program = Program {
+            items: vec![Item::Func(function.clone())],
+        };
+        let mut candidates = BTreeMap::new();
+        crate::ast::for_each_stmt(&program, &mut |stmt| {
+            if let Stmt::Let {
+                name,
+                init: Some(init),
+                ..
+            } = stmt
+            {
+                if let Some(kind) = self.fresh_runtime_object(init) {
+                    candidates.insert(name.clone(), kind);
+                }
+            }
+        });
+        if candidates.is_empty() {
+            return candidates;
+        }
+        let mut rejected = HashSet::new();
+        let mut opaque = false;
+        crate::ast::for_each_stmt(&program, &mut |stmt| {
+            let mut inspect = |expr: &Expr| {
+                self.inspect_runtime_expr(expr, &candidates, &mut rejected, &mut opaque)
+            };
+            match stmt {
+                Stmt::Let { init, bounds, .. } => {
+                    if let Some(init) = init {
+                        inspect(init);
+                    }
+                    if let Some(bounds) = bounds {
+                        inspect(&bounds.min);
+                        inspect(&bounds.max);
+                    }
+                }
+                Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+                    inspect(target);
+                    inspect(value);
+                }
+                Stmt::Expr(expr) | Stmt::Return(Some(expr), _) => inspect(expr),
+                Stmt::If { condition, .. } | Stmt::CompileTimeAssert { condition, .. } => {
+                    inspect(condition)
+                }
+                Stmt::While {
+                    condition,
+                    invariant,
+                    ..
+                } => {
+                    inspect(condition);
+                    if let Some(invariant) = invariant {
+                        inspect(invariant);
+                    }
+                }
+                Stmt::For {
+                    start,
+                    end,
+                    step,
+                    invariant,
+                    tile,
+                    prefetch_stride,
+                    ..
+                } => {
+                    inspect(start);
+                    inspect(end);
+                    if let Some(step) = step {
+                        inspect(step);
+                    }
+                    if let Some(invariant) = invariant {
+                        inspect(invariant);
+                    }
+                    if let Some(tile) = tile {
+                        inspect(&tile.block_m);
+                        inspect(&tile.block_n);
+                        if let Some(k) = &tile.block_k {
+                            inspect(k);
+                        }
+                    }
+                    if let Some(stride) = prefetch_stride
+                        .as_ref()
+                        .and_then(|attr| attr.stride.as_ref())
+                    {
+                        inspect(stride);
+                    }
+                }
+                Stmt::Match {
+                    scrutinee, arms, ..
+                } => {
+                    inspect(scrutinee);
+                    for arm in arms {
+                        if let MatchPattern::Literal(expr) = &arm.pattern {
+                            inspect(expr);
+                        }
+                        inspect(&arm.body);
+                    }
+                }
+                Stmt::ClockDomainBlock { clock, .. } => inspect(clock),
+                Stmt::Chisel(..) => opaque = true,
+                _ => {}
+            }
+        });
+        if opaque {
+            candidates.clear();
+        } else {
+            candidates.retain(|name, _| !rejected.contains(name));
+        }
+        candidates
+    }
+
+    fn prove_runtime_vector_sizes(&self, function: &FuncDecl) -> BTreeMap<String, u64> {
+        let mut sizes = BTreeMap::new();
+        if !self.optimize_runtime_mutations {
+            return sizes;
+        }
+        let program = Program {
+            items: vec![Item::Func(function.clone())],
+        };
+        crate::ast::for_each_stmt(&program, &mut |stmt| {
+            let Stmt::Let {
+                name,
+                init: Some(Expr::Call { func, args, .. }),
+                ..
+            } = stmt
+            else {
+                return;
+            };
+            if self.runtime_locals.get(name) != Some(&RuntimeObjectKind::Vector) || args.len() != 1
+            {
+                return;
+            }
+            let Expr::IntLit(value, _) = &args[0] else {
+                return;
+            };
+            let size = match self.emit_call_target(func).as_str() {
+                // Vec_new truncates to i32 before its native wrapper widens.
+                "Vec_new" => i64::from(*value as i32),
+                "yvec_new" => *value,
+                _ => return,
+            };
+            if size > 0 {
+                sizes.insert(name.clone(), size as u64);
+            }
+        });
+        sizes
+    }
+
+    fn runtime_element_extent(&self, expression: &Expr, implicit_lvalue: bool) -> Option<u64> {
+        // Only direct scalar stack storage is proved readable here. Borrowed
+        // pointers (including a vector's own data) stay on the callback path.
+        let local = match expression {
+            Expr::UnaryOp {
+                op: UnaryOp::Ref { .. },
+                operand,
+                ..
+            } => {
+                let Expr::Ident(local, _) = &**operand else {
+                    return None;
+                };
+                local
+            }
+            // Vec_push takes the lvalue's address even without an explicit
+            // reference. Raw yvec_push instead receives the expression value.
+            Expr::Ident(local, _) if implicit_lvalue => local,
+            _ => return None,
+        };
+        match self.locals.get(local)?.as_str() {
+            "i1" | "i8" => Some(1),
+            "i16" | "half" => Some(2),
+            "i32" | "float" => Some(4),
+            "i64" | "double" | "ptr" => Some(8),
+            _ => None,
+        }
+    }
+
+    fn try_emit_runtime_append(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        if !self.optimize_runtime_mutations || !self.host_runtime_call(name) || args.len() != 2 {
+            return None;
+        }
+        let kind = match name {
+            "String_push" | "ystr_push" => RuntimeObjectKind::String,
+            "Vec_push" | "yvec_push" => RuntimeObjectKind::Vector,
+            _ => return None,
+        };
+        let local = Self::runtime_arg_local(&args[0])?;
+        if self.runtime_locals.get(local) != Some(&kind)
+            || self.locals.get(local).map(String::as_str) != Some("ptr")
+        {
+            return None;
+        }
+        let element_size = if kind == RuntimeObjectKind::Vector {
+            let extent = self.runtime_element_extent(&args[1], name == "Vec_push")?;
+            let size = match self.runtime_vector_sizes.get(local) {
+                Some(size) => *size,
+                // A dynamic element size is safe only when its header field
+                // exactly matches this proved scalar source storage extent.
+                // The guard below keeps the copy length a constant, and all
+                // mismatched widths retain the original callback.
+                None if self.optimize_runtime_copies => extent,
+                None => return None,
+            };
+            if size > extent {
+                return None;
+            }
+            Some(size)
+        } else {
+            None
+        };
+        // Capture the original call arguments once, in their original order.
+        let first = self.emit_expr(&args[0], None, None);
+        let second = if kind == RuntimeObjectKind::String {
+            let value = self.emit_expr(&args[1], None, None);
+            let ty = self.infer_type(&args[1]);
+            let unsigned = self.expr_is_unsigned(&args[1]);
+            self.emit_coerce_from(&value, &ty, "i8", unsigned)
+        } else if name == "Vec_push" {
+            self.emit_lvalue(&args[1])
+        } else {
+            self.emit_expr(&args[1], None, None)
+        };
+        let handle = if matches!(
+            &args[0],
+            Expr::UnaryOp {
+                op: UnaryOp::Ref { .. },
+                ..
+            }
+        ) {
+            self.emit_load(&first, "ptr")
+        } else {
+            first.clone()
+        };
+        let read = self.fresh_label("runtime.append.read");
+        let fast = self.fresh_label("runtime.append.fast");
+        let slow = self.fresh_label("runtime.append.slow");
+        let merge = self.fresh_label("runtime.append.merge");
+        let header = if kind == RuntimeObjectKind::String {
+            "{ ptr, i64, i64 }"
+        } else {
+            "{ ptr, i64, i64, i64 }"
+        };
+        self.wln("  ; CPU JIT guarded runtime append (closed local allocation)");
+        let live = self.fresh_tmp();
+        writeln!(&mut self.output, "  {live} = icmp ne ptr {handle}, null").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {live}, label %{read}, label %{slow}\n{read}:"
+        )
+        .unwrap();
+        let len_ptr = self.fresh_tmp();
+        let cap_ptr = self.fresh_tmp();
+        let data_ptr = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {len_ptr} = getelementptr {header}, ptr {handle}, i32 0, i32 1"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {cap_ptr} = getelementptr {header}, ptr {handle}, i32 0, i32 2"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {data_ptr} = getelementptr {header}, ptr {handle}, i32 0, i32 0"
+        )
+        .unwrap();
+        let len = self.emit_load(&len_ptr, "i64");
+        let cap = self.emit_load(&cap_ptr, "i64");
+        let data = self.emit_load(&data_ptr, "ptr");
+        let nonnegative = self.fresh_tmp();
+        let data_live = self.fresh_tmp();
+        writeln!(&mut self.output, "  {nonnegative} = icmp sge i64 {len}, 0").unwrap();
+        writeln!(&mut self.output, "  {data_live} = icmp ne ptr {data}, null").unwrap();
+        let mut checks = vec![nonnegative, data_live];
+        if let Some(size) = element_size {
+            let spare = self.fresh_tmp();
+            let src_live = self.fresh_tmp();
+            let size_ptr = self.fresh_tmp();
+            writeln!(&mut self.output, "  {spare} = icmp slt i64 {len}, {cap}").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {src_live} = icmp ne ptr {second}, null"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  {size_ptr} = getelementptr {header}, ptr {handle}, i32 0, i32 3"
+            )
+            .unwrap();
+            let actual_size = self.emit_load(&size_ptr, "i64");
+            let size_matches = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {size_matches} = icmp eq i64 {actual_size}, {size}"
+            )
+            .unwrap();
+            checks.extend([spare, src_live, size_matches]);
+        } else {
+            // cap includes the trailing NUL. Avoid len+2 overflow entirely.
+            let usable = self.fresh_tmp();
+            let capacity_valid = self.fresh_tmp();
+            let spare = self.fresh_tmp();
+            writeln!(&mut self.output, "  {usable} = sub i64 {cap}, 2").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {capacity_valid} = icmp sge i64 {cap}, 2"
+            )
+            .unwrap();
+            writeln!(&mut self.output, "  {spare} = icmp sle i64 {len}, {usable}").unwrap();
+            checks.extend([capacity_valid, spare]);
+        }
+        let mut allowed = checks.remove(0);
+        for check in checks {
+            let both = self.fresh_tmp();
+            writeln!(&mut self.output, "  {both} = and i1 {allowed}, {check}").unwrap();
+            allowed = both;
+        }
+        writeln!(
+            &mut self.output,
+            "  br i1 {allowed}, label %{fast}, label %{slow}\n{fast}:"
+        )
+        .unwrap();
+        let next_len = self.fresh_tmp();
+        writeln!(&mut self.output, "  {next_len} = add i64 {len}, 1").unwrap();
+        if let Some(size) = element_size {
+            let offset = self.fresh_tmp();
+            let destination = self.fresh_tmp();
+            writeln!(&mut self.output, "  {offset} = mul i64 {len}, {size}").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {destination} = getelementptr i8, ptr {data}, i64 {offset}"
+            )
+            .unwrap();
+            self.called_functions.push("llvm.memmove.p0.p0.i64".into());
+            writeln!(&mut self.output, "  call void @llvm.memmove.p0.p0.i64(ptr align 1 {destination}, ptr align 1 {second}, i64 {size}, i1 false)").unwrap();
+        } else {
+            let destination = self.fresh_tmp();
+            let terminator = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {destination} = getelementptr i8, ptr {data}, i64 {len}"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  store i8 {second}, ptr {destination}, align 1"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  {terminator} = getelementptr i8, ptr {data}, i64 {next_len}"
+            )
+            .unwrap();
+            writeln!(&mut self.output, "  store i8 0, ptr {terminator}, align 1").unwrap();
+        }
+        writeln!(
+            &mut self.output,
+            "  store i64 {next_len}, ptr {len_ptr}, align 8\n  br label %{merge}\n{slow}:"
+        )
+        .unwrap();
+        self.called_functions.push(name.to_string());
+        let second_type = if kind == RuntimeObjectKind::String {
+            "i8"
+        } else {
+            "ptr"
+        };
+        writeln!(&mut self.output, "  call void @{name}(ptr {first}, {second_type} {second})\n  br label %{merge}\n{merge}:").unwrap();
+        Some(self.fresh_tmp().replace("%_t", "%_void"))
+    }
+
+    fn try_emit_runtime_bulk_append(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        if !self.optimize_runtime_mutations
+            || !self.optimize_runtime_copies
+            || !self.host_runtime_call(name)
+            || !matches!(name, "String_push_str" | "ystr_push_str")
+            || args.len() != 2
+        {
+            return None;
+        }
+        for arg in args {
+            let local = Self::runtime_arg_local(arg)?;
+            if self.runtime_locals.get(local) != Some(&RuntimeObjectKind::String)
+                || self.locals.get(local).map(String::as_str) != Some("ptr")
+            {
+                return None;
+            }
+        }
+        // Calls receive each expression once, left to right. A reference
+        // captures its slot address; resolve both slots after evaluation.
+        let first = self.emit_expr(&args[0], None, None);
+        let second = self.emit_expr(&args[1], None, None);
+        let handle = |emitter: &mut Self, argument: &Expr, value: &str| {
+            if matches!(
+                argument,
+                Expr::UnaryOp {
+                    op: UnaryOp::Ref { .. },
+                    ..
+                }
+            ) {
+                emitter.emit_load(value, "ptr")
+            } else {
+                value.to_string()
+            }
+        };
+        let destination_handle = handle(self, &args[0], &first);
+        let source_handle = handle(self, &args[1], &second);
+        let read = self.fresh_label("runtime.copy.read");
+        let fast = self.fresh_label("runtime.copy.fast");
+        let slow = self.fresh_label("runtime.copy.slow");
+        let merge = self.fresh_label("runtime.copy.merge");
+        self.wln("  ; CPU JIT guarded bulk String append (closed local allocations)");
+        let destination_live = self.fresh_tmp();
+        let source_live = self.fresh_tmp();
+        let both_live = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {destination_live} = icmp ne ptr {destination_handle}, null"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {source_live} = icmp ne ptr {source_handle}, null"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {both_live} = and i1 {destination_live}, {source_live}"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {both_live}, label %{read}, label %{slow}\n{read}:"
+        )
+        .unwrap();
+        let header = "{ ptr, i64, i64 }";
+        let field = |emitter: &mut Self, handle: &str, index: u32, ty: &str| {
+            let pointer = emitter.fresh_tmp();
+            writeln!(
+                &mut emitter.output,
+                "  {pointer} = getelementptr {header}, ptr {handle}, i32 0, i32 {index}"
+            )
+            .unwrap();
+            let value = emitter.emit_load(&pointer, ty);
+            (pointer, value)
+        };
+        let (destination_len_pointer, destination_len) = field(self, &destination_handle, 1, "i64");
+        let (_, destination_cap) = field(self, &destination_handle, 2, "i64");
+        let (_, destination_data) = field(self, &destination_handle, 0, "ptr");
+        // Snapshot source length and data before any destination mutation.
+        // They may belong to the same header during self-append.
+        let (_, source_len) = field(self, &source_handle, 1, "i64");
+        let (_, source_data) = field(self, &source_handle, 0, "ptr");
+        let destination_nonnegative = self.fresh_tmp();
+        let source_nonnegative = self.fresh_tmp();
+        let positive_capacity = self.fresh_tmp();
+        let within_capacity = self.fresh_tmp();
+        let destination_data_live = self.fresh_tmp();
+        let source_data_live = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {destination_nonnegative} = icmp sge i64 {destination_len}, 0"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {source_nonnegative} = icmp sge i64 {source_len}, 0"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {positive_capacity} = icmp sgt i64 {destination_cap}, 0"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {within_capacity} = icmp slt i64 {destination_len}, {destination_cap}"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {destination_data_live} = icmp ne ptr {destination_data}, null"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {source_data_live} = icmp ne ptr {source_data}, null"
+        )
+        .unwrap();
+        // Plain subtraction has no poison-producing flags. These values are
+        // used only when the guards prove 0 <= len < cap and cap > 0.
+        let available = self.fresh_tmp();
+        let remaining = self.fresh_tmp();
+        let fits = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {available} = sub i64 {destination_cap}, {destination_len}"
+        )
+        .unwrap();
+        writeln!(&mut self.output, "  {remaining} = sub i64 {available}, 1").unwrap();
+        writeln!(
+            &mut self.output,
+            "  {fits} = icmp sle i64 {source_len}, {remaining}"
+        )
+        .unwrap();
+        let mut allowed = destination_nonnegative;
+        for check in [
+            source_nonnegative,
+            positive_capacity,
+            within_capacity,
+            destination_data_live,
+            source_data_live,
+            fits,
+        ] {
+            let both = self.fresh_tmp();
+            writeln!(&mut self.output, "  {both} = and i1 {allowed}, {check}").unwrap();
+            allowed = both;
+        }
+        writeln!(
+            &mut self.output,
+            "  br i1 {allowed}, label %{fast}, label %{slow}\n{fast}:"
+        )
+        .unwrap();
+        let destination = self.fresh_tmp();
+        let next_len = self.fresh_tmp();
+        let terminator = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {destination} = getelementptr i8, ptr {destination_data}, i64 {destination_len}"
+        )
+        .unwrap();
+        self.called_functions.push("llvm.memmove.p0.p0.i64".into());
+        writeln!(&mut self.output, "  call void @llvm.memmove.p0.p0.i64(ptr align 1 {destination}, ptr align 1 {source_data}, i64 {source_len}, i1 false)").unwrap();
+        writeln!(
+            &mut self.output,
+            "  {next_len} = add i64 {destination_len}, {source_len}"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  store i64 {next_len}, ptr {destination_len_pointer}, align 8"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {terminator} = getelementptr i8, ptr {destination_data}, i64 {next_len}"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  store i8 0, ptr {terminator}, align 1\n  br label %{merge}\n{slow}:"
+        )
+        .unwrap();
+        self.called_functions.push(name.to_string());
+        writeln!(
+            &mut self.output,
+            "  call void @{name}(ptr {first}, ptr {second})\n  br label %{merge}\n{merge}:"
+        )
+        .unwrap();
+        Some(self.fresh_tmp().replace("%_t", "%_void"))
+    }
+
+    fn try_emit_runtime_query(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        if !self.optimize_runtime || !self.host_runtime_call(name) {
+            return None;
+        }
+        if name == "ychar_to_ascii" && args.len() == 1 {
+            let value = self.emit_expr(&args[0], None, None);
+            let ty = self.infer_type(&args[0]);
+            let unsigned = self.expr_is_unsigned(&args[0]);
+            let byte = self.emit_coerce_from(&value, &ty, "i8", unsigned);
+            let result = self.fresh_tmp();
+            // The runtime receives u8 and returns i32::from(byte).
+            writeln!(&mut self.output, "  {result} = zext i8 {byte} to i32").unwrap();
+            return Some(result);
+        }
+        let (kind, result_type, indexed) = match name {
+            "String_len" | "ystr_len" => (RuntimeObjectKind::String, "i64", false),
+            "Vec_len" | "yvec_len" => (RuntimeObjectKind::Vector, "i64", false),
+            "String_char_at" | "ystr_char_at" => (RuntimeObjectKind::String, "i8", true),
+            "Vec_get_char" | "yvec_get_char" => (RuntimeObjectKind::Vector, "i8", true),
+            "Vec_get" | "yvec_get" => (RuntimeObjectKind::Vector, "ptr", true),
+            _ => return None,
+        };
+        if args.len() != if indexed { 2 } else { 1 } {
+            return None;
+        }
+        let local = Self::runtime_arg_local(&args[0])?;
+        if self.runtime_locals.get(local) != Some(&kind)
+            || self.locals.get(local).map(String::as_str) != Some("ptr")
+        {
+            return None;
+        }
+        let slot = format!("%{local}");
+        let reference = matches!(
+            &args[0],
+            Expr::UnaryOp {
+                op: UnaryOp::Ref { .. },
+                ..
+            }
+        );
+        let captured = if reference {
+            None
+        } else {
+            Some(self.emit_load(&slot, "ptr"))
+        };
+        // Preserve argument evaluation even if the handle is null.
+        let index = if indexed {
+            let value = self.emit_expr(&args[1], None, None);
+            let ty = self.infer_type(&args[1]);
+            let unsigned = self.expr_is_unsigned(&args[1]);
+            Some(self.emit_coerce_from(&value, &ty, "i64", unsigned))
+        } else {
+            None
+        };
+        // A reference argument captures the slot address. Its callback loads
+        // the handle after evaluating later arguments; preserve that order.
+        let handle = captured.unwrap_or_else(|| self.emit_load(&slot, "ptr"));
+        let read = self.fresh_label("runtime.read");
+        let valid = self.fresh_label("runtime.valid");
+        let neutral = self.fresh_label("runtime.neutral");
+        let merge = self.fresh_label("runtime.merge");
+        let header = match kind {
+            RuntimeObjectKind::String => "{ ptr, i64, i64 }",
+            RuntimeObjectKind::Vector => "{ ptr, i64, i64, i64 }",
+        };
+        self.wln("  ; CPU JIT runtime header read (closed local allocation)");
+        let nonnull = self.fresh_tmp();
+        writeln!(&mut self.output, "  {nonnull} = icmp ne ptr {handle}, null").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {nonnull}, label %{read}, label %{neutral}"
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{read}:").unwrap();
+        let length_pointer = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {length_pointer} = getelementptr {header}, ptr {handle}, i32 0, i32 1"
+        )
+        .unwrap();
+        let length = self.emit_load(&length_pointer, "i64");
+        let (value, value_block) = if let Some(index) = index {
+            let nonnegative = self.fresh_tmp();
+            let below_length = self.fresh_tmp();
+            let in_bounds = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {nonnegative} = icmp sge i64 {index}, 0"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  {below_length} = icmp slt i64 {index}, {length}"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  {in_bounds} = and i1 {nonnegative}, {below_length}"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  br i1 {in_bounds}, label %{valid}, label %{neutral}"
+            )
+            .unwrap();
+            writeln!(&mut self.output, "{valid}:").unwrap();
+            let data_pointer = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {data_pointer} = getelementptr {header}, ptr {handle}, i32 0, i32 0"
+            )
+            .unwrap();
+            let data = self.emit_load(&data_pointer, "ptr");
+            let offset = if kind == RuntimeObjectKind::Vector {
+                let size_pointer = self.fresh_tmp();
+                writeln!(
+                    &mut self.output,
+                    "  {size_pointer} = getelementptr {header}, ptr {handle}, i32 0, i32 3"
+                )
+                .unwrap();
+                let size = self.emit_load(&size_pointer, "i64");
+                let offset = self.fresh_tmp();
+                writeln!(&mut self.output, "  {offset} = mul i64 {index}, {size}").unwrap();
+                offset
+            } else {
+                index
+            };
+            let element = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {element} = getelementptr i8, ptr {data}, i64 {offset}"
+            )
+            .unwrap();
+            let value = if result_type == "ptr" {
+                element
+            } else {
+                self.emit_load(&element, "i8")
+            };
+            writeln!(&mut self.output, "  br label %{merge}").unwrap();
+            (value, valid)
+        } else {
+            writeln!(&mut self.output, "  br label %{merge}").unwrap();
+            (length, read)
+        };
+        writeln!(
+            &mut self.output,
+            "{neutral}:\n  br label %{merge}\n{merge}:"
+        )
+        .unwrap();
+        let result = self.fresh_tmp();
+        let neutral_value = if result_type == "ptr" { "null" } else { "0" };
+        writeln!(&mut self.output, "  {result} = phi {result_type} [{value}, %{value_block}], [{neutral_value}, %{neutral}]").unwrap();
+        Some(result)
     }
 
     fn emit_func(&mut self, f: &FuncDecl) {
@@ -1856,6 +3390,8 @@ impl LlvmEmitter {
         };
         let f = &renamed;
         self.reset_function_state();
+        self.runtime_locals = self.prove_runtime_locals(f);
+        self.runtime_vector_sizes = self.prove_runtime_vector_sizes(f);
         let prev_ptx = self.in_ptx_emit;
         self.in_ptx_emit = f.is_ptx_emit;
 
@@ -1889,8 +3425,19 @@ impl LlvmEmitter {
         if let Some(d) = &mut self.debug {
             // `fn main` is emitted as `ysu_main` because the C runtime owns the
             // process's `main`; the debugger still calls it `main`.
-            let display = if func_name == "ysu_main" { "main" } else { func_name.as_str() };
-            d.begin_function(&func_name, display, f.span.line, f.span.col, &f.params, f.ret_ty.as_ref());
+            let display = if func_name == "ysu_main" {
+                "main"
+            } else {
+                func_name.as_str()
+            };
+            d.begin_function(
+                &func_name,
+                display,
+                f.span.line,
+                f.span.col,
+                &f.params,
+                f.ret_ty.as_ref(),
+            );
             if let Some(target) = &self.current_impl_target {
                 d.set_method(&func_name, &format!("{}::{}", target, f.name));
             }
@@ -1919,7 +3466,12 @@ impl LlvmEmitter {
             self.emit_param_slot(p);
         }
 
-        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = alloca [8 x i8], align 8",
+            Y_OOB_SINK
+        )
+        .unwrap();
 
         // Forward declare all lets in entry block to avoid loop stack growth
         self.emit_alloca_for_block(&f.body);
@@ -1965,9 +3517,14 @@ impl LlvmEmitter {
                 // float one - that is the entire mechanism. The representation
                 // is chosen here, before the alloca, because the alloca's type
                 // is what everything downstream keys off.
-                Stmt::Let { name, ty, zero_drift: Some(_), bounds, span, .. }
-                    if !self.locals.contains_key(name) =>
-                {
+                Stmt::Let {
+                    name,
+                    ty,
+                    zero_drift: Some(_),
+                    bounds,
+                    span,
+                    ..
+                } if !self.locals.contains_key(name) => {
                     let ty_name = match ty {
                         Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
                         _ => "F32".to_string(),
@@ -1987,16 +3544,29 @@ impl LlvmEmitter {
                                 &decision,
                                 crate::zero_drift::explain_requested(),
                             ));
-                            self.locals.insert(name.clone(), decision.repr.llvm_type().to_string());
+                            self.locals
+                                .insert(name.clone(), decision.repr.llvm_type().to_string());
                             self.locals_ast_type.insert(name.clone(), ty_name.clone());
                             let integer_domain = decision.repr.frac_bits() == 0
                                 && matches!(
                                     ty_name.as_str(),
-                                    "I8" | "I16" | "I32" | "I64"
-                                        | "U8" | "U16" | "U32" | "U64"
-                                        | "i8" | "i16" | "i32" | "i64"
-                                        | "u8" | "u16" | "u32" | "u64"
-                                        | "isize" | "usize"
+                                    "I8" | "I16"
+                                        | "I32"
+                                        | "I64"
+                                        | "U8"
+                                        | "U16"
+                                        | "U32"
+                                        | "U64"
+                                        | "i8"
+                                        | "i16"
+                                        | "i32"
+                                        | "i64"
+                                        | "u8"
+                                        | "u16"
+                                        | "u32"
+                                        | "u64"
+                                        | "isize"
+                                        | "usize"
                                 );
                             self.zero_drift
                                 .insert(name.clone(), (decision.repr, integer_domain));
@@ -2023,9 +3593,16 @@ impl LlvmEmitter {
                                     signed: true,
                                 };
                                 let d = self.debug.as_mut().unwrap();
-                                if let Some(i) = d.declare(name, span.line, span.col, false, Some(dty)) {
-                                    writeln!(&mut self.output, "{}{}", crate::debug_info::VAR_MARKER, i)
-                                        .unwrap();
+                                if let Some(i) =
+                                    d.declare(name, span.line, span.col, false, Some(dty))
+                                {
+                                    writeln!(
+                                        &mut self.output,
+                                        "{}{}",
+                                        crate::debug_info::VAR_MARKER,
+                                        i
+                                    )
+                                    .unwrap();
                                 }
                             }
                         }
@@ -2051,7 +3628,13 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         }
                     }
                 }
-                Stmt::Let { name, ty, init, span, .. } => {
+                Stmt::Let {
+                    name,
+                    ty,
+                    init,
+                    span,
+                    ..
+                } => {
                     // A local array is given storage of its own - see
                     // `local_array_type` for what it used to be given.
                     let array_ty = match ty {
@@ -2111,12 +3694,22 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         }
                         // Aggregate copies here are `memcpy` with `align 8` on
                         // both pointers, so an array's storage must honour it.
-                        let align = if ir_ty.starts_with('[') { ", align 8" } else { "" };
-                        writeln!(&mut self.output, "  %{} = alloca {}{}", name, ir_ty, align).unwrap();
+                        let align = if ir_ty.starts_with('[') {
+                            ", align 8"
+                        } else {
+                            ""
+                        };
+                        writeln!(&mut self.output, "  %{} = alloca {}{}", name, ir_ty, align)
+                            .unwrap();
                         self.dbg_var(name, span, ty.as_ref(), init.as_ref(), &ir_ty, false);
                     }
                 }
-                Stmt::For { loop_var, body, span, .. } => {
+                Stmt::For {
+                    loop_var,
+                    body,
+                    span,
+                    ..
+                } => {
                     self.locals.insert(loop_var.clone(), "i32".into());
                     writeln!(&mut self.output, "  %{} = alloca i32", loop_var).unwrap();
                     self.dbg_var(loop_var, span, None, None, "i32", false);
@@ -2191,6 +3784,14 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         if let Some(sty) = memory_storage_llvm_type(&p.ty) {
             self.mem_storage_types.insert(p.name.clone(), sty);
         }
+        if let Type::Generic { base, args, .. } = &p.ty {
+            if matches!(base.as_str(), "GlobalMemory" | "SharedMemory") {
+                if let Some(GenericArg::Type(element)) = args.first() {
+                    self.mem_ast_types
+                        .insert(p.name.clone(), ast_type_to_string(element));
+                }
+            }
+        }
         writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
         self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
         self.dbg_var(&p.name, &p.span, Some(&p.ty), None, &ty, true);
@@ -2200,7 +3801,12 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     fn emit_sizeof(&mut self, ty: &str) -> String {
         let end = self.fresh_tmp();
         let size = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", end, ty).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = getelementptr {}, ptr null, i32 1",
+            end, ty
+        )
+        .unwrap();
         writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size, end).unwrap();
         size
     }
@@ -2242,7 +3848,12 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             self.emit_param_slot(p);
         }
 
-        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {} = alloca [8 x i8], align 8",
+            Y_OOB_SINK
+        )
+        .unwrap();
 
         // A kernel whose whole body is the canonical matmul nest is replaced by
         // the packed AVX-512 kernel. The recogniser is strict and the scalar
@@ -2304,7 +3915,11 @@ nest as written"
                 // nothing checks: the exactness claim rests on them. Every
                 // trusted range in the kernel is named - a superset, which is
                 // the safe direction for a list of assumptions.
-                let rests_on = if exact { d.trusted_bounds(&k.name, k.span.line, end_line) } else { Vec::new() };
+                let rests_on = if exact {
+                    d.trusted_bounds(&k.name, k.span.line, end_line)
+                } else {
+                    Vec::new()
+                };
                 d.add_fact(crate::guarantees::Fact {
                     item: k.name.clone(),
                     line: k.span.line,
@@ -2351,8 +3966,14 @@ nest as written"
         done: &str,
     ) {
         let mut values = Vec::new();
-        for name in [&shape.m, &shape.n, &shape.k, &shape.lda, &shape.ldb, &shape.ldc] {
-            let ty = self.locals.get(name).expect("recognised GEMM header").clone();
+        for name in [
+            &shape.m, &shape.n, &shape.k, &shape.lda, &shape.ldb, &shape.ldc,
+        ] {
+            let ty = self
+                .locals
+                .get(name)
+                .expect("recognised GEMM header")
+                .clone();
             let value = self.emit_load(&format!("%{name}"), &ty);
             values.push(self.emit_coerce(&value, &ty, "i64"));
         }
@@ -2362,15 +3983,38 @@ nest as written"
         let check_k = self.fresh_label("gemm.alias_check_k");
         let ranges = self.fresh_label("gemm.alias_ranges");
         let k_empty = self.fresh_tmp();
-        writeln!(&mut self.output, "  {m_empty} = icmp sle i64 {}, 0", values[0]).unwrap();
-        writeln!(&mut self.output, "  {n_empty} = icmp sle i64 {}, 0", values[1]).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {m_empty} = icmp sle i64 {}, 0",
+            values[0]
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {n_empty} = icmp sle i64 {}, 0",
+            values[1]
+        )
+        .unwrap();
         writeln!(&mut self.output, "  {empty} = or i1 {m_empty}, {n_empty}").unwrap();
-        writeln!(&mut self.output, "  br i1 {empty}, label %{done}, label %{check_k}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {empty}, label %{done}, label %{check_k}"
+        )
+        .unwrap();
         writeln!(&mut self.output, "{check_k}:").unwrap();
-        writeln!(&mut self.output, "  {k_empty} = icmp sle i64 {}, 0", values[2]).unwrap();
+        writeln!(
+            &mut self.output,
+            "  {k_empty} = icmp sle i64 {}, 0",
+            values[2]
+        )
+        .unwrap();
         // An empty contraction still writes C. Its scalar body never reads
         // A/B, so no input pointer/range condition is relevant to this case.
-        writeln!(&mut self.output, "  br i1 {k_empty}, label %{scalar}, label %{ranges}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {k_empty}, label %{scalar}, label %{ranges}"
+        )
+        .unwrap();
         writeln!(&mut self.output, "{ranges}:").unwrap();
 
         let mut requirements = Vec::new();
@@ -2381,24 +4025,47 @@ nest as written"
             (&shape.c, &values[0], &values[1], &values[5]),
         ] {
             let valid_stride = self.fresh_tmp();
-            writeln!(&mut self.output, "  {valid_stride} = icmp sge i64 {stride}, {cols}").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {valid_stride} = icmp sge i64 {stride}, {cols}"
+            )
+            .unwrap();
             requirements.push(valid_stride);
             let prior_rows = self.fresh_tmp();
             writeln!(&mut self.output, "  {prior_rows} = sub i64 {rows}, 1").unwrap();
-            let prefix = self.emit_gemm_checked_uint("umul", &prior_rows, stride, &mut requirements);
+            let prefix =
+                self.emit_gemm_checked_uint("umul", &prior_rows, stride, &mut requirements);
             let elements = self.emit_gemm_checked_uint("uadd", &prefix, cols, &mut requirements);
-            let elem_ty = self.mem_elem_types.get(name).expect("recognised GEMM buffer");
+            let elem_ty = self
+                .mem_elem_types
+                .get(name)
+                .expect("recognised GEMM buffer");
             let bytes_per_element = match elem_ty.as_str() {
-                "i16" => "2", "i64" => "8", "float" => "4",
+                "i16" => "2",
+                "i64" => "8",
+                "float" => "4",
                 _ => unreachable!("unrecognised GEMM element type"),
             };
-            let bytes = self.emit_gemm_checked_uint("umul", &elements, bytes_per_element, &mut requirements);
+            let bytes = self.emit_gemm_checked_uint(
+                "umul",
+                &elements,
+                bytes_per_element,
+                &mut requirements,
+            );
             let signed_size = self.fresh_tmp();
-            writeln!(&mut self.output, "  {signed_size} = icmp ule i64 {bytes}, 9223372036854775807").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {signed_size} = icmp ule i64 {bytes}, 9223372036854775807"
+            )
+            .unwrap();
             requirements.push(signed_size);
             let pointer = self.emit_load(&format!("%{name}"), "ptr");
             let address = self.fresh_tmp();
-            writeln!(&mut self.output, "  {address} = ptrtoint ptr {pointer} to i64").unwrap();
+            writeln!(
+                &mut self.output,
+                "  {address} = ptrtoint ptr {pointer} to i64"
+            )
+            .unwrap();
             let end = self.emit_gemm_checked_uint("uadd", &address, &bytes, &mut requirements);
             buffers.push((address, end));
         }
@@ -2406,8 +4073,18 @@ nest as written"
             let before = self.fresh_tmp();
             let after = self.fresh_tmp();
             let separate = self.fresh_tmp();
-            writeln!(&mut self.output, "  {before} = icmp ule i64 {}, {}", buffers[left].1, buffers[right].0).unwrap();
-            writeln!(&mut self.output, "  {after} = icmp ule i64 {}, {}", buffers[right].1, buffers[left].0).unwrap();
+            writeln!(
+                &mut self.output,
+                "  {before} = icmp ule i64 {}, {}",
+                buffers[left].1, buffers[right].0
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "  {after} = icmp ule i64 {}, {}",
+                buffers[right].1, buffers[left].0
+            )
+            .unwrap();
             writeln!(&mut self.output, "  {separate} = or i1 {before}, {after}").unwrap();
             requirements.push(separate);
         }
@@ -2417,19 +4094,35 @@ nest as written"
             writeln!(&mut self.output, "  {both} = and i1 {safe}, {requirement}").unwrap();
             safe = both;
         }
-        writeln!(&mut self.output, "  br i1 {safe}, label %{fast}, label %{scalar}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {safe}, label %{fast}, label %{scalar}"
+        )
+        .unwrap();
     }
 
     fn emit_gemm_checked_uint(
-        &mut self, operation: &str, lhs: &str, rhs: &str, requirements: &mut Vec<String>,
+        &mut self,
+        operation: &str,
+        lhs: &str,
+        rhs: &str,
+        requirements: &mut Vec<String>,
     ) -> String {
         let pair = self.fresh_tmp();
         let value = self.fresh_tmp();
         let overflow = self.fresh_tmp();
         let fits = self.fresh_tmp();
         writeln!(&mut self.output, "  {pair} = call {{ i64, i1 }} @llvm.{operation}.with.overflow.i64(i64 {lhs}, i64 {rhs})").unwrap();
-        writeln!(&mut self.output, "  {value} = extractvalue {{ i64, i1 }} {pair}, 0").unwrap();
-        writeln!(&mut self.output, "  {overflow} = extractvalue {{ i64, i1 }} {pair}, 1").unwrap();
+        writeln!(
+            &mut self.output,
+            "  {value} = extractvalue {{ i64, i1 }} {pair}, 0"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {overflow} = extractvalue {{ i64, i1 }} {pair}, 1"
+        )
+        .unwrap();
         writeln!(&mut self.output, "  {fits} = xor i1 {overflow}, true").unwrap();
         requirements.push(fits);
         value
@@ -2466,12 +4159,7 @@ nest as written"
         // Extents and strides, widened to i64 exactly as the f32 path does.
         let mut ext = Vec::new();
         for name in [
-            &shape.m,
-            &shape.n,
-            &shape.k,
-            &shape.lda,
-            &shape.ldb,
-            &shape.ldc,
+            &shape.m, &shape.n, &shape.k, &shape.lda, &shape.ldb, &shape.ldc,
         ] {
             let ty = self.locals.get(name)?.clone();
             let tmp = self.fresh_tmp();
@@ -2707,7 +4395,10 @@ nest as written"
         // is written down.
         if let Some(drift) = &shape.drift {
             match crate::cpu_gemm::plan_exact_gemm(drift) {
-                crate::cpu_gemm::ExactGemmPlan::Vnni { scheme, operand_magnitude } => {
+                crate::cpu_gemm::ExactGemmPlan::Vnni {
+                    scheme,
+                    operand_magnitude,
+                } => {
                     self.drift_report.push(format!(
                         "matmul {}x{}: exact vpdpwssd kernel is LICENSED (operands |x| <= {}, \
                          flush every {} k-pairs) but not yet implemented - using scalar lowering, \
@@ -2736,12 +4427,7 @@ nest as written"
         // stride the extent does not equal — which is now the whole point.
         let mut ext = Vec::new();
         for name in [
-            &shape.m,
-            &shape.n,
-            &shape.k,
-            &shape.lda,
-            &shape.ldb,
-            &shape.ldc,
+            &shape.m, &shape.n, &shape.k, &shape.lda, &shape.ldb, &shape.ldc,
         ] {
             let ty = self.locals.get(name)?.clone();
             let tmp = self.fresh_tmp();
@@ -2780,10 +4466,18 @@ nest as written"
         writeln!(&mut self.output, "  {m_empty} = icmp sle i64 {}, 0", ext[0]).unwrap();
         writeln!(&mut self.output, "  {n_empty} = icmp sle i64 {}, 0", ext[1]).unwrap();
         writeln!(&mut self.output, "  {empty} = or i1 {m_empty}, {n_empty}").unwrap();
-        writeln!(&mut self.output, "  br i1 {empty}, label %{done}, label %{check_k}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {empty}, label %{done}, label %{check_k}"
+        )
+        .unwrap();
         writeln!(&mut self.output, "{check_k}:").unwrap();
         writeln!(&mut self.output, "  {k_empty} = icmp sle i64 {}, 0", ext[2]).unwrap();
-        writeln!(&mut self.output, "  br i1 {k_empty}, label %{zero}, label %{compute}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {k_empty}, label %{zero}, label %{compute}"
+        )
+        .unwrap();
 
         writeln!(&mut self.output, "{zero}:").unwrap();
         let row_bytes = self.fresh_tmp();
@@ -2795,13 +4489,35 @@ nest as written"
         writeln!(&mut self.output, "  {row_bytes} = mul i64 {}, 4", ext[1]).unwrap();
         writeln!(&mut self.output, "  br label %{zero_cond}").unwrap();
         writeln!(&mut self.output, "{zero_cond}:").unwrap();
-        writeln!(&mut self.output, "  {row} = phi i64 [ 0, %{zero} ], [ {next_row}, %{zero_body} ]").unwrap();
-        writeln!(&mut self.output, "  {more} = icmp slt i64 {row}, {}", ext[0]).unwrap();
-        writeln!(&mut self.output, "  br i1 {more}, label %{zero_body}, label %{done}").unwrap();
+        writeln!(
+            &mut self.output,
+            "  {row} = phi i64 [ 0, %{zero} ], [ {next_row}, %{zero_body} ]"
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  {more} = icmp slt i64 {row}, {}",
+            ext[0]
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  br i1 {more}, label %{zero_body}, label %{done}"
+        )
+        .unwrap();
         writeln!(&mut self.output, "{zero_body}:").unwrap();
         writeln!(&mut self.output, "  {offset} = mul i64 {row}, {}", ext[5]).unwrap();
-        writeln!(&mut self.output, "  {row_ptr} = getelementptr float, ptr {}, i64 {offset}", ptrs[2]).unwrap();
-        writeln!(&mut self.output, "  call void @llvm.memset.p0.i64(ptr {row_ptr}, i8 0, i64 {row_bytes}, i1 false)").unwrap();
+        writeln!(
+            &mut self.output,
+            "  {row_ptr} = getelementptr float, ptr {}, i64 {offset}",
+            ptrs[2]
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  call void @llvm.memset.p0.i64(ptr {row_ptr}, i8 0, i64 {row_bytes}, i1 false)"
+        )
+        .unwrap();
         writeln!(&mut self.output, "  {next_row} = add i64 {row}, 1").unwrap();
         writeln!(&mut self.output, "  br label %{zero_cond}").unwrap();
 
@@ -2911,8 +4627,7 @@ nest as written"
                         // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
                         let src_unsigned = self.expr_is_unsigned(init_expr);
-                        let coerced =
-                            self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
+                        let coerced = self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
 
                         // ==========================================
                         // ARCHITECTURAL NOTE: Aggregate Memory Handling
@@ -2945,9 +4660,11 @@ nest as written"
                             )
                             .unwrap();
 
-                            let is_aggregate_type = val_ty.starts_with('%') || val_ty.starts_with('[');
-                            let is_registered_type = self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                                || self.enums.contains_key(dst_ty.trim_start_matches('%'));
+                            let is_aggregate_type =
+                                val_ty.starts_with('%') || val_ty.starts_with('[');
+                            let is_registered_type =
+                                self.structs.contains_key(dst_ty.trim_start_matches('%'))
+                                    || self.enums.contains_key(dst_ty.trim_start_matches('%'));
 
                             let src_ptr = if is_aggregate_type && is_registered_type {
                                 let tmp_ptr = self.fresh_tmp();
@@ -2990,9 +4707,12 @@ nest as written"
             // quantised once and every addition after that is integer, which is
             // what makes the total independent of the order the terms arrived
             // in.
-            Stmt::Assign { target, value, span }
-                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n))
-                    && Self::drift_running_sum(target, value).is_some() =>
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n))
+                && Self::drift_running_sum(target, value).is_some() =>
             {
                 let name = match target {
                     Expr::Ident(n, _) => n.clone(),
@@ -3005,7 +4725,11 @@ nest as written"
                 let addr = format!("%{}", name);
                 let loaded = self.emit_load(&addr, ity);
                 let result = self.fresh_tmp();
-                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                let instr = if matches!(op, BinaryOp::Sub) {
+                    "sub"
+                } else {
+                    "add"
+                };
                 writeln!(
                     &mut self.output,
                     "  {} = {} {} {}, {}",
@@ -3020,8 +4744,7 @@ nest as written"
             // have to round `<expr>` into the fixed domain, and whether that is
             // exact depends on the expression - which is precisely the
             // judgement the design rule forbids a backend from making silently.
-            Stmt::Assign { target, span, .. }
-                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            Stmt::Assign { target, span, .. } if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
             {
                 let name = match target {
                     Expr::Ident(n, _) => n.clone(),
@@ -3065,8 +4788,9 @@ representation, and whether that is lossless depends on the expression.",
                         .unwrap();
 
                         let is_aggregate_type = val_ty.starts_with('%') || val_ty.starts_with('[');
-                        let is_registered_type = self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                            || self.enums.contains_key(dst_ty.trim_start_matches('%'));
+                        let is_registered_type =
+                            self.structs.contains_key(dst_ty.trim_start_matches('%'))
+                                || self.enums.contains_key(dst_ty.trim_start_matches('%'));
 
                         let src_ptr = if is_aggregate_type && is_registered_type {
                             let tmp_ptr = self.fresh_tmp();
@@ -3172,7 +4896,10 @@ representation, and whether that is lossless depends on the expression.",
                 }
             }
             Stmt::While {
-                condition, body, is_uniform_branch, ..
+                condition,
+                body,
+                is_uniform_branch,
+                ..
             } => {
                 let cond_lbl = self.fresh_label("while.cond");
                 let body_lbl = self.fresh_label("while.body");
@@ -3236,7 +4963,12 @@ representation, and whether that is lossless depends on the expression.",
                 let end_lbl = self.fresh_label("for.end");
 
                 if let Some(t) = tile {
-                    writeln!(&mut self.output, "  ; [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
+                    writeln!(
+                        &mut self.output,
+                        "  ; [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}",
+                        t.block_m, t.block_n, t.block_k
+                    )
+                    .unwrap();
                 }
 
                 // `@prefetch_stride` never reaches here: the type checker
@@ -3300,9 +5032,12 @@ representation, and whether that is lossless depends on the expression.",
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
                 self.block_terminated = false;
             }
-            Stmt::CompoundAssign { target, op, value, span }
-                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
-            {
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) => {
                 let name = match target {
                     Expr::Ident(n, _) => n.clone(),
                     _ => unreachable!(),
@@ -3327,7 +5062,11 @@ representation, and whether that is lossless depends on the expression.",
                 let addr = format!("%{}", name);
                 let loaded = self.emit_load(&addr, ity);
                 let result = self.fresh_tmp();
-                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                let instr = if matches!(op, BinaryOp::Sub) {
+                    "sub"
+                } else {
+                    "add"
+                };
                 writeln!(
                     &mut self.output,
                     "  {} = {} {} {}, {}",
@@ -3343,14 +5082,18 @@ representation, and whether that is lossless depends on the expression.",
                 let rhs = self.emit_expr(value, None, None);
                 let ty = self.infer_type(target);
                 let loaded = self.emit_load(&addr, &ty);
+                let (loaded, rhs, op_ty) =
+                    self.promote_binary_values(op, target, value, &loaded, &rhs);
+                let unsigned = self.binary_is_unsigned(op, target, value);
                 let result = self.fresh_tmp();
-                let op_str = self.binop_to_llvm(op, &ty);
+                let op_str = self.binop_to_llvm(op, &op_ty, unsigned);
                 writeln!(
                     &mut self.output,
                     "  {} = {} {} {}, {}",
-                    result, op_str, ty, loaded, rhs
+                    result, op_str, op_ty, loaded, rhs
                 )
                 .unwrap();
+                let result = self.emit_coerce_from(&result, &op_ty, &ty, unsigned);
                 self.emit_store(&result, &addr, &ty);
             }
             Stmt::Chisel(block, span) => {
@@ -3534,8 +5277,16 @@ representation, and whether that is lossless depends on the expression.",
         match expr {
             Expr::Ident(name, _) => format!("%{}", name),
             Expr::MemberAccess { base, member, .. } => {
-                let (base_val, base_ty) = if let Expr::UnaryOp { op: UnaryOp::Deref, operand: inner, .. } = &**base {
-                    (self.emit_expr(inner, None, None), self.infer_struct_type(inner))
+                let (base_val, base_ty) = if let Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    operand: inner,
+                    ..
+                } = &**base
+                {
+                    (
+                        self.emit_expr(inner, None, None),
+                        self.infer_struct_type(inner),
+                    )
                 } else {
                     let raw_base_val = self.emit_lvalue(base);
                     let base_ast_ty = self.infer_ast_type(base);
@@ -3617,14 +5368,12 @@ representation, and whether that is lossless depends on the expression.",
                 let idx_val = self.emit_expr(index, None, None);
                 let base_ty = self.infer_type(base);
                 let idx_ty = self.infer_type(index);
-                
-                let is_safe = crate::type_checker::SAFE_INDICES.with(|set| {
-                    set.borrow().contains(&(span.line, span.col))
-                });
-                let array_size = crate::type_checker::INDEX_ARRAY_SIZES.with(|map| {
-                    map.borrow().get(&(span.line, span.col)).cloned()
-                });
-                
+
+                let is_safe = crate::type_checker::SAFE_INDICES
+                    .with(|set| set.borrow().contains(&(span.line, span.col)));
+                let array_size = crate::type_checker::INDEX_ARRAY_SIZES
+                    .with(|map| map.borrow().get(&(span.line, span.col)).cloned());
+
                 if !is_safe {
                     if let Some(size) = array_size {
                         let cmp_ty = if idx_ty == "i32" { "i32" } else { "i64" };
@@ -3635,18 +5384,21 @@ representation, and whether that is lossless depends on the expression.",
                             &mut self.output,
                             "  {} = icmp uge {} {}, {}",
                             cond, cmp_ty, idx_val, size
-                        ).unwrap();
+                        )
+                        .unwrap();
                         writeln!(
                             &mut self.output,
                             "  br i1 {}, label %{}, label %{}",
                             cond, fail_lbl, ok_lbl
-                        ).unwrap();
-                        
+                        )
+                        .unwrap();
+
                         // Fail block
                         writeln!(&mut self.output, "{}:", fail_lbl).unwrap();
                         let idx_i64 = if cmp_ty == "i32" {
                             let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = sext i32 {} to i64", tmp, idx_val).unwrap();
+                            writeln!(&mut self.output, "  {} = sext i32 {} to i64", tmp, idx_val)
+                                .unwrap();
                             tmp
                         } else {
                             idx_val.clone()
@@ -3659,7 +5411,7 @@ representation, and whether that is lossless depends on the expression.",
                         ).unwrap();
                         writeln!(&mut self.output, "  call void @exit(i32 1)").unwrap();
                         writeln!(&mut self.output, "  unreachable").unwrap();
-                        
+
                         // Ok block
                         writeln!(&mut self.output, "{}:", ok_lbl).unwrap();
                         self.block_terminated = false;
@@ -3705,6 +5457,152 @@ representation, and whether that is lossless depends on the expression.",
         }
     }
 
+    /// Recognize `(x << a) | (x >> b)` and its right-rotate form only when
+    /// both shifts have the same promoted width and valid complementary counts.
+    /// Funnel shifts mask their count, while ordinary shifts produce poison for
+    /// an out-of-range count, so zero/width and unproved dynamic counts stay as
+    /// ordinary shifts. Only local identifiers can be shared: calls, pointer
+    /// reads, and indexed/field expressions retain their original evaluations.
+    fn try_emit_rotate(&mut self, left: &Expr, right: &Expr) -> Option<String> {
+        if !self.recognize_rotates {
+            return None;
+        }
+        let Expr::BinaryOp {
+            left: l_value,
+            op: l_op,
+            right: l_count,
+            ..
+        } = left
+        else {
+            return None;
+        };
+        let Expr::BinaryOp {
+            left: r_value,
+            op: r_op,
+            right: r_count,
+            ..
+        } = right
+        else {
+            return None;
+        };
+        let intrinsic = match (l_op, r_op) {
+            (BinaryOp::Shl, BinaryOp::Shr) => "fshl",
+            (BinaryOp::Shr, BinaryOp::Shl) => "fshr",
+            _ => return None,
+        };
+        let (Expr::Ident(l_name, _), Expr::Ident(r_name, _)) = (&**l_value, &**r_value) else {
+            return None;
+        };
+        if l_name != r_name || !self.locals.contains_key(l_name) || !self.expr_is_unsigned(l_value)
+        {
+            return None;
+        }
+
+        // Only small, pure integer constants are folded. Every intermediate
+        // fits i32, matching literal arithmetic without overflow assumptions.
+        fn count(expr: &Expr) -> Option<i64> {
+            let value = match expr {
+                Expr::IntLit(value, _) => *value,
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOp::Add,
+                    right,
+                    ..
+                } => count(left)?.checked_add(count(right)?)?,
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOp::Sub,
+                    right,
+                    ..
+                } => count(left)?.checked_sub(count(right)?)?,
+                _ => return None,
+            };
+            (0..=64).contains(&value).then_some(value)
+        }
+        let ty = self.infer_type(left);
+        if ty != self.infer_type(right) {
+            return None;
+        }
+        let width = match ty.as_str() {
+            "i8" => 8,
+            "i16" => 16,
+            "i32" => 32,
+            "i64" => 64,
+            _ => return None,
+        };
+        let l_count = count(l_count)?;
+        let r_count = count(r_count)?;
+        if l_count <= 0
+            || r_count <= 0
+            || l_count >= width
+            || r_count >= width
+            || l_count + r_count != width
+        {
+            return None;
+        }
+
+        let value = self.emit_expr(l_value, None, None);
+        let source_ty = self.infer_type(l_value);
+        let value = self.emit_coerce_from(&value, &source_ty, &ty, true);
+        let result = self.fresh_tmp();
+        writeln!(&mut self.output,
+            "  {result} = call {ty} @llvm.{intrinsic}.{ty}({ty} {value}, {ty} {value}, {ty} {l_count})"
+        ).unwrap();
+        Some(result)
+    }
+
+    /// Evaluate the RHS only when the left boolean cannot decide the result.
+    /// The dedicated incoming blocks make each PHI predecessor explicit even
+    /// when nested logical expressions or bounds checks create RHS blocks.
+    fn emit_short_circuit(&mut self, op: &BinaryOp, left: &Expr, right: &Expr) -> String {
+        let lhs = self.emit_expr(left, None, None);
+        let lhs_ty = self.infer_type(left);
+        let lhs = self.emit_coerce_from(&lhs, &lhs_ty, "i1", false);
+        let rhs_label = self.fresh_label("logic.rhs");
+        let short_label = self.fresh_label("logic.short");
+        let rhs_done_label = self.fresh_label("logic.rhs_done");
+        let merge_label = self.fresh_label("logic.merge");
+        let is_and = matches!(op, BinaryOp::And);
+        let (if_true, if_false) = if is_and {
+            (&rhs_label, &short_label)
+        } else {
+            (&short_label, &rhs_label)
+        };
+        writeln!(
+            &mut self.output,
+            "  br i1 {}, label %{}, label %{}",
+            lhs, if_true, if_false
+        )
+        .unwrap();
+
+        writeln!(&mut self.output, "{}:", short_label).unwrap();
+        writeln!(&mut self.output, "  br label %{}", merge_label).unwrap();
+
+        writeln!(&mut self.output, "{}:", rhs_label).unwrap();
+        self.block_terminated = false;
+        let rhs = self.emit_expr(right, None, None);
+        let rhs_ty = self.infer_type(right);
+        let rhs = self.emit_coerce_from(&rhs, &rhs_ty, "i1", false);
+        writeln!(&mut self.output, "  br label %{}", rhs_done_label).unwrap();
+        writeln!(&mut self.output, "{}:", rhs_done_label).unwrap();
+        writeln!(&mut self.output, "  br label %{}", merge_label).unwrap();
+
+        writeln!(&mut self.output, "{}:", merge_label).unwrap();
+        self.block_terminated = false;
+        let result = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = phi i1 [ {}, %{} ], [ {}, %{} ]",
+            result,
+            if is_and { "false" } else { "true" },
+            short_label,
+            rhs,
+            rhs_done_label
+        )
+        .unwrap();
+        result
+    }
+
     fn emit_expr(
         &mut self,
         expr: &Expr,
@@ -3713,7 +5611,9 @@ representation, and whether that is lossless depends on the expression.",
     ) -> String {
         match expr {
             Expr::IntLit(val, _) => format!("{}", val),
-            Expr::FloatLit(val, _) => format!("{:.6e}", val),
+            // LLVM's hexadecimal form preserves every parsed IEEE-754 bit.
+            // Decimal output with six places rounded 1.0000001 to 1.000000.
+            Expr::FloatLit(val, _) => format!("0x{:016X}", val.to_bits()),
             Expr::BoolLit(b, _) => {
                 if *b {
                     "1".into()
@@ -3773,102 +5673,18 @@ representation, and whether that is lossless depends on the expression.",
             Expr::BinaryOp {
                 left, op, right, ..
             } => {
-                let mut l = self.emit_expr(left, None, None);
-                let mut r = self.emit_expr(right, None, None);
-                let mut l_ty = self.infer_type(left);
-                let mut r_ty = self.infer_type(right);
-
-                // ==========================================
-                // ARCHITECTURAL NOTE: BinaryOp Type Promotion
-                // ==========================================
-                // When executing binary operations (e.g. A + B), LLVM strictly requires both operands
-                // to share the exact same type. If the frontend allows mixed-type expressions (like `int + float`),
-                // we must automatically promote one of the scalars to match the wider type.
-                //
-                // Scalar Gating Logic:
-                // 1. If both are floats, promote to the larger float precision.
-                // 2. If one is float and the other is int, promote the int to the float type.
-                // 3. If both are ints, promote to the larger integer bitwidth.
-                // ==========================================
-
-                // 4. `i1` is NEVER an operand width. A comparison produces
-                //    `i1`, and the promotion below only runs when the two
-                //    types DIFFER -- so two comparisons combined with a third
-                //    operator were left at `i1`, where LLVM's signed
-                //    interpretation of `1` is **-1**:
-                //
-                //        ((v == v) < (v > v))   ->  icmp slt i1 1, 0  ->  TRUE
-                //
-                //    Arithmetic is no better: `add i1` wraps mod 2, so
-                //    `(a > b) + (c > d)` could only ever be 0 or 1. Both are
-                //    fixed by widening a boolean to a real integer first, and
-                //    zero-extension is what makes `true` 1 rather than -1.
-                //
-                //    Found by `tests/backend_differential.rs` once its
-                //    generator produced NESTED expressions -- flat ones cannot
-                //    put a comparison in an operand position, so 400 programs
-                //    had already passed clean.
-                if l_ty == "i1" {
-                    l = self.emit_coerce_from(&l, "i1", "i32", true);
-                    l_ty = "i32".to_string();
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    return self.emit_short_circuit(op, left, right);
                 }
-                if r_ty == "i1" {
-                    r = self.emit_coerce_from(&r, "i1", "i32", true);
-                    r_ty = "i32".to_string();
-                }
-
-                // Promote types if there's a mismatch
-                if l_ty != r_ty {
-                    let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
-                    let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
-
-                    let common_ty = if l_is_float && r_is_float {
-                        // Both floats, pick the larger one
-                        let l_bits = if l_ty == "double" {
-                            64
-                        } else if l_ty == "float" {
-                            32
-                        } else {
-                            16
-                        };
-                        let r_bits = if r_ty == "double" {
-                            64
-                        } else if r_ty == "float" {
-                            32
-                        } else {
-                            16
-                        };
-                        if l_bits >= r_bits {
-                            l_ty.clone()
-                        } else {
-                            r_ty.clone()
-                        }
-                    } else if l_is_float {
-                        l_ty.clone()
-                    } else if r_is_float {
-                        r_ty.clone()
-                    } else {
-                        // Both ints, pick the larger one
-                        let l_bits = Self::int_bits(&l_ty);
-                        let r_bits = Self::int_bits(&r_ty);
-                        if l_bits >= r_bits {
-                            l_ty.clone()
-                        } else {
-                            r_ty.clone()
-                        }
-                    };
-
-                    if l_ty != common_ty {
-                        l = self.emit_coerce(&l, &l_ty, &common_ty);
-                        l_ty = common_ty.clone();
-                    }
-                    if r_ty != common_ty {
-                        r = self.emit_coerce(&r, &r_ty, &common_ty);
-                        // r_ty = common_ty.clone(); // Not needed anymore
+                if matches!(op, BinaryOp::BitOr) {
+                    if let Some(result) = self.try_emit_rotate(left, right) {
+                        return result;
                     }
                 }
-
-                let ty = l_ty;
+                let l = self.emit_expr(left, None, None);
+                let r = self.emit_expr(right, None, None);
+                let (l, r, ty) = self.promote_binary_values(op, left, right, &l, &r);
+                let unsigned = self.binary_is_unsigned(op, left, right);
                 let tmp = self.fresh_tmp();
 
                 // Special case: Enum comparison (compare tags)
@@ -3904,7 +5720,7 @@ representation, and whether that is lossless depends on the expression.",
                     return tmp;
                 }
 
-                let instr = self.binop_to_llvm(op, &ty);
+                let instr = self.binop_to_llvm(op, &ty, unsigned);
                 writeln!(
                     &mut self.output,
                     "  {} = {} {} {}, {}",
@@ -3954,6 +5770,16 @@ representation, and whether that is lossless depends on the expression.",
             Expr::Call { func, args, .. } => {
                 let func_name = self.emit_call_target(func);
 
+                if let Some(value) = self.try_emit_runtime_query(&func_name, args) {
+                    return value;
+                }
+                if let Some(value) = self.try_emit_runtime_append(&func_name, args) {
+                    return value;
+                }
+                if let Some(value) = self.try_emit_runtime_bulk_append(&func_name, args) {
+                    return value;
+                }
+
                 // Block-pointer intrinsics lower to native address arithmetic.
                 // Routing them through the generic call path instead declared
                 // them `i32 (...)`, which truncated the 64-bit base pointer and
@@ -3973,6 +5799,7 @@ representation, and whether that is lossless depends on the expression.",
                     || func_name.starts_with("ystr_")
                     || func_name.starts_with("yvec_"))
                     && args.len() >= 1
+                    && !self.fn_llvm_params.contains_key(&func_name)
                 {
                     if func_name == "Vec_push" && args.len() == 2 {
                         let vec_val = self.emit_expr(&args[0], None, None);
@@ -3998,6 +5825,26 @@ representation, and whether that is lossless depends on the expression.",
                         let mut arg_val = self.emit_expr(arg, None, None);
                         let arg_ty = self.infer_type(arg);
                         let arg_ast = self.infer_ast_type(arg);
+
+                        // eq_cstr accepts registered handles and raw C text.
+                        // Direct &String locals are known slots; ambiguous
+                        // typed references use a registry resolver. Genuine
+                        // &char C text never enters this path.
+                        if i == 1
+                            && matches!(func_name.as_str(), "String_eq_cstr" | "ystr_eq_cstr")
+                            && self.host_runtime_call(&func_name)
+                            && matches!(arg_ast.as_str(), "&String" | "&mut String")
+                        {
+                            if matches!(arg, Expr::UnaryOp { op: UnaryOp::Ref { .. }, operand, .. }
+                                if matches!(&**operand, Expr::Ident(local, _) if self.locals_ast_type.get(local).map(String::as_str) == Some("String")))
+                            {
+                                arg_val = self.emit_load(&arg_val, "ptr");
+                            } else if let Some(address) = self.native_string_handle_normalizer {
+                                let normalized = self.fresh_tmp();
+                                writeln!(&mut self.output, "  {normalized} = call ptr inttoptr (i64 {address} to ptr)(ptr {arg_val})").unwrap();
+                                arg_val = normalized;
+                            }
+                        }
 
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
@@ -4038,7 +5885,7 @@ representation, and whether that is lossless depends on the expression.",
                                         format!("%{}", param_ty)
                                     }
                                 }
-                            }
+                            },
                         };
 
                         if !arg_ty.starts_with('%')
@@ -4047,8 +5894,7 @@ representation, and whether that is lossless depends on the expression.",
                             && llvm_param_ty != "ptr"
                         {
                             let u = self.expr_is_unsigned(arg);
-                            arg_val =
-                                self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
+                            arg_val = self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
                         }
 
                         if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
@@ -4079,7 +5925,10 @@ representation, and whether that is lossless depends on the expression.",
                         }
                     }
 
-                    if func_name.starts_with("Vec_get_") && args.len() == 2 {
+                    if func_name.starts_with("Vec_get_")
+                        && args.len() == 2
+                        && !(func_name == "Vec_get_char" && self.host_runtime_call(&func_name))
+                    {
                         let vec_val = &new_arg_strs[0].split_whitespace().last().unwrap();
                         let idx_val = &new_arg_strs[1].split_whitespace().last().unwrap();
                         let elem_ptr = self.fresh_tmp();
@@ -4123,7 +5972,9 @@ representation, and whether that is lossless depends on the expression.",
                         | "malloc" => "ptr".into(),
                         "String_len" | "ystr_len" | "Vec_len" | "yvec_len" => "i64".into(),
                         "String_eq" | "String_eq_cstr" | "ystr_eq" | "ystr_eq_cstr" => "i1".into(),
-                        "String_char_at" | "ystr_char_at" | "yvec_get_char" => "i8".into(),
+                        "String_char_at" | "ystr_char_at" | "yvec_get_char" | "Vec_get_char" => {
+                            "i8".into()
+                        }
                         _ => "void".into(),
                     };
 
@@ -4200,7 +6051,7 @@ representation, and whether that is lossless depends on the expression.",
                                     format!("%{}", param_ty)
                                 }
                             }
-                        }
+                        },
                     };
 
                     if llvm_param_ty != "ptr" && !llvm_param_ty.starts_with('%') {
@@ -4310,22 +6161,29 @@ representation, and whether that is lossless depends on the expression.",
                     return res_tmp;
                 }
 
-                let ret_ty = match func_name.as_str() {
-                    "println" | "print" | "print_int" | "File_write" | "yfile_write"
-                    | "yvec_push" | "ystr_push" | "ystr_push_str" => "void".into(),
-                    "String_new"
-                    | "File_read_to_string"
-                    | "yfile_read_to_string"
-                    | "ystr_new"
-                    | "ystr_clone"
-                    | "yvec_new"
-                    | "yvec_get"
-                    | "malloc" => "ptr".into(),
-                    _ => self
-                        .functions
+                let ret_ty = if self.fn_llvm_params.contains_key(&func_name) {
+                    self.functions
                         .get(&func_name)
-                        .map(|(_, r)| r.clone())
-                        .unwrap_or_else(|| "i32".into()),
+                        .map(|(_, ret)| ret.clone())
+                        .unwrap_or_else(|| "i32".into())
+                } else {
+                    match func_name.as_str() {
+                        "println" | "print" | "print_int" | "File_write" | "yfile_write"
+                        | "yvec_push" | "ystr_push" | "ystr_push_str" => "void".into(),
+                        "String_new"
+                        | "File_read_to_string"
+                        | "yfile_read_to_string"
+                        | "ystr_new"
+                        | "ystr_clone"
+                        | "yvec_new"
+                        | "yvec_get"
+                        | "malloc" => "ptr".into(),
+                        _ => self
+                            .functions
+                            .get(&func_name)
+                            .map(|(_, r)| r.clone())
+                            .unwrap_or_else(|| "i32".into()),
+                    }
                 };
                 let tmp = self.fresh_tmp();
                 if ret_ty.starts_with('%') {
@@ -4700,7 +6558,12 @@ representation, and whether that is lossless depends on the expression.",
         let mut ok = String::new();
         for (i, b) in bounds.iter().enumerate() {
             let c = self.fresh_tmp();
-            writeln!(&mut self.output, "  {} = icmp ult i64 {}, {}", c, idxs[i], b).unwrap();
+            writeln!(
+                &mut self.output,
+                "  {} = icmp ult i64 {}, {}",
+                c, idxs[i], b
+            )
+            .unwrap();
             if ok.is_empty() {
                 ok = c;
             } else {
@@ -4775,12 +6638,7 @@ representation, and whether that is lossless depends on the expression.",
             dst, ok, p, sink
         )
         .unwrap();
-        writeln!(
-            &mut self.output,
-            "  store {} {}, ptr {}",
-            elem_ty, val, dst
-        )
-        .unwrap();
+        writeln!(&mut self.output, "  store {} {}, ptr {}", elem_ty, val, dst).unwrap();
         Some("0".into())
     }
 
@@ -4809,7 +6667,7 @@ representation, and whether that is lossless depends on the expression.",
 
     // ── Helpers ─────────────────────────────────────────────
 
-    fn binop_to_llvm(&self, op: &BinaryOp, ty: &str) -> &'static str {
+    fn binop_to_llvm(&self, op: &BinaryOp, ty: &str, unsigned: bool) -> &'static str {
         let is_float = ty == "float" || ty == "double" || ty == "half";
         match op {
             BinaryOp::Add => {
@@ -4836,6 +6694,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Div => {
                 if is_float {
                     "fdiv"
+                } else if unsigned {
+                    "udiv"
                 } else {
                     "sdiv"
                 }
@@ -4843,6 +6703,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Mod => {
                 if is_float {
                     "frem"
+                } else if unsigned {
+                    "urem"
                 } else {
                     "srem"
                 }
@@ -4856,7 +6718,7 @@ representation, and whether that is lossless depends on the expression.",
             }
             BinaryOp::NotEq => {
                 if is_float {
-                    "fcmp one"
+                    "fcmp une"
                 } else {
                     "icmp ne"
                 }
@@ -4864,6 +6726,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Lt => {
                 if is_float {
                     "fcmp olt"
+                } else if unsigned {
+                    "icmp ult"
                 } else {
                     "icmp slt"
                 }
@@ -4871,6 +6735,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Gt => {
                 if is_float {
                     "fcmp ogt"
+                } else if unsigned {
+                    "icmp ugt"
                 } else {
                     "icmp sgt"
                 }
@@ -4878,6 +6744,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Le => {
                 if is_float {
                     "fcmp ole"
+                } else if unsigned {
+                    "icmp ule"
                 } else {
                     "icmp sle"
                 }
@@ -4885,6 +6753,8 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Ge => {
                 if is_float {
                     "fcmp oge"
+                } else if unsigned {
+                    "icmp uge"
                 } else {
                     "icmp sge"
                 }
@@ -4893,7 +6763,13 @@ representation, and whether that is lossless depends on the expression.",
             BinaryOp::Or | BinaryOp::BitOr => "or",
             BinaryOp::BitXor => "xor",
             BinaryOp::Shl => "shl",
-            BinaryOp::Shr => "ashr",
+            BinaryOp::Shr => {
+                if unsigned {
+                    "lshr"
+                } else {
+                    "ashr"
+                }
+            }
         }
     }
 
@@ -4927,14 +6803,61 @@ representation, and whether that is lossless depends on the expression.",
                     inner
                 }
             }
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => self.infer_ast_type(operand),
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                if matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::Gt
+                        | BinaryOp::Le
+                        | BinaryOp::Ge
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                ) {
+                    return "bool".into();
+                }
+                let unsigned = self.binary_is_unsigned(op, left, right);
+                match (self.infer_type(expr).as_str(), unsigned) {
+                    ("i8", true) => "U8",
+                    ("i16", true) => "U16",
+                    ("i32", true) => "U32",
+                    ("i64", true) => "U64",
+                    ("i8", false) => "I8",
+                    ("i16", false) => "I16",
+                    ("i32", false) => "I32",
+                    ("i64", false) => "I64",
+                    ("half", _) => "F16",
+                    ("float", _) => "F32",
+                    ("double", _) => "F64",
+                    _ => "Unknown",
+                }
+                .into()
+            }
             Expr::MemberAccess { base, member, .. } => {
                 // Approximate base ty
-                let base_ty = if let Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } = &**base {
+                let base_ty = if let Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    operand,
+                    ..
+                } = &**base
+                {
                     self.infer_ast_type(operand)
                 } else {
                     self.infer_ast_type(base)
                 };
-                let struct_name = base_ty.trim_start_matches('&');
+                let struct_name = base_ty
+                    .strip_prefix("&mut ")
+                    .or_else(|| base_ty.strip_prefix('&'))
+                    .unwrap_or(&base_ty)
+                    .trim_start_matches('%');
 
                 if let Some(fields) = self.ast_structs.get(struct_name) {
                     for (fname, fty) in fields {
@@ -4947,11 +6870,30 @@ representation, and whether that is lossless depends on the expression.",
             }
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
-                if let Some((_, ret_ast_ty)) = self.functions.get(&func_name) {
+                if let Some(ret_ast_ty) = self.fn_ast_returns.get(&func_name) {
+                    ret_ast_ty.clone()
+                } else if let Some((_, ret_ast_ty)) = self.functions.get(&func_name) {
                     ret_ast_ty.clone()
                 } else {
                     "Unknown".into()
                 }
+            }
+            Expr::Index { base, .. } => {
+                if let Expr::Ident(name, _) = &**base {
+                    if let Some(element) = self.mem_ast_types.get(name) {
+                        return element.clone();
+                    }
+                }
+                let base_ty = self.infer_ast_type(base);
+                let inner = base_ty
+                    .strip_prefix("&mut ")
+                    .or_else(|| base_ty.strip_prefix('&'))
+                    .unwrap_or(&base_ty);
+                inner
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or("Unknown")
+                    .to_string()
             }
             Expr::StringLit(_, _) => "String".into(),
             Expr::IntLit(_, _) => "i64".into(),
@@ -5014,6 +6956,13 @@ representation, and whether that is lossless depends on the expression.",
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
                 // Fix 2: enum constructor calls return the enum struct type
+                if self.fn_llvm_params.contains_key(&func_name) {
+                    return self
+                        .functions
+                        .get(&func_name)
+                        .map(|(_, ret)| ret.clone())
+                        .unwrap_or_else(|| "i32".into());
+                }
                 if self.enum_variants.contains_key(&func_name) {
                     let enum_name = func_name.split('_').next().unwrap();
                     return format!("%{}", enum_name);
@@ -5031,7 +6980,10 @@ representation, and whether that is lossless depends on the expression.",
                             return t;
                         }
                     }
-                    if matches!(func_name.as_str(), "block_ptr2d_store" | "block_ptr3d_store") {
+                    if matches!(
+                        func_name.as_str(),
+                        "block_ptr2d_store" | "block_ptr3d_store"
+                    ) {
                         return "void".into();
                     }
                 }
@@ -5071,47 +7023,26 @@ representation, and whether that is lossless depends on the expression.",
                     .map(|(_, r)| r.clone())
                     .unwrap_or_else(|| "i32".into())
             }
-            Expr::BinaryOp { op, left, right, .. } => match op {
+            Expr::BinaryOp {
+                op, left, right, ..
+            } => match op {
                 BinaryOp::Eq
                 | BinaryOp::NotEq
                 | BinaryOp::Lt
                 | BinaryOp::Gt
                 | BinaryOp::Le
-                | BinaryOp::Ge => "i1".into(),
-                _ => {
-                    // `i1` is never an operand width -- see the matching
-                    // promotion in the emission path. This must agree with it
-                    // exactly: the emitter widens the operands and emits
-                    // `add i32`, so reporting `i1` here makes the CALLER emit
-                    // `zext i1 %t` on an i32 register and clang rejects the
-                    // module. `(5 > 3) + (9 > 1)` was the case that caught it,
-                    // and it is the reason the fix is two sites and not one.
-                    let widen = |t: String| if t == "i1" { "i32".to_string() } else { t };
-                    let l_ty = widen(self.infer_type(left));
-                    let r_ty = widen(self.infer_type(right));
-                    if l_ty == r_ty {
-                        l_ty
-                    } else {
-                        let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
-                        let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
-                        if l_is_float && r_is_float {
-                            let l_bits = if l_ty == "double" { 64 } else if l_ty == "float" { 32 } else { 16 };
-                            let r_bits = if r_ty == "double" { 64 } else if r_ty == "float" { 32 } else { 16 };
-                            if l_bits >= r_bits { l_ty } else { r_ty }
-                        } else if l_is_float {
-                            l_ty
-                        } else if r_is_float {
-                            r_ty
-                        } else {
-                            let l_bits = Self::int_bits(&l_ty);
-                            let r_bits = Self::int_bits(&r_ty);
-                            if l_bits >= r_bits { l_ty } else { r_ty }
-                        }
-                    }
-                }
+                | BinaryOp::Ge
+                | BinaryOp::And
+                | BinaryOp::Or => "i1".into(),
+                _ => Self::common_operand_type(&self.infer_type(left), &self.infer_type(right)),
             },
             Expr::MemberAccess { base, member, .. } => {
-                let base_ty = if let Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } = &**base {
+                let base_ty = if let Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    operand,
+                    ..
+                } = &**base
+                {
                     self.infer_struct_type(operand)
                 } else {
                     self.infer_struct_type(base)
@@ -5181,7 +7112,8 @@ representation, and whether that is lossless depends on the expression.",
                     // for both, or a load reads at a stride it was not
                     // written at. An unknown element is refused where its
                     // address is emitted.
-                    self.pointer_elem_type(base).unwrap_or_else(|_| self.pointee_llvm_type(expr))
+                    self.pointer_elem_type(base)
+                        .unwrap_or_else(|_| self.pointee_llvm_type(expr))
                 } else if base_ty.starts_with('[') {
                     if let Some(pos) = base_ty.find('x') {
                         base_ty[pos + 1..].trim().trim_end_matches(']').to_string()
@@ -5263,8 +7195,17 @@ representation, and whether that is lossless depends on the expression.",
             return "ptr".into();
         }
         let clean = ast_ty.trim_start_matches("mut ").trim();
-        if clean == "Vec" || clean.starts_with("Vec<") || clean == "String" || clean.starts_with("String<") || clean == "Option" || clean.starts_with("Option<") {
+        if clean == "Vec"
+            || clean.starts_with("Vec<")
+            || clean == "String"
+            || clean.starts_with("String<")
+            || clean == "Option"
+            || clean.starts_with("Option<")
+        {
             return "ptr".into();
+        }
+        if let Some(ty) = primitive_llvm_type(clean) {
+            return ty.into();
         }
         match clean {
             "I32" | "u32" | "i32" => "i32".into(),
@@ -5307,24 +7248,26 @@ representation, and whether that is lossless depends on the expression.",
                         return format!("%{}", cleaned);
                     }
                 }
-                self.pointee_types
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        if let Some(t) = self.locals_ast_type.get(name) {
-                            let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
-                            if self.ast_structs.contains_key(cleaned) {
-                                format!("%{}", cleaned)
-                            } else {
-                                "i32".into()
-                            }
+                self.pointee_types.get(name).cloned().unwrap_or_else(|| {
+                    if let Some(t) = self.locals_ast_type.get(name) {
+                        let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
+                        if self.ast_structs.contains_key(cleaned) {
+                            format!("%{}", cleaned)
                         } else {
                             "i32".into()
                         }
-                    })
+                    } else {
+                        "i32".into()
+                    }
+                })
             }
             Expr::MemberAccess { base, member, .. } => {
-                let base_ty = if let Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } = &**base {
+                let base_ty = if let Expr::UnaryOp {
+                    op: UnaryOp::Deref,
+                    operand,
+                    ..
+                } = &**base
+                {
                     self.infer_struct_type(operand)
                 } else {
                     self.infer_struct_type(base)

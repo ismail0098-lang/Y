@@ -16,6 +16,165 @@ disk persistence reuses successful decisions across runs; ordinary compiler
 behavior is unchanged.
 Try `cargo run --release --example adaptive_gemm` on an NVIDIA sm_80+ GPU.
 
+An in-process [general-purpose CPU JIT](docs/cpu_jit.md) compiles ordinary Y
+host functions through LLVM ORC on Linux x86-64. Run
+`cargo run --release --bin Y -- examples/cpu_jit.ysu --jit` or embed it from
+Rust/C. A [reproducible C# comparison](benchmarks/cpu_jit/README.md) checks
+integer branching, recursion, floating-point arithmetic, and indexed memory.
+Checked dynamic calls, a Python `CPUJit` wrapper, and a bounded process-local
+compilation cache now make embedding easier. The expanded comparison also
+checks unsigned bit mixing, F64 dot reduction, short-circuit side effects, and
+binary search. Unsigned rotate recognition and explicit measured branch
+profiles now guide native optimization; Rust, C, and Python callers can train
+and recompile while retaining their original session.
+Proven local String/Vec queries, capacity-checked appends and bulk copies, and
+byte conversions now lower directly to native reads, writes, and integer
+operations. Profile use keeps measured work branches while conservatively
+omitting natural-loop control weights by default. Dynamic-size vector appends
+use an exact source-width guard; compact checked-call adapters share the native
+function body.
+
+Scalar helper analysis keeps local String/Vec paths enabled across proved
+arithmetic helpers. Rust, C and Python expose compilation phase timings and
+separate optimization/materialization breakdowns, with optional object-event
+children and object metadata. Rust can override machine-code optimization
+through `codegen_opt_level`; its default inherits the unchanged IR level.
+Per-pass LLVM verification defaults on;
+Rust callers can explicitly disable it while retaining mandatory module checks
+before and after optimization pipelines. Deterministic full-result differential
+tests cover sixteen IR O0/O3, custom-transform, verification and inherited/O2
+machine-code configurations against independent bounded oracles.
+
+## CPU JIT training-tier results (2026-10-08)
+
+The [training-tier comparison](docs/cpu_jit_benchmarks_training_tier.md) uses
+temporary training IR O1 while final profiled IR/native optimization stays O3.
+Median preparation falls 2.83% for full inputs (826.790→803.418 ms) and 6.60%
+for cold inputs (330.061→308.283 ms), improving all nine warm and five cold
+pairs. Instrumented compilation falls about 20%; full-size training execution
+stays near 499 ms. Rust callers select `training_opt_level: Some(1)` explicitly;
+default training still inherits the requested IR level. Verification and
+atomic instrumentation remain enabled.
+
+Final saved IR and exact profiles match; eight native medians regress
+0.001–0.184%, and cold final compilation's separate medians become slower.
+Those observations remain in the report. This improves measured preparation;
+it does not establish a native execution improvement. Measured training is
+about 62.15% of full preparation; final O3 optimization remains the largest
+compilation phase. The gate passed 325 Rust and 18 Python tests after rebuilding
+`liby`. Independent audits passed 139,423 accounting/provenance checks and
+19,493 scalar checks; all raw evidence, frozen sources/binaries and historical
+results are retained. PGO, representation, GC and compilation scopes still
+differ from the fixed .NET 8 baseline.
+
+## CPU JIT materialization results (2026-10-08)
+
+The [ORC codegen comparison](docs/cpu_jit_benchmarks_codegen.md) changes only
+machine-code optimization O3→O2, keeping IR O3 and per-pass verification fixed.
+Nine process triples and five cold triples show no dependable preparation win:
+cold medians rise 1.90% (425.218→433.309 ms), while warm preparation loses
+five of nine pairs despite a 0.41% decrease in separate medians. Seven native
+workload medians regress, including float recurrence (+7.03%) and helper Vec
+(+5.59%). **The inherited O3 default remains unchanged.**
+
+New Rust/C/Python materialization snapshots place 99.83% of cold profiled
+materialization before object handoff. The post-object interval takes about
+0.17 ms; these observations include ORC overhead and are not exclusive backend
+or linker timers. Default IR optimization remains the largest compilation
+phase (55.11%, versus 42.12% materialization). Investigate that pipeline and
+native emission before object handoff next. The gate passed 322 Rust and 18
+Python tests against rebuilt `liby`; independent audits passed 137,416
+accounting/provenance checks and 19,493 scalar output checks. The report retains
+all losses, raw pairs, frozen sources/binaries, and PGO, representation, GC and
+source-versus-IL compilation limits. Historical evidence remains unchanged.
+
+## CPU JIT compilation verification (2026-10-08)
+
+The [verification-policy comparison](docs/cpu_jit_benchmarks_verification.md)
+changes only per-pass LLVM diagnosis, retaining mandatory module checks before
+and after optimization pipelines. The explicit Rust option reduces median
+cold preparation from 419.106 to 329.331 ms (21.42%) and full-size preparation
+from 862.352 to 769.482 ms (10.77%), improving all five cold and nine warm
+pairs. **Per-pass verification remains enabled by default**, including C/Python
+compilation. These are measured policy costs, not exclusive verifier timings.
+
+The default O3 pipeline accounts for most of the saving. In the opt-in arm,
+eager ORC generation/linking/lookup becomes the largest compilation phase:
+51.76% of cold profiled total by median per-sample share. Cold materialization,
+explicit verification and eight native workload medians regress; every sample
+and loss is retained. Both arms have identical saved IR and profiles.
+The final gate passed 319 Rust and 17 Python tests against rebuilt `liby`;
+independent audits passed 129,945 accounting/provenance checks and 19,493 output
+checks. The report preserves sources, binaries, raw records and comparison
+limits. Historical results follow.
+
+## CPU JIT helper results (2026-10-07)
+
+The [fifteen-workload helper comparison](docs/cpu_jit_benchmarks_helper_effects.md)
+uses nine repeated process triples and five cold triples on the same LLVM
+23.1.1/.NET 8.0.31 baseline. Only scalar helper-effect analysis changes between
+the two Y settings; both collect measured profiles. Complete helper workloads
+now retain the local String/Vec paths already available to their direct forms:
+
+| Helper workload | Previous Y ms/call | Next Y ms/call | C# ms/call | Previous / next Y | C# / next Y |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| String allocation/append/scan/free | 4.691276 | 0.036576 | 0.264349 | 128.26x | 7.23x |
+| Vec allocation/append/scan/free | 4.751707 | 0.061095 | 0.092458 | 77.78x | 1.51x |
+
+Both helper workloads improve in all nine previous/next pairs. Ratios divide
+per-engine medians. Small-input cold preparation rises 12.03%, from 306.054 to
+342.875 ms; nine existing workload medians regress by 0.02–0.99%. The report
+retains every sample and loss, paired ratios, independent audits and frozen
+sources. These full-size results supersede the earlier smoke. Y's measured PGO,
+byte String/Vec representation and explicit frees differ from C#'s fixed
+non-PGO configuration, UTF-16 StringBuilder, managed lists and GC. They do not
+establish a general language ranking or an inherent benefit from adding helpers.
+
+Compilation phases identify the next bottleneck: next Y's cold profiled compile
+spends median per-sample shares of 55.51% in LLVM optimization (including
+VerifyEach) and 41.82% in eager ORC generation/linking/lookup. Frontend work is
+about 1.41 ms of the 221.637 ms compile. The final gate passed 318 Rust tests and
+all 16 Python CPU JIT tests against a rebuilt library. Historical results follow.
+
+## CPU JIT benchmark results (2026-10-06)
+
+The [thirteen-workload copy comparison](docs/cpu_jit_benchmarks_runtime_copies.md)
+uses LLVM 23.1.1 and .NET 8.0.31 on one Ryzen 9 9950X core. Nine repeats use
+separate processes with rotating execution orders, twelve warmups and
+thirty-two timed calls per workload. Both Y variants use the same compiler and
+training policy; only dynamic/bulk copy lowering changes. These three added
+workloads show:
+
+| Workload | Previous Y ms/call | Next Y ms/call | C# ms/call | Previous Y / next Y | C# / next Y | Y wins vs C# |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dynamic byte Vec | 0.35829 | 0.06336 | 0.09230 | 5.65x | 1.46x | 6/9 |
+| Dynamic I64 Vec | 0.32825 | 0.04001 | 0.11243 | 8.20x | 2.81x | 9/9 |
+| Bulk String append | 0.04666 | 0.02910 | 0.26557 | 1.60x | 9.13x | 9/9 |
+
+Ratios divide median times. The byte-vector C# / Y ratio ranges from 0.60 to
+2.55 across paired samples, so its median advantage is inconsistent. All nine
+previous/next Y pairs improve for each of these three workloads. The full
+report includes the ten other workloads, their near-parity results and losses,
+raw samples, validated outputs and source/binary hashes.
+
+These measurements describe the tested implementations and settings. Y uses
+native byte storage and measured branch profiles; C# uses UTF-16 `StringBuilder`
+and managed lists with tiering and PGO disabled. C# I64-vector batches include
+GC; Y includes explicit frees. Deferred C# reclamation outside a batch is
+excluded. Container layouts, growth policies and allocators also differ. These
+results cannot establish a general language ranking or attribute the String
+advantage entirely to code generation. Profile training and recompilation are
+excluded from steady-state timers and reported separately.
+
+The [adapter comparison](docs/cpu_jit_benchmarks_adapters.md) changes only
+checked-call adapter inlining. Median total preparation with small cold inputs
+falls from 346.905 to 292.234 ms (15.8%); tiny checked calls stay near parity.
+Several native numeric timings are 11–22% slower in that run; the report retains
+those samples and explains why their cause remains uncertain. Copy lowering
+instead increases small-input cold preparation by 2.6%. Y preparation starts
+from source, while C# preparation starts from prebuilt IL. Follow the
+[benchmark guide](benchmarks/cpu_jit/README.md) to reproduce each comparison.
+
 ---
 
 ## How to read the numbers in this file
@@ -33,6 +192,8 @@ here:
   anything inside that band is reported as parity. The CPU figure is *measured*,
   not assumed: running two behaviourally identical binaries against each other
   as if they were an A/B gives 0.92–1.07, and that is the instrument's floor.
+  The CPU JIT comparison reports its own paired ranges, some much wider than
+  this CPU GEMM spread.
 - **The GPU clock idles at ~210 MHz and needs ~3 s of load to reach ~2670 MHz.**
   Timing one implementation fully and then the other gives the second one a
   hotter clock — a systematic bias, not noise. GPU comparisons here ramp the
@@ -1938,6 +2099,22 @@ kernel's PTX and the SASS `ptxas` produced from that exact file, and asks z3
 whether the two can ever store different values. **An opcode neither executor
 models is a hard error, never a guess.**
 
+**2026-10-08 update:** the selected strict PTXAS stage passed **38 Rust tests,
+162 Python tests and 111 retained artifact cases**, with no failures or skips.
+Carry cuts preserve complemented and one-bit forms; failed cut queries retry
+the original store expressions, and unsigned wide products share the selected
+multiplier. The standing `bn254_permute`, `bn254_sub_vec`, `ptx_carry_chain` and
+`ptx_integer_ops` controls validate with 30, 62, 100 and 66 obligations.
+`bn254_fr_mul_fast` still lacks a completed proof: its final 120-second trial
+timed out without finishing a sweep or returning a verdict. Proof mode remains
+scoped to `sm_89`; GPU execution was unavailable. See the
+[continuation review](docs/verification/ptxas_arithmetic_cuts_2026-10-08.md)
+for evidence, reproduction commands and the remaining work.
+
+The following table preserves the September standing measurements. Its counts
+and timings are historical; the October continuation did not rerun the entire
+table or establish a new aggregate obligation count.
+
 | kernel | verdict | obligations | time | |
 |---|---|---|---|---|
 | `fma/rn` | **VALIDATED** | 9 | 0.0 s | float, contraction forbidden by `.rn` |
@@ -1959,8 +2136,8 @@ models is a hard error, never a guess.**
 | `naive_gemm_f32_muladd` | UNPROVED | 7 | 0.2 s | the form Y *used to* ship |
 | `naive_gemm_f32_rn` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* |
 
-Eighteen rows, 457 obligations, **fifteen VALIDATED and three refuted** —
-asserted by `regress.sh` in the direction each currently reads, because a run in
+The historical table has **fifteen VALIDATED rows and three SAT controls** —
+asserted by `regress.sh` in their expected directions, because a run in
 which an UNPROVED row turns green is a regression too. `fma/plain` is the same
 kernel as `rn` without the `.rn` suffixes: `ptxas` contracts `mul.f32`+`add.f32`
 into one `FFMA` that rounds once where PTX rounds twice, and the validator
@@ -2012,13 +2189,17 @@ is *modelled* (6) or in a **named family with a written reason** (11 conversions
 fails. An all-clear is also what a broken census reports, so the gate carries a
 positive control through the same classifier it uses.
 
-**The binding constraint is the solver, not opcode coverage**, and measuring that
-cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
-validates with 29 multiplies in 24 s; `bn254_fr_mul_fast` has 65 and is UNPROVED
-with **no `sat`** — its first sweep closes 17 of 276 partial sums in 16,237 s.
+**The September solver measurements are historical.** The October continuation
+did not recalibrate the region thresholds below. Its final bounded field-kernel
+trial completed no sweep and returned no verdict.
+
+At the September checkpoint, the binding constraint was the solver rather than
+opcode coverage. `ptx_carry_chain` validated with 29 multiplies in 24 seconds;
+`bn254_fr_mul_fast` had 65 and was UNPROVED with **no `sat`** — its first sweep
+closed 17 of 276 partial sums in 16,237 seconds.
 (This README used to say 261 of 276 in 9,705 s. That does not reproduce, not even
 with the validator of the commit that published it, so it is withdrawn.) Nor is it
-the theory this time: asked of both engines at 60 s, the exact Int translation that
+the theory in that measurement: asked of both engines at 60 s, the exact Int translation that
 proved the division tail closes **none** of the 14 pairs the bitvector engine
 cannot (`tools/ptxas_tval/intwall.py`). Asking the
 counterfactual (*if every opcode were modelled, what could the solver close?*)
@@ -2934,6 +3115,14 @@ decisions are the author's own.
 Further reading:
 
 - [Y Language Specification & Reference Manual](docs/y_language_documentation.md)
+- [CPU JIT embedding and optimization options](docs/cpu_jit.md)
+- [CPU JIT benchmark commands and methodology](benchmarks/cpu_jit/README.md)
+- [CPU JIT training-tier preparation savings and frozen evidence](docs/cpu_jit_benchmarks_training_tier.md)
+- [CPU JIT ORC codegen tradeoffs, materialization timings and frozen evidence](docs/cpu_jit_benchmarks_codegen.md)
+- [CPU JIT verification policy, compilation costs and frozen evidence](docs/cpu_jit_benchmarks_verification.md)
+- [CPU JIT scalar-helper results, phase costs and independent evidence](docs/cpu_jit_benchmarks_helper_effects.md)
+- [CPU JIT copy results and comparison limits](docs/cpu_jit_benchmarks_runtime_copies.md)
+- [CPU JIT adapter preparation and checked-call results](docs/cpu_jit_benchmarks_adapters.md)
 - [ZK compile-speed detail and measurement traps](docs/heavy_circuit_speed_test.md)
 - [circom front end](docs/circom_frontend.md)
 - [ZK emit profiling](docs/zk_emit_profile.md)

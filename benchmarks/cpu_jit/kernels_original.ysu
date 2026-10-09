@@ -1,0 +1,51 @@
+// CPU kernels compiled in memory by the benchmark worker. Inputs come from
+// the host at runtime; every return value and every memory write is checked.
+
+@unsafe
+fn integer_branch(n: I64, seed: I64) -> I64 {
+    let mut x: I64 = seed;
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        x = (x * 48271) % 2147483647;
+        if (x & 7) < 3 {
+            sum = sum + x;
+        } else {
+            sum = sum - x;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+@unsafe
+fn recursive_fib(n: I64) -> I64 {
+    if n < 2 { return n; }
+    return recursive_fib(n - 1) + recursive_fib(n - 2);
+}
+
+@unsafe
+fn float_recurrence(n: I64, seed: F64) -> F64 {
+    let mut x: F64 = seed;
+    let mut i: I64 = 0;
+    while i < n {
+        x = x * 1.000001 + 0.0000003;
+        if x > 2.0 { x = x - 1.9999; }
+        i = i + 1;
+    }
+    return x;
+}
+
+@unsafe
+fn indexed_memory(data: GlobalMemory<I64>, n: I64, seed: I64) -> I64 {
+    let mut sum: I64 = 0;
+    let mut i: I64 = 0;
+    while i < n {
+        let index: I64 = (i * 17 + seed) & 65535;
+        let value: I64 = (data[index] * 3 + 7) & 65535;
+        data[index] = value;
+        sum = sum + value;
+        i = i + 1;
+    }
+    return sum;
+}

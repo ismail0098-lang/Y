@@ -1,6 +1,8 @@
 pub mod ast;
 pub mod bank_conflict;
 pub mod cpu_emitter;
+pub mod cpu_jit;
+pub mod cpu_jit_ffi;
 pub mod lexer;
 pub mod linear_tracker;
 pub mod llvm_emitter;

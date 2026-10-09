@@ -96,6 +96,26 @@ fn compile(dir: &PathBuf, name: &str, src: &str, flag: &str) -> (bool, String) {
 const SCALAR_CTL: &str = "fn main(a: I32) -> I32 {\n    let t: I32 = a * a;\n    let v: I32 = t;\n    return v;\n}\n";
 const SCALAR_POLICY: &str = "fn main(a: I32) -> I32 {\n    let t: I32 = a * a;\n    @cache_policy(L2_STREAM)\n    let v: I32 = t;\n    return v;\n}\n";
 
+/// The JIT runs `main`, so its programs take no argument, and the control's
+/// result is its exit status: 3 * 3 = 9, which no refusal or crash exits with.
+const JIT_CTL: &str = "fn main() -> I32 {\n    let t: I32 = 3 * 3;\n    let v: I32 = t;\n    return v;\n}\n";
+const JIT_POLICY: &str = "fn main() -> I32 {\n    let t: I32 = 3 * 3;\n    @cache_policy(L2_STREAM)\n    let v: I32 = t;\n    return v;\n}\n";
+
+fn run_jit(dir: &PathBuf, name: &str, src: &str) -> (Option<i32>, String) {
+    let path = dir.join(format!("{name}.ysu"));
+    std::fs::write(&path, src).expect("write source");
+    pinned::pin(dir, pinned::SM_PINNED);
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&path)
+        .arg("--target=jit")
+        .current_dir(dir)
+        .output()
+        .expect("run Y");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.code(), text)
+}
+
 /// The one backend that lowers the directive: `L2_STREAM` is `ld.global.cs`.
 const PTX_POLICY: &str = "kernel k(Src: GlobalMemory<F32>, Out: GlobalMemory<F32>) {\n    @cache_policy(L2_STREAM)\n    let v: F32 = Src[1];\n    Out[0] = v;\n}\nfn main() {}\n";
 
@@ -129,6 +149,11 @@ enum Class {
     /// lowered into, so it is neither honoured nor refused. Checked to accept
     /// the program and write its table, not code.
     NoCode,
+    /// `--target=jit`: compiles through the LLVM backend into this process and
+    /// RUNS `main`, so it takes no `-o` and needs a `main` with no arguments.
+    /// It must run the control (its exit status is `main`'s result) and refuse
+    /// the policy by name.
+    Jit,
 }
 
 fn classify(flag: &str) -> Option<Class> {
@@ -144,6 +169,7 @@ fn classify(flag: &str) -> Option<Class> {
         // compiles the source program a `@cache_policy` would be written in.
         "--emit-attention-ptx" | "--emit-verifier" => Some(Class::NoSource),
         "--emit-guarantees" => Some(Class::NoCode),
+        "--target=jit" => Some(Class::Jit),
         _ => None,
     }
 }
@@ -240,6 +266,20 @@ fn every_backend_honours_or_refuses_a_cache_policy() {
             Class::Removed => {
                 let (ok, _) = compile(&d, "ctl", SCALAR_CTL, flag);
                 assert!(!ok, "{shown} is a removed backend and must still refuse every program");
+            }
+            Class::Jit => {
+                let (code, out) = run_jit(&d, "ctl", JIT_CTL);
+                if out.contains("not compiled into this binary") {
+                    skipped.push(format!("{shown}: backend not in this build"));
+                    continue;
+                }
+                assert_eq!(code, Some(9), "{shown} must run the control and return its result, or a refusal below says nothing:\n{out}");
+                let (code, out) = run_jit(&d, "pol", JIT_POLICY);
+                assert!(
+                    code != Some(9) && code != Some(0) && names_the_refusal(&out),
+                    "{shown} ran `@cache_policy` or refused it without naming it:\n{out}"
+                );
+                refused += 1;
             }
             Class::NoSource => skipped.push(format!("{shown}: compiles no source program")),
             Class::NoCode => {

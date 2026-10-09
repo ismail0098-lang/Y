@@ -1,0 +1,98 @@
+// General runtime copy workloads appended to the preserved ten-kernel suite.
+// Element sizes are arguments supplied by the host at runtime (1 and 8).
+
+@unsafe
+fn vec_dynamic_byte(n: I64, seed: I64, element_size: I32) -> I64 {
+    let mut values: Vec = Vec_new(element_size);
+    let mut i: I64 = 0;
+    while i < n {
+        let mut value: char = 'z';
+        if ((i + seed) & 7) < 3 { value = 'A'; }
+        Vec_push(&mut values, &value);
+        i = i + 1;
+    }
+    let mut sum: I64 = 0;
+    let mut pass: I64 = 0;
+    while pass < 8 {
+        i = 0;
+        while i < Vec_len(&values) {
+            let mut index: I64 = i;
+            if (i & 127) == 0 {
+                index = -1;
+            } else if (i & 127) == 1 {
+                index = Vec_len(&values);
+            }
+            let value: I64 = ychar_to_ascii(Vec_get_char(&values, index));
+            sum = sum + value * ((i & 7) + 1);
+            i = i + 1;
+        }
+        pass = pass + 1;
+    }
+    sum = sum + Vec_len(&values);
+    Vec_free(&mut values);
+    return sum;
+}
+
+@unsafe
+fn vec_dynamic_i64(n: I64, seed: I64, element_size: I32) -> I64 {
+    let mut values: Vec = Vec_new(element_size);
+    let mut i: I64 = 0;
+    while i < n {
+        let word: I64 = ((i * 7919 + seed) & 2147483647)
+                     + ((i * 17 + seed) & 65535) * 4294967296;
+        Vec_push(&mut values, &word);
+        i = i + 1;
+    }
+    let mut sum: I64 = 0;
+    let mut pass: I64 = 0;
+    while pass < 8 {
+        i = 0;
+        while i < Vec_len(&values) {
+            let word: I64 = load(yvec_get(&values, i));
+            sum = sum + word * ((i & 7) + 1);
+            i = i + 1;
+        }
+        pass = pass + 1;
+    }
+    sum = sum + Vec_len(&values);
+    Vec_free(&mut values);
+    return sum;
+}
+
+@unsafe
+fn string_bulk_append(n: I64, seed: I64) -> I64 {
+    let mut text: String = "";
+    let mut chunk: String = "";
+    let mut i: I64 = 0;
+    while i < 32 {
+        if ((i + seed) & 7) < 3 {
+            String_push(&mut chunk, 'A');
+        } else {
+            String_push(&mut chunk, 'z');
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        String_push_str(&mut text, &chunk);
+        i = i + 1;
+    }
+    let mut sum: I64 = 0;
+    let mut pass: I64 = 0;
+    while pass < 8 {
+        i = 0;
+        while i < String_len(&text) {
+            let mut index: I64 = i;
+            if (i & 127) == 0 { index = -1; }
+            else if (i & 127) == 1 { index = String_len(&text); }
+            let value: I64 = ychar_to_ascii(String_char_at(&text, index));
+            sum = sum + value * ((i & 7) + 1);
+            i = i + 1;
+        }
+        pass = pass + 1;
+    }
+    sum = sum + String_len(&text);
+    String_free(&mut text);
+    String_free(&mut chunk);
+    return sum;
+}
