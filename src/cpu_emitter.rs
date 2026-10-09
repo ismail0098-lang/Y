@@ -504,8 +504,18 @@ impl CpuEmitter {
                 }
                 Stmt::SafeBlock(b, _) | Stmt::GhostBlock(b, _) => {
                     // `@safe` and `@ghost` are front-end obligations; on the host
-                    // the body is ordinary code and must still be emitted.
+                    // the body is ordinary code and must still be emitted - in
+                    // a Rust block of its own, because the Y block is a scope:
+                    // emitted bare, a `let` inside it shadowed the enclosing
+                    // binding for the rest of the function, so
+                    // `let a = 1; @safe { let a = 2; } return a;` returned 2.
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "{{").unwrap();
+                    self.indent_level += 1;
                     self.emit_block(b);
+                    self.indent_level -= 1;
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "}}").unwrap();
                 }
                 Stmt::TypeAlias { .. } => {}
                 // Everything else is REFUSED rather than dropped. Skipping a

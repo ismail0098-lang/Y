@@ -2671,7 +2671,26 @@ or `shared_alloc_u32` for a shared-memory array.",
                 continue;
             }
             let name: String = bytes[start..end].iter().collect();
-            if let Some(reg) = self.variables.get(&name) {
+            // A shadowed name has several bindings in this kernel (renamed
+            // `name.N` by `crate::lexical_scope`), and a `chisel` block's text
+            // cannot say which one it means: `%name` would resolve to the
+            // FIRST, whichever is in scope here. Refused rather than guessed.
+            let shadowed = self
+                .variables
+                .keys()
+                .chain(self.vec_vars.keys())
+                .any(|k| crate::lexical_scope::source_name(k) == name && k.as_str() != name);
+            if shadowed {
+                self.emit_errors.push(format!(
+                    "[PTX] `chisel` block (line {}, col {}) refers to `%{}`, and this kernel \
+                     binds `{}` more than once (a `let` in a nested block shadows another), \
+                     so the block's text cannot say which binding it means. Give the \
+                     bindings different names.",
+                    span.line, span.col, name, name
+                ));
+                out.push('%');
+                out.push_str(&name);
+            } else if let Some(reg) = self.variables.get(&name) {
                 out.push_str(reg);
             } else if self.vec_vars.contains_key(&name) {
                 self.emit_errors.push(format!(
@@ -3025,6 +3044,17 @@ or `shared_alloc_u32` for a shared-memory array.",
     }
 
     fn emit_kernel(&mut self, kernel: &KernelDecl, hw_profile: &HardwareProfile) {
+        // `variables` maps a NAME to its register for the whole kernel, so a
+        // `let` in a nested block took over the name of the binding it shadows
+        // and every later read of the outer one read the inner register:
+        // `let a = 1; if c { let a = 2; } Out[0] = a;` stored 2. Renamed apart
+        // first, as the LLVM backend does (`crate::lexical_scope`); a kernel
+        // that binds no name twice is unchanged.
+        let renamed = KernelDecl {
+            body: crate::lexical_scope::unique_bindings(&kernel.params, &kernel.body),
+            ..kernel.clone()
+        };
+        let kernel = &renamed;
         self.reject_unsupported_element_types(kernel);
         // Clear variables mapping for fresh compilation unit
         self.variables.clear();
@@ -4094,7 +4124,7 @@ declare it as a Q format.\n{}",
                 let loop_start = self.alloc_label("LOOP_START");
                 let loop_end = self.alloc_label("LOOP_END");
 
-                writeln!(&mut self.ptx_buffer, "    // for {} in ...", loop_var).unwrap();
+                writeln!(&mut self.ptx_buffer, "    // for {} in ...", crate::lexical_scope::source_name(loop_var)).unwrap();
                 if let Some(t) = tile {
                     writeln!(&mut self.ptx_buffer, "    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
                 }

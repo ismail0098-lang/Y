@@ -253,6 +253,16 @@ impl NativeEmitter {
     }
 
     fn emit_func(&mut self, f: &FuncDecl) {
+        // One stack slot per NAME per function, so without this a `let` in a
+        // nested block wrote the slot of the binding it shadows:
+        // `let a = 1; @safe { let a = 2; } return a;` returned 2. Renamed apart
+        // first, exactly as the LLVM backend does (`crate::lexical_scope`); a
+        // function that binds no name twice is unchanged.
+        let renamed = FuncDecl {
+            body: crate::lexical_scope::unique_bindings(&f.params, &f.body),
+            ..f.clone()
+        };
+        let f = &renamed;
         self.symbols.insert(f.name.clone(), self.code.len());
 
         // push rbp
@@ -681,7 +691,13 @@ impl NativeEmitter {
                 }
                 None => {
                     let span = span.clone();
-                    self.unsupported(&format!("the name `{}` (no local of that name)", name), &span);
+                    self.unsupported(
+                        &format!(
+                            "the name `{}` (no local of that name)",
+                            crate::lexical_scope::source_name(name)
+                        ),
+                        &span,
+                    );
                 }
             },
             // Floats, strings, chars, bools, indexing, member access, struct
