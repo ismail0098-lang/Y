@@ -297,21 +297,18 @@ fn a_u32_argument_is_declared_as_its_definition_declares_it() {
     );
 }
 
-/// A `Q16.16` value is lowered as an `i32` by `emit_type`'s default - a wrong
-/// answer this change does not fix. Its call site used to name `%Q16.16`,
-/// which clang refuses; taking the definition's `i32` instead would turn that
-/// loud failure into a silently wrong program. Whatever the backend does with
-/// this program, it must not run it to the wrong answer (`2 * 1.5 > 2.5` is
-/// true; as `i32` it is `2 > 2.5`).
+/// A `Q16.16` value was lowered as an `i32` by `emit_type`'s default. Its call
+/// site used to name `%Q16.16`, which clang refuses; taking the definition's
+/// `i32` alone would have turned that loud failure into a silently wrong
+/// program (`2 * 1.5 > 2.5` is true; as `i32` it is `2 > 2.5`). Q formats
+/// are scaled storage now (`src/llvm_emitter/fixed.rs`), so this program has
+/// to build and run to the right answer; `tests/llvm_fixed_point.rs` is the
+/// full check.
 #[test]
 fn a_q_format_parameter_never_runs_to_a_wrong_answer() {
     let src = "fn dbl(x: Q16.16) -> Q16.16 {\n    return x + x;\n}\n\n\
                fn main() -> bool {\n    let y: Q16.16 = dbl(1.5);\n    return y > 2.5;\n}\n";
-    match build_and_run("q_param", src) {
-        Built::Ran(code) => assert_eq!(code, 1, "a Q16.16 argument ran to a wrong answer"),
-        Built::Crashed => panic!("a Q16.16 argument crashed"),
-        Built::NotBuilt(_) => {}
-    }
+    expect_exit("q_param", src, 1);
 }
 
 #[test]

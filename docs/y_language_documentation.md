@@ -3623,6 +3623,16 @@ Y supports the following primitive numeric types. GPU types are only valid in ke
 
 Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation, which the PTX backend honours (an accumulator declared `F32` with `@bounds` is lowered as `Q32.32`). Outside `@ZeroDrift` a Q-format value, parameter or buffer element is **refused** in a PTX kernel: the backend has no fixed-point arithmetic, and it used to hold the value in an f32 register (or write a `GlobalMemory<Q16.16>` element as a raw `u32`) without saying so.
 
+On the LLVM host backend an ordinary Q value (outside `@ZeroDrift`) is the signed integer `value × 2^frac`, held in storage of the format's width: 8, 16, 32 or 64 bits (`Q4.4`, `Q8.8`, `Q16.16`, `Q32.32`, `Q16.48`, ...). Any other width is refused by name. The arithmetic stays in that domain (`src/llvm_emitter/fixed.rs`):
+
+- A literal takes the Q type and is quantised to the nearest representable value, ties away from zero — the rule `@ZeroDrift` uses for its terms. `0.1` in `Q16.16` is `6554 / 65536`.
+- `+`, `-` and unary `-` are exact. `*` and `/` round their exact result to nearest, ties away from zero.
+- A result outside the format's range, and a division by zero, **trap** at run time; nothing wraps. A literal outside the range is a compile-time error.
+- Q values combine only with values of the same format and with literals (the type checker refuses the rest), and compare with `==`, `!=`, `<`, `<=`, `>`, `>=`. They pass through `let`, assignment, compound assignment (`+=`, `-=`, `*=`, `/=`), `return`, a Y function's parameters, and struct fields (Example 4 in chapter 10 is such a filter).
+- An array of a Q format (a local or a struct field), a `match` on a Q value, and passing a Q value to a function Y does not define (`print_int`, for instance) are refused by name: each would see the unscaled integer.
+
+Before 2026-10-10 this backend computed a Q value as a plain `i32`: `let x: Q16.16 = 1.5` stored 1, and `x > 1.0` was false. `tests/llvm_fixed_point.rs` checks every operation against an independent oracle in four formats.
+
 ### 20.4 Type Casting
 
 **There is no cast syntax.** `as` is not a keyword, and the parser stops at it
@@ -5218,7 +5228,7 @@ slot's own type, because gdb reading a width the code did not store prints
 garbage. An unannotated `let w = 9;` is inferred as `i64` but stored in an
 `i32` slot, so it is shown as an `I32` — `tests/debug_info.rs` asserts exactly
 that case. Likewise a `Q16.16` declared outside `@ZeroDrift` is shown as the
-`I32` this backend stores it as.
+`I32` slot this backend stores it in, which holds `value × 65536` (§20.3).
 
 **A variable is visible exactly where the language says it exists**: from the
 statement after its `let` to the end of its block, a `for` loop's variable in

@@ -26,6 +26,9 @@ use crate::ast::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 
+mod fixed;
+use fixed::QFormat;
+
 /// A literal's value, for reading `@bounds` at compile time.
 fn const_f64_of(expr: &Expr) -> Option<f64> {
     match expr {
@@ -61,6 +64,7 @@ const PRELUDE_DECLARED: &[&str] = &[
     "free",
     "llvm.memset.p0.i64",
     "llvm.memmove.p0.p0.i64",
+    "llvm.trap",
     "llvm.prefetch.p0",
     "load",
     "malloc",
@@ -208,6 +212,8 @@ pub struct LlvmEmitter {
     /// CLI/AOT executables return an integer status even for a source void main.
     /// Embedding/JIT callers retain the source function's original ABI.
     aot_entry_status: bool,
+    /// The Q format the function being emitted returns, if it returns one.
+    current_ret_q: Option<QFormat>,
     /// Track local variables and their LLVM IR types
     locals: BTreeMap<String, String>,
     /// Map local variables to their AST type
@@ -557,6 +563,7 @@ impl LlvmEmitter {
             label_counter: 0,
             current_impl_target: None,
             aot_entry_status: false,
+            current_ret_q: None,
             locals: BTreeMap::new(),
             locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
@@ -1530,9 +1537,15 @@ impl LlvmEmitter {
             // `U64`/`u64` were absent from this table and fell to the
             // `"i32"` default, so `let x: U64 = ...` allocated an **i32**. The
             // PTX backend takes these types seriously (gotcha #7); this one
-            // silently halved their width. The default is still here, and
-            // still wrong for a `Q` format outside `@ZeroDrift` - `let x:
-            // Q16.16 = 1.5` allocates an `i32` and stores `fptosi 1.5` = 1.
+            // silently halved their width. A `Q` format outside `@ZeroDrift`
+            // fell to the same default and was computed as an integer (`let
+            // x: Q16.16 = 1.5` stored `fptosi 1.5` = 1); it is scaled integer
+            // storage now, and `fixed.rs` keeps its arithmetic in that domain.
+            Type::Primitive(name, _) | Type::Ident(name, _)
+                if primitive_llvm_type(name).is_none() && QFormat::parse(name).is_some() =>
+            {
+                self.q_storage(QFormat::parse(name).unwrap())
+            }
             Type::Primitive(name, _) => primitive_llvm_type(name).unwrap_or("i32").into(),
             Type::Ident(name, _) => match name.as_str() {
                 "I32" | "U32" | "u32" | "i32" => "i32".into(),
@@ -1616,7 +1629,8 @@ impl LlvmEmitter {
         let tys = params
             .iter()
             .map(|p| match &p.ty {
-                Type::Primitive(n, _) if primitive_llvm_type(n).is_none() => None,
+                Type::Primitive(n, _)
+                    if primitive_llvm_type(n).is_none() && QFormat::parse(n).is_none() => None,
                 t => Some(self.emit_type(t)),
             })
             .collect();
@@ -1940,6 +1954,18 @@ impl LlvmEmitter {
                     let mut ast_fields = Vec::new();
                     let mut field_attrs = HashMap::new();
                     for f in &s.fields {
+                        // An array of a Q format has no fixed-point lowering
+                        // (a local one is refused by `local_array_type`), and
+                        // its literal would be stored unscaled.
+                        if let Type::Array { element, .. } = &f.ty {
+                            if let Some(fmt) = QFormat::parse(&ast_type_to_string(element)) {
+                                self.emit_errors.push(format!(
+                                    "[LLVM host backend] struct field `{}.{}` is an array of {}; \
+                                     arrays of a Q format have no fixed-point lowering on this backend",
+                                    s.name, f.name, fmt.name()
+                                ));
+                            }
+                        }
                         fields.push((f.name.clone(), self.emit_field_type(&f.ty)));
                         ast_fields.push((f.name.clone(), ast_type_to_string(&f.ty)));
                         let attrs: Vec<FieldAttrKind> =
@@ -2100,6 +2126,9 @@ impl LlvmEmitter {
             .any(|name| name == "llvm.memmove.p0.p0.i64")
         {
             self.wln("declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)");
+        }
+        if self.called_functions.iter().any(|name| name == "llvm.trap") {
+            self.wln("declare void @llvm.trap() cold noreturn nounwind");
         }
         self.wln("declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)");
         self.wln("declare { i64, i1 } @llvm.uadd.with.overflow.i64(i64, i64)");
@@ -2314,6 +2343,7 @@ impl LlvmEmitter {
     /// of these maps populated makes an unrelated binding with the same name
     /// inherit its predecessor's directive, signedness or pointer element.
     fn reset_function_state(&mut self) {
+        self.current_ret_q = None;
         self.tmp_counter = 0;
         self.label_counter = 0;
         self.locals.clear();
@@ -3497,6 +3527,10 @@ impl LlvmEmitter {
         };
         let f = &renamed;
         self.reset_function_state();
+        self.current_ret_q = match &f.ret_ty {
+            Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => QFormat::parse(n),
+            _ => None,
+        };
         self.runtime_locals = self.prove_runtime_locals(f);
         self.runtime_vector_sizes = self.prove_runtime_vector_sizes(f);
         let prev_ptx = self.in_ptx_emit;
@@ -4713,6 +4747,11 @@ nest as written"
                 };
                 self.emit_store(&fixed, &format!("%{}", name), repr.llvm_type());
             }
+            Stmt::Let { name, init: Some(init_expr), .. } if self.local_q_format(name).is_some() => {
+                let fmt = self.local_q_format(name).unwrap();
+                let raw = self.q_value(init_expr, fmt);
+                self.emit_store(&raw, &format!("%{}", name), &fmt.llvm());
+            }
             // A `@cache_policy` on this `let` never reaches here: `emit_program`
             // refuses the whole program first (see the comment there).
             Stmt::Let { name, init, .. } => {
@@ -4866,6 +4905,12 @@ representation, and whether that is lossless depends on the expression.",
                     span.line, name, name, name, name, name
                 ));
             }
+            Stmt::Assign { target, value, .. } if self.q_format(target).is_some() => {
+                let fmt = self.q_format(target).unwrap();
+                let addr = self.emit_lvalue(target);
+                let raw = self.q_value(value, fmt);
+                self.emit_store(&raw, &addr, &fmt.llvm());
+            }
             Stmt::Assign { target, value, .. } => {
                 let target_addr = self.emit_lvalue(target);
                 let dst_ty = self.infer_type(target);
@@ -4920,6 +4965,12 @@ representation, and whether that is lossless depends on the expression.",
                         self.emit_store_with_attrs(&coerced, &target_addr, &dst_ty, attrs);
                     }
                 }
+            }
+            Stmt::Return(Some(e), _) if self.current_ret_q.is_some() => {
+                let fmt = self.current_ret_q.unwrap();
+                let raw = self.q_value(e, fmt);
+                writeln!(&mut self.output, "  ret {} {}", fmt.llvm(), raw).unwrap();
+                self.block_terminated = true;
             }
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
@@ -5190,6 +5241,14 @@ representation, and whether that is lossless depends on the expression.",
                 .unwrap();
                 self.emit_store(&result, &addr, ity);
             }
+            Stmt::CompoundAssign { target, op, value, .. } if self.q_format(target).is_some() => {
+                let fmt = self.q_format(target).unwrap();
+                let addr = self.emit_lvalue(target);
+                let current = self.emit_load(&addr, &fmt.llvm());
+                let rhs = self.q_value(value, fmt);
+                let result = self.q_operation(op, &current, &rhs, fmt);
+                self.emit_store(&result, &addr, &fmt.llvm());
+            }
             Stmt::CompoundAssign {
                 target, op, value, ..
             } => {
@@ -5255,6 +5314,13 @@ representation, and whether that is lossless depends on the expression.",
             Stmt::Match {
                 scrutinee, arms, ..
             } => {
+                if let Some(fmt) = self.q_format(scrutinee) {
+                    self.emit_errors.push(format!(
+                        "[LLVM host backend] `match` on a {} value: its patterns are not \
+                         lowered in fixed point; compare with `if` instead",
+                        fmt.name()
+                    ));
+                }
                 let scrut_val = self.emit_expr(scrutinee, None, None);
                 let scrut_ty = self.infer_type(scrutinee);
                 let scrut_ast = self.infer_ast_type(scrutinee);
@@ -5757,6 +5823,9 @@ representation, and whether that is lossless depends on the expression.",
         target: Option<String>,
         expected_ty: Option<String>,
     ) -> String {
+        if let Some(value) = self.emit_q_expr(expr) {
+            return value;
+        }
         match expr {
             Expr::IntLit(val, _) => format!("{}", val),
             // LLVM's hexadecimal form preserves every parsed IEEE-754 bit.
@@ -5940,6 +6009,17 @@ representation, and whether that is lossless depends on the expression.",
 
                 if let Some(value) = self.emit_enum_constructor(&func_name, args) {
                     return value;
+                }
+                if !self.fn_llvm_params.contains_key(&func_name) {
+                    if let Some(fmt) = args.iter().find_map(|a| self.q_format(a)) {
+                        self.emit_errors.push(format!(
+                            "[LLVM host backend] `{}` would receive a {} value as its raw \
+                             scaled integer; only a Y function with a {} parameter takes one",
+                            func_name,
+                            fmt.name(),
+                            fmt.name()
+                        ));
+                    }
                 }
                 self.called_functions.push(func_name.clone());
 
@@ -6161,8 +6241,21 @@ representation, and whether that is lossless depends on the expression.",
                 for (i, a) in args.iter().enumerate() {
                     let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
-                    let mut arg_val = self.emit_expr(a, None, None);
-                    let arg_ty = self.infer_type(a);
+                    // A Y function's Q parameter takes the argument in its own
+                    // format: a literal `1.5` is 98304 to a Q16.16, never `fptosi`.
+                    let q_param = if self.fn_llvm_params.contains_key(&func_name) {
+                        QFormat::parse(param_ty)
+                    } else {
+                        None
+                    };
+                    let mut arg_val = match q_param {
+                        Some(fmt) => self.q_value(a, fmt),
+                        None => self.emit_expr(a, None, None),
+                    };
+                    let arg_ty = match q_param {
+                        Some(fmt) => fmt.llvm(),
+                        None => self.infer_type(a),
+                    };
                     let arg_ast = self.infer_ast_type(a);
 
                     if arg_ast.starts_with('&') && arg_ast[1..] == *param_ty {
@@ -6405,6 +6498,25 @@ representation, and whether that is lossless depends on the expression.",
                                 break;
                             }
                         }
+                    }
+                    // A Q field takes its value in its own format: `0.25` is
+                    // `0.25 * 2^frac`, not `fptosi 0.25`.
+                    let q_field = self
+                        .ast_structs
+                        .get(name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == fname))
+                        .and_then(|(_, t)| QFormat::parse(t));
+                    if let Some(fmt) = q_field {
+                        let raw = self.q_value(fexpr, fmt);
+                        let new_val = self.fresh_tmp();
+                        writeln!(
+                            &mut self.output,
+                            "  {} = insertvalue {} {}, {} {}, {}",
+                            new_val, ty, current_val, field_ty, raw, field_idx
+                        )
+                        .unwrap();
+                        current_val = new_val;
+                        continue;
                     }
                     let mut val = self.emit_expr(fexpr, None, Some(field_ty.clone()));
                     let mut val_ty = self.infer_type(fexpr);
@@ -6871,6 +6983,13 @@ representation, and whether that is lossless depends on the expression.",
     }
 
     fn infer_ast_type(&self, expr: &Expr) -> String {
+        if matches!(expr, Expr::BinaryOp { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod, .. }
+            | Expr::UnaryOp { op: UnaryOp::Neg, .. })
+        {
+            if let Some(fmt) = self.q_format(expr) {
+                return fmt.name();
+            }
+        }
         match expr {
             Expr::Ident(name, _) => {
                 if let Some(ast_ty) = self.locals_ast_type.get(name) {
@@ -7010,6 +7129,13 @@ representation, and whether that is lossless depends on the expression.",
     }
 
     fn infer_type(&self, expr: &Expr) -> String {
+        if matches!(expr, Expr::BinaryOp { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod, .. }
+            | Expr::UnaryOp { op: UnaryOp::Neg, .. })
+        {
+            if let Some(fmt) = self.q_format(expr) {
+                return fmt.llvm();
+            }
+        }
         match expr {
             // **Typed by VALUE, not fixed at i32.** This is the same bug the PTX
             // backend had and fixed (see CLAUDE.md gotcha #7): a literal above

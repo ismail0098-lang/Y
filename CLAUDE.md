@@ -105,7 +105,8 @@ Keep unresolved issues visible; archive a report only after recording its status
 These notes were checked against source, not freshly reproduced. Read
 [known issues](docs/known_issues.md) before related changes:
 
-- LLVM Q formats outside `@ZeroDrift` still fall back to integer lowering.
+- LLVM Q formats outside `@ZeroDrift` are scaled integers that trap on overflow
+  (`fixed.rs`); Q arrays, `match` and built-in arguments are refused.
   Enum payloads are scalar only (at most 8 fields); others are refused.
 - LLVM `ystr_len` declares an i64 return; the C runtime returns int32_t.
 - SMT integer-width checking still rejects unsigned variables in invariant proofs.
