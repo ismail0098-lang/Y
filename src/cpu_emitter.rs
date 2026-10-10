@@ -43,6 +43,28 @@ pub struct CpuEmitter {
     known_fns: std::collections::HashSet<String>,
 }
 
+/// The Rust type of a Y scalar: every one the LLVM backend lowers
+/// (`primitive_llvm_type`). Only I32 and F32 had one, so a `U8`, `U32`, `I64`,
+/// `F64` or `bool` parameter was written as its Y name, which Rust does not
+/// define, and the blob failed to compile.
+fn rust_scalar(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "I8" | "i8" => "i8",
+        "I16" | "i16" => "i16",
+        "I32" | "i32" => "i32",
+        "I64" | "i64" | "isize" => "i64",
+        "U8" | "u8" => "u8",
+        "U16" | "u16" => "u16",
+        "U32" | "u32" => "u32",
+        "U64" | "u64" => "u64",
+        "usize" => "usize",
+        "F32" | "f32" => "f32",
+        "F64" | "f64" => "f64",
+        "bool" => "bool",
+        _ => return None,
+    })
+}
+
 impl CpuEmitter {
     pub fn new() -> Self {
         let mut buffer = String::new();
@@ -175,13 +197,11 @@ impl CpuEmitter {
                 match name.as_str() {
                     "String" => "String".into(),
                     "char" => "char".into(),
-                    "I32" => "i32".into(),
-                    "F32" => "f32".into(),
                     "F16" => "f32".into(),
-                    _ => name.clone(), // Default fallback
+                    _ => rust_scalar(name).map_or_else(|| name.clone(), Into::into), // Default fallback
                 }
             }
-            Type::Ident(name, _) => name.clone(),
+            Type::Ident(name, _) => rust_scalar(name).map_or_else(|| name.clone(), Into::into),
             Type::Generic { base, args, span } => {
                 if base == "GlobalMemory" {
                     "*mut f32".into()
@@ -402,33 +422,38 @@ impl CpuEmitter {
                     step,
                     ..
                 } => {
-                    self.indent();
-                    let step_val = if let Some(Expr::IntLit(s, _)) = step {
-                        *s
-                    } else {
-                        1
-                    };
+                    // The induction variable is I32, and `start`, `end` and
+                    // `step` are each evaluated once, before the first
+                    // iteration, in that order - what the LLVM and PTX
+                    // backends compute, comparing and stepping in 32 bits.
+                    // This wrote `let mut i = start; while i < end { ...
+                    // i += 1; }`: Rust inferred `i: u32` from a U32 bound (a
+                    // bound of 3e9 ran 3e9 times where both backends run
+                    // none), `end` was re-read every iteration (a body that
+                    // shrank it ran 5 times where both run 10), and every
+                    // step that was not a literal became 1.
                     let start_expr = self.emit_expr(start);
-                    writeln!(
-                        &mut self.host_buffer,
-                        "let mut {} = {};",
-                        loop_var, start_expr
-                    )
-                    .unwrap();
-                    self.indent();
                     let end_expr = self.emit_expr(end);
-                    writeln!(
-                        &mut self.host_buffer,
-                        "while {} < {} {{",
-                        loop_var, end_expr
-                    )
-                    .unwrap();
+                    let step_expr = match step {
+                        Some(st) => self.emit_expr(st),
+                        None => "1".to_string(),
+                    };
+                    let end_name = format!("__y_end_{}", loop_var);
+                    let step_name = format!("__y_step_{}", loop_var);
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "let mut {}: i32 = ({}) as i32;", loop_var, start_expr).unwrap();
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "let {}: i32 = ({}) as i32;", end_name, end_expr).unwrap();
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "let {}: i32 = ({}) as i32;", step_name, step_expr).unwrap();
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "while {} < {} {{", loop_var, end_name).unwrap();
 
                     self.indent_level += 1;
                     self.emit_block(body);
 
                     self.indent();
-                    writeln!(&mut self.host_buffer, "{} += {};", loop_var, step_val).unwrap();
+                    writeln!(&mut self.host_buffer, "{} = {}.wrapping_add({});", loop_var, loop_var, step_name).unwrap();
                     self.indent_level -= 1;
                     self.indent();
                     writeln!(&mut self.host_buffer, "}}").unwrap();

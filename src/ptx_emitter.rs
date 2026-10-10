@@ -4166,6 +4166,7 @@ declare it as a Q format.\n{}",
                 // literal path is kept because the v4 vectorising pass keys
                 // off `step_val == 4`, which a runtime value cannot satisfy.
                 let mut step_reg: Option<String> = None;
+                let mut dynamic_step: Option<&Expr> = None;
                 let step_val = match step {
                     Some(Expr::IntLit(step, _)) if *step > 0 && *step <= u32::MAX as i64 => {
                         *step as u32
@@ -4185,9 +4186,7 @@ declare it as a Q format.\n{}",
                         1
                     }
                     Some(dynamic) => {
-                        let r = self.alloc_reg32();
-                        self.emit_i32_loop_header(&r, dynamic);
-                        step_reg = Some(r);
+                        dynamic_step = Some(dynamic);
                         1
                     }
                     None => 1,
@@ -4199,6 +4198,15 @@ declare it as a Q format.\n{}",
 
                 self.emit_i32_loop_header(&loop_reg, start);
                 self.emit_i32_loop_header(&end_reg, end);
+                // `start`, `end` and `step` are each read once, before the
+                // first iteration, in source order - the order the LLVM
+                // backend and `--emit-cpu` read them. The step was read
+                // first, which only a header with a side effect could see.
+                if let Some(dynamic) = dynamic_step {
+                    let r = self.alloc_reg32();
+                    self.emit_i32_loop_header(&r, dynamic);
+                    step_reg = Some(r);
+                }
                 self.variables.insert(loop_var.clone(), loop_reg.clone());
 
                 writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();

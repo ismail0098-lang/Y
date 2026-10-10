@@ -5124,6 +5124,20 @@ representation, and whether that is lossless depends on the expression.",
                 let e_ty = self.infer_type(end);
                 let e_unsigned = self.expr_is_unsigned(end);
                 let e = self.emit_coerce_from(&e_value, &e_ty, "i32", e_unsigned);
+                // `start`, `end` and `step` are each evaluated ONCE, before
+                // the first iteration, in that order - as the PTX backend and
+                // `--emit-cpu` do. The step used to be evaluated at every
+                // increment, after the body, so a body that changed it
+                // (`for i in 0..20 step k { k = k + 1; }`) ran 5 iterations
+                // here and 20 on the GPU.
+                let step_val = if let Some(st) = step {
+                    let value = self.emit_expr(st, None, None);
+                    let ty = self.infer_type(st);
+                    let unsigned = self.expr_is_unsigned(st);
+                    self.emit_coerce_from(&value, &ty, "i32", unsigned)
+                } else {
+                    "1".into()
+                };
                 let cond_lbl = self.fresh_label("for.cond");
                 let body_lbl = self.fresh_label("for.body");
                 let end_lbl = self.fresh_label("for.end");
@@ -5174,15 +5188,7 @@ representation, and whether that is lossless depends on the expression.",
                 self.emit_scoped_block(body, ret_type);
                 self.loop_exit_stack.pop();
 
-                // Increment
-                let step_val = if let Some(st) = step {
-                    let value = self.emit_expr(st, None, None);
-                    let ty = self.infer_type(st);
-                    let unsigned = self.expr_is_unsigned(st);
-                    self.emit_coerce_from(&value, &ty, "i32", unsigned)
-                } else {
-                    "1".into()
-                };
+                // Increment, by the step evaluated before the loop.
                 let loaded = self.emit_load(&format!("%{}", loop_var), "i32");
                 let incremented = self.fresh_tmp();
                 writeln!(

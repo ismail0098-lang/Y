@@ -2945,6 +2945,18 @@ fn compute_sum(arr: GlobalMemory<I32>, len: usize) -> I32 {
 }
 ```
 
+**What `for i in start..end step s` means, on every backend.** `start`, `end`
+and `s` are each evaluated once, before the first iteration, in that order; a
+body that changes a variable they read does not change the loop. The loop
+variable is an `I32`: each header value is converted to 32 bits (an unsigned
+value keeps its bits, so a `U32` bound of 2^31 or more reads as negative and
+the loop does not run), the loop continues while `i < end` as a signed 32-bit
+comparison, and `i` advances by `s` with 32-bit wraparound. `step 0` is
+refused. `tests/for_header_semantics.rs` runs this on the LLVM backend, the
+JIT, `--emit-cpu` and the GPU. Until 2026-10-11 the LLVM backend (and the JIT)
+re-read the step after every body, and `--emit-cpu` re-read the bound, typed
+the variable from it and replaced every non-literal step with 1.
+
 ### 13.11 Pointers, Safety Scopes & Memory Boundaries
 
 | C++ Memory Pattern | Y Equivalent | Compiler Guarantee |

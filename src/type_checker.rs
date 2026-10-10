@@ -2089,6 +2089,14 @@ range without checking it. Every proof using this range assumes it"
                         self.errors.push(format!("Line {}: for-loop bounds and step must be integer.", expr.span().line));
                     }
                 }
+                // The PTX backend refused this and the LLVM and CPU backends
+                // emitted a loop that never ends.
+                if let Some(Expr::IntLit(0, step_span)) = step {
+                    self.errors.push(format!(
+                        "Line {}: `step 0` never advances the loop variable, so the loop would never end.",
+                        step_span.line
+                    ));
+                }
                 self.push_scope();
 
                 if !self.in_unsafe && invariant.is_none() {
