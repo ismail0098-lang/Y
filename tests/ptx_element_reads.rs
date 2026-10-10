@@ -495,5 +495,8 @@ fn memory_is_not_moved_across_a_barrier() {
 fn register_arithmetic_is_still_hoisted_across_a_barrier() {
     let ptx = compiled("hoist_alu", &format!("{}let y: F32 = a * a;\n    Out[t] = y;\n}}", BARRIER_PRELUDE));
     assert!(ptx.contains("Hoisted 1 independent ALU"), "{}", ptx);
-    assert!(!after_barrier(&ptx, "mul.f32"), "a * a must be hoisted above the barrier:\n{}", ptx);
+    // An unfused multiply is `mul.rn` (tests/ptx_let_bound_rounding.rs); a
+    // needle that no longer occurs would make this pass about nothing.
+    assert!(ptx.contains("mul.rn.f32"), "{}", ptx);
+    assert!(!after_barrier(&ptx, "mul.rn.f32"), "a * a must be hoisted above the barrier:\n{}", ptx);
 }

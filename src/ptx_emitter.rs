@@ -1764,7 +1764,17 @@ impl PtxEmitter {
             BinaryOp::Sub => format!("sub.{}", ty.arith()),
             BinaryOp::Mul => {
                 if ty.is_float() {
-                    format!("mul.{}", ty.arith())
+                    // A multiply `try_emit_fma` did not fuse is a rounding
+                    // point of the source: `let p: F32 = a * b; p + c` adds
+                    // the ROUNDED product, as every other backend computes.
+                    // A plain `mul.f32` feeding an `add.f32` is exactly what
+                    // ptxas may contract, and it did - one FFMA under PTX
+                    // stating two roundings; and with two uses of `p` it may
+                    // fuse one and not the other, so `p` stops being one
+                    // value. `.rn` names the rounding the source has, and
+                    // ptxas does not contract an instruction that carries an
+                    // explicit rounding modifier (tests/ptx_let_bound_rounding.rs).
+                    format!("mul.rn.{}", ty.arith())
                 } else {
                     // `mul.lo` keeps the low half, i.e. wrapping multiplication.
                     // The high half is reachable through `mul_wide_u32`.

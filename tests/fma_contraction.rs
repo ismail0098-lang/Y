@@ -15,6 +15,10 @@
 //! rounding twice where the hardware rounds once. STATING the fusion emits a
 //! byte-identical instruction stream, which is what makes this free.
 //!
+//! A multiply this recognition does NOT fuse - one bound with `let` - is
+//! `mul.rn`: there the source itself has the rounding, so stating what happens
+//! means forbidding the fusion (`tests/ptx_let_bound_rounding.rs`).
+//!
 //! Four things are pinned here, and the second is a regression rather than a
 //! feature. The recognition fires on floats; it does NOT disturb the integer
 //! `a*b + c`, whose multiply must stay where it was - deciding the shape after
@@ -312,7 +316,7 @@ fn a_subtract_from_a_float_multiply_negates_a_multiplicand_instead() {
 fn no_operator_other_than_add_and_subtract_reaches_the_fusion() {
     for (name, expr, want) in [
         ("div", "a * b / c", "div."),
-        ("mulmul", "a * b * c", "mul.f32"),
+        ("mulmul", "a * b * c", "mul.rn.f32"),
     ] {
         let src = format!(
             r#"

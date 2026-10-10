@@ -3681,6 +3681,15 @@ arithmetic (division is `div.rn.f64`; a source-level `a*b + c` is one
 context is the exact double: `let x: F64 = 0.1` is 0.1, not the widened f32
 0.1, and `1.0 / 3.0` there is a double division.
 
+**Only the source-level `a*b + c` is fused.** A multiply that is not the left
+or right operand of a `+`/`-` - in particular a product bound with `let`, as in
+`let p: F32 = a * b; let s: F32 = p + c;` - is `mul.rn`, a rounding point
+exactly as on every other backend. Before 2026-10-10 it was a plain `mul.f32`,
+which `ptxas` contracted with the following `add.f32` into one `FFMA`: the GPU
+rounded once where the PTX and the host backends round twice, and a product
+with two uses could be fused at one use and not the other.
+`tests/ptx_let_bound_rounding.rs` checks the PTX, the SASS and the device.
+
 **`F16` is a buffer element type only**, like `I8`/`U16`: a load widens it to
 `F32` exactly (`cvt.f32.f16`) and a store rounds any value to nearest-even
 (`cvt.rn.f16.*`, directly from an F64 so it is rounded once). An `F16` **local
