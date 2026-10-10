@@ -581,11 +581,32 @@ row first and BASE at both ends:
   and the kernel where it matters takes hours per run. That is a stated limit,
   not coverage.
 
-**Whether it moves the field kernels' verdicts is not measured yet.** A full
-run of `bn254_fr_mul_fast` with the filter was still in its first sweep after
-two hours; at the previous commit the first sweep alone took 16,237 s at default
-budgets and discharged 17 of 276 pairs. The 14 -> 49 above is the first 60
-pairs at a 5/10 s budget, and it is not a prediction of the whole run.
+**It does not move `bn254_fr_mul_fast`'s verdict in the time measured.** A full
+run at default budgets, with `b8a1797`'s `tval.py` (only a progress line added),
+from 2026-10-09:
+
+    sweep 1   50 of 276 pairs discharged   14,307 s
+    sweep 2    0 of the first 60 of 226     2,062 s more
+
+A machine shutdown ended the run at about 16,660 s, still in sweep 2, so there
+is no verdict: the kernel stays UNPROVED. The log does not say whether any
+open pair was `sat` or `unknown`. The September `tval.py` closed 17 of 276 in
+sweep 1 (16,237 s). The 17 -> 50 is not this filter's effect alone: two other
+validator commits (`3e67cd9`, `8337f4c`) lie between the two runs, and their
+artifacts were not compared. The filter alone is the 14 -> 49 above, measured
+on the first 60 pairs at a 5/10 s budget.
+
+`bn254_g1_add` and `bn254_g1_dbl` are not measured: their full runs were
+stopped by hand at 1,808 s, still in sweep 1 (31 of the first 90 of 4,611
+pairs, and 45 of the first 100 of 2,142).
+
+`bn254_ntt4_fused` stops at shared memory, before any partial-sum pair is
+posed, so the filter cannot bear on it. Rerun alone on 2026-10-10 with the
+committed `tval.py`, barrier 0 proves and the run stops at barrier 1 (`unknown`,
+318 s). That matches `smemval` on the same artifact (316 s) and `wall.py`'s
+ground truth. The 2026-10-09 run had four validator jobs sharing the machine and
+stopped one barrier earlier, with barrier 0 `unknown` (323 s). So a verdict at
+the 60 s budget can differ between runs.
 
 #### What did not help, measured
 
