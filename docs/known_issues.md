@@ -8,6 +8,7 @@ exhaustive bug audit. No compiler behavior was changed by this documentation wor
 
 | Issue | Evidence and consequence | Historical project snapshot lines |
 | --- | --- | --- |
+| `y_inductor` keeps a multiply apart from the add it feeds | `python/y_lang/inductor.py`, `_fusable`: the rule existed because ptxas contracted the pair. The PTX emitter now rounds a `let`-bound product first, and the backend writes one `let` per node, so a fused pair would match eager; the rule now costs kernels for nothing. Relaxing it changes the partitioning, so measure it first. | - |
 | `--emit-cpu` writes untyped `let`s | `src/cpu_emitter.rs`, `Stmt::Let`: `let x: U8 = 200;` is written `let mut x = 200;`, so the Rust type of a local comes from inference, not from its declaration, and a narrow or unsigned local can compute in another width than the LLVM backend's. Typing it also needs typed assignments (the emitter keeps no variable types). Loop variables and every scalar parameter are typed. | - |
 | Unsigned SMT integer proofs remain refused | `src/type_checker.rs`, `smt_integer_width`: identifier types accepted are i8/i16/i32/i64; unsigned identifiers fail with a supported-signed-type error. LLVM's unsigned operators have since been implemented; lifting the proof restriction remains separate work. | 2437, 2453 |
 

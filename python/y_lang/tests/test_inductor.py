@@ -174,21 +174,32 @@ class YInductorTest(unittest.TestCase):
         self.assertTrue(torch.equal(bits(s), bits(a * b + c)))
         self.assertTrue(torch.equal(bits(d), bits(c - a * b)))
 
-        # The premise, measured: fusing the pair DOES change the answer, because
-        # ptxas contracts it into one rounding. If this ever stops differing,
-        # the rule above is costing kernels for nothing and should be revisited.
-        fused = TorchKernel(
-            "kernel y_mad(xa: GlobalMemory<F32>, xb: GlobalMemory<F32>, xc: GlobalMemory<F32>, "
-            "out: GlobalMemory<F32>, n: I32) {\n"
-            "    let i: I32 = block_idx_x() * block_dim_x() + thread_idx_x();\n"
-            "    if i < n {\n        let p: F32 = xa[i] * xb[i];\n        let s: F32 = p + xc[i];\n"
-            "        out[i] = s;\n    }\n}\nfn main() {}\n", kernel_name="y_mad")
-        out = torch.empty_like(a)
-        fused.launch(((n + 255) // 256, 1, 1), (256, 1, 1), [a, b, c, out, n])
-        torch.cuda.synchronize()
-        differing = int((bits(out) != bits(a * b + c)).sum())
+        # The premise, re-measured 2026-10-11. This block asserted that the pair
+        # differs from eager when fused, because ptxas contracted the `let`-bound
+        # form this module writes into one FMA (245,999 of 1,048,576 results
+        # differed). The PTX emitter now rounds a `let`-bound product first
+        # (`mul.rn`, which ptxas does not contract), so that form matches eager
+        # in every result and the rule above is conservative: fusing the pair
+        # would now be exact. The syntactic `a * b + c` is still one `fma.rn` by
+        # design and still differs - the control that this comparison can fail.
+        def mad(body: str) -> torch.Tensor:
+            kernel = TorchKernel(
+                "kernel y_mad(xa: GlobalMemory<F32>, xb: GlobalMemory<F32>, xc: GlobalMemory<F32>, "
+                "out: GlobalMemory<F32>, n: I32) {\n"
+                "    let i: I32 = block_idx_x() * block_dim_x() + thread_idx_x();\n"
+                f"    if i < n {{\n{body}    }}\n}}\nfn main() {{}}\n", kernel_name="y_mad")
+            out = torch.empty_like(a)
+            kernel.launch(((n + 255) // 256, 1, 1), (256, 1, 1), [a, b, c, out, n])
+            torch.cuda.synchronize()
+            return out
+
+        let_bound = mad("        let p: F32 = xa[i] * xb[i];\n        let s: F32 = p + xc[i];\n        out[i] = s;\n")
+        self.assertTrue(torch.equal(bits(let_bound), bits(a * b + c)),
+                        "a let-bound multiply-add was contracted into one rounding")
+        syntactic = mad("        out[i] = xa[i] * xb[i] + xc[i];\n")
+        differing = int((bits(syntactic) != bits(a * b + c)).sum())
         self.assertGreater(differing, n // 100,
-                           f"a fused multiply-add differed from eager in only {differing} of {n}")
+                           f"a syntactic multiply-add differed from eager in only {differing} of {n}")
 
     @unittest.skipUnless(CUDA, NO_CUDA)
     def test_a_group_never_needs_its_own_output(self):

@@ -4999,9 +4999,12 @@ checker does not know), so the scripts that load it stop there.
   each other node was not, and per kernel how many calls launched it and how
   many fell back.
 * **Every lowered result is bit-for-bit eager PyTorch's**, and that decides the
-  op set. A multiply is never fused with the add or subtract it feeds (ptxas
-  contracts the pair into one FMA, rounding once where eager rounds twice:
-  245,999 of 1,048,576 results differed when fused). Negation is not lowered
+  op set. A multiply is never fused with the add or subtract it feeds: ptxas
+  contracted the pair into one FMA, rounding once where eager rounds twice
+  (245,999 of 1,048,576 results differed when fused). Since the PTX emitter
+  rounds a `let`-bound product first (2026-10-11), the `let`-per-node kernel
+  the backend writes matches eager in every result, so the rule is now
+  conservative and kept until fusing the pair is measured. Negation is not lowered
   (eager canonicalises a NaN; a negation folded into a select keeps its payload).
   Division is not lowered (Y's F32 `/` is `div.approx.f32`). A multiply by 1.0
   is not lowered (ptxas deletes it, so a NaN keeps its payload).

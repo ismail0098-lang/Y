@@ -19,10 +19,13 @@ Every lowered result is bit-for-bit what eager PyTorch computes. That is a
 constraint on the design, not luck, and it decides the op set:
 
 * **A multiply never feeds an add or a subtract inside one kernel.** ptxas
-  contracts that pair into one fused multiply-add, rounding once where eager
-  rounds twice. Measured on this launch path: a Y kernel computing
-  `let p = a * b; let s = p + c;` differed from eager `(a * b) + c` in 245,999
-  of 1,048,576 results, and matched a single-rounding FMA in every one.
+  contracted that pair into one fused multiply-add, rounding once where eager
+  rounds twice: a Y kernel computing `let p = a * b; let s = p + c;` differed
+  from eager `(a * b) + c` in 245,999 of 1,048,576 results. Since 2026-10-11
+  the PTX emitter rounds a `let`-bound product first (`mul.rn`), and the same
+  kernel matches eager in every result, so this rule is now conservative:
+  the `let`-per-node source this module writes would be exact if fused. It
+  stays until fusing the pair is measured.
 * **Negation is not lowered.** Eager `-x` canonicalises a NaN to 0x7fffffff; a
   negation ptxas folds into a select keeps the payload and flips its sign.
 * **Division is not lowered.** Y's F32 `/` is `div.approx.f32`; eager's is
@@ -203,8 +206,9 @@ def _classify(gm: torch.fx.GraphModule, node: torch.fx.Node) -> Tuple[Optional[s
 
 
 def _fusable(producer_kind: str, consumer_kind: str) -> bool:
-    # ptxas contracts a multiply feeding an add or a subtract into one FMA,
-    # which rounds once where eager rounds twice.
+    # ptxas contracted a multiply feeding an add or a subtract into one FMA,
+    # rounding once where eager rounds twice. The emitter now rounds the
+    # `let`-bound product first, so this is conservative (module docstring).
     return not (producer_kind == MUL and consumer_kind in (ADD, SUB))
 
 
