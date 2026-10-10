@@ -1439,11 +1439,18 @@ directory of `Y` or `liby.so` and up to three parents, so a repository's own ven
 is found from anywhere), and at `$HOME/.local/bin/z3`.
 
 The integer model also checks representability: every modeled arithmetic
-intermediate and stored result must fit its signed machine width. Division
-truncates toward zero and remainder has the dividend's sign, matching execution.
-The checker refuses unsupported unsigned semantics and loop-local shadowing.
-For-loop proofs require signed i32-representable bounds, a positive stable
-step, and preservation of the index's lower bound. An invariant such as
+intermediate and stored result must fit its machine type, signed or unsigned, so
+no execution that wraps is described. Signed division truncates toward zero and
+remainder has the dividend's sign, matching execution. Unsigned values are
+modelled in `0..=2^n-1`; a literal beside one must lie in that range (`x > -1`
+is refused: every backend compares against 0xFFFFFFFF), and a signed value
+beside an unsigned one, or two unsigned widths together, must both be proved to
+lie in the range every backend reads alike, below each type's sign bit:
+`0..=2^31-1` for `U32` with `I32`.
+The checker refuses loop-local shadowing. For-loop proofs require a positive
+stable step and preservation of the index's lower bound; a bound must fit I32,
+except that a `U32` bound is read as the I32 its bits spell, as every backend
+compares it (2^31 or more: the loop does not run). An invariant such as
 `acc >= 0` alone cannot justify an increment at every signed integer value;
 relating it to a bounded loop index, for example `acc == i && i >= 0`, supplies
 the missing upper bound. These checks apply to the expressions modeled for the

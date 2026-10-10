@@ -331,18 +331,21 @@ fn main() {
     );
 }
 
+/// Refused until the backends agreed on unsigned operators. They do now;
+/// `smt_unsigned.rs` holds the cases where they could still read a program
+/// differently.
 #[test]
-fn unsigned_proofs_are_refused_until_backend_operators_agree() {
+fn unsigned_proofs_follow_the_signed_ones() {
     if !solver_available() {
         return;
     }
     for ty in ["U32", "U64"] {
-        reject(
-            "unsupported unsigned arithmetic",
+        accept(
+            "unsigned arithmetic",
             &format!("fn main() {{ let x: {ty} = 7; @invariant(x >= 0) for i in 0..1 {{ }} }}"),
         );
     }
-    // The same simple proof remains available for the supported signed type.
+    // The same simple proof for the signed type.
     accept(
         "signed control",
         r#"

@@ -108,7 +108,8 @@ These notes were checked against source, not freshly reproduced. Read
 - LLVM Q formats outside `@ZeroDrift` are scaled integers that trap on overflow
   (`fixed.rs`); Q arrays, `match` and built-in arguments are refused.
   Enum payloads are scalar only (at most 8 fields); others are refused.
-- SMT integer-width checking still rejects unsigned variables in invariant proofs.
+- Invariant proofs model unsigned values, but mixed signedness or unsigned widths
+  only within the range every backend reads alike (`0..=2^31-1` for `U32`/`I32`).
 - Invariant checks fail without a solver (`Y_Z3_PATH`, `PATH`, then repo-venv
   paths in the working directory and beside the compiler). The PTX translation
   validator licenses sm89 only and does not establish general unrolled-loop

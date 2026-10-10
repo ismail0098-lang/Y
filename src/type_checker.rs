@@ -935,7 +935,14 @@ not know its length",
         {
             // Entry facts must describe machine execution too. Checking only
             // the stored variable misses overflow in a nested subexpression.
-            let bits = self.smt_integer_width(expr).ok()?;
+            // Unsigned arithmetic gets no entry interval, as before: the
+            // range check below is a signed one, and the interval arithmetic
+            // knows no unsigned quotient. The SMT model handles it instead.
+            let ty = self.smt_integer_type(expr).ok()?;
+            if !ty.signed {
+                return None;
+            }
+            let bits = ty.bits;
             if bits == 32 && Self::contains_unsigned_literal(expr) {
                 // PTX keeps this result unsigned, so widening may zero-extend
                 // where LLVM produces a negative signed 64-bit value.
@@ -3402,33 +3409,123 @@ range without checking it. Every proof using this range assumes it"
         }
     }
 
-    /// Only signed integers have common arithmetic semantics in LLVM and PTX.
-    /// Refuse unsigned proofs until the backends agree on their operators.
-    fn smt_integer_width(&self, expr: &Expr) -> Result<u32, String> {
+    /// The machine integer type an expression is modelled in.
+    ///
+    /// Unsigned types were refused outright "until the backends agree on
+    /// their operators". They agree now - measured 2026-10-11: compare,
+    /// divide, remainder and widening of U8..U64 on the LLVM backend and the
+    /// JIT, and of U32, the one unsigned scalar PTX has, on the GPU - so they
+    /// are modelled as signed ones are, exactly and with every intermediate
+    /// proved to fit, in their own range and with an unsigned quotient. Where
+    /// the backends' conversions could still differ, see
+    /// [`Self::smt_operand_types`].
+    fn smt_integer_type(&self, expr: &Expr) -> Result<SmtInt, String> {
         match expr {
             // For interval propagation use the narrower backend width. PTX
             // holds positive u32 literals in 32 bits; LLVM uses 64 bits.
-            Expr::IntLit(n, _) => Ok(if *n >= i32::MIN as i64 && *n <= u32::MAX as i64 { 32 } else { 64 }),
+            Expr::IntLit(n, _) => Ok(SmtInt {
+                bits: if *n >= i32::MIN as i64 && *n <= u32::MAX as i64 { 32 } else { 64 },
+                signed: true,
+            }),
             Expr::Ident(name, _) => match self.lookup_var(name) {
-                Some(SemanticType::Primitive(ty)) => match ty.to_ascii_lowercase().as_str() {
-                    "i8" => Ok(8), "i16" => Ok(16), "i32" => Ok(32), "i64" => Ok(64),
-                    _ => Err(format!("`{name}` does not have a supported signed integer type")),
-                },
+                Some(SemanticType::Primitive(ty)) => SmtInt::named(&ty)
+                    .ok_or_else(|| format!("`{name}` does not have a supported integer type")),
                 _ => Err(format!("the integer type of `{name}` is not known")),
             },
-            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => self.smt_integer_width(operand),
+            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
+                let ty = self.smt_integer_type(operand)?;
+                if !ty.signed {
+                    return Err(format!("negating the unsigned `{}` is not modelled", expr_to_string(operand)));
+                }
+                Ok(ty)
+            }
             Expr::BinaryOp { left, op, right, .. }
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) =>
-                Ok(self.smt_integer_width(left)?.max(self.smt_integer_width(right)?)),
+                Ok(self.smt_operand_types(left, right)?.0),
             Expr::Call { func, args, .. } if args.is_empty()
-                && matches!(&**func, Expr::Ident(name, _) if gpu_index_symbol(name).is_some()) => Ok(32),
+                && matches!(&**func, Expr::Ident(name, _) if gpu_index_symbol(name).is_some()) => Ok(SmtInt::I32),
             _ => Err("expression has no supported machine integer type".into()),
         }
     }
 
-    fn smt_in_range(value: &str, bits: u32) -> String {
-        let limit = 1i128 << (bits - 1);
-        format!("(and (>= {value} {}) (<= {value} {}))", -limit, limit - 1)
+    /// The type the two operands of one operator are modelled in, and whether
+    /// the operands themselves must be proved to lie in it.
+    ///
+    /// Two signed operands combine as they always have, in the wider width.
+    /// An unsigned operand beside its own type, or beside a literal inside
+    /// its range, keeps that type: every backend computes those alike. A
+    /// larger literal is refused rather than modelled in a wider type (the
+    /// backends widen it correctly; this is only conservative).
+    ///
+    /// Anything else mixes signedness or unsigned widths - a signed value,
+    /// or a negated literal: `x > -1` is true in the integers and false on
+    /// every backend, which compare against 0xFFFFFFFF - and there the
+    /// backends' conversions differ: LLVM follows C (the wider type, then
+    /// unsigned at equal width), and `--emit-cpu`'s Rust does not compile it.
+    /// Such operands are modelled in the range every reading agrees on -
+    /// non-negative and below the sign bit of each type, whether its bits
+    /// are read as signed or unsigned: `0..=2^31-1` for a `U32` beside an
+    /// `I32` or an `I64` - and the operands, like the result, must be proved
+    /// to lie there. A `U32` 4294967295 and an `I32` -1 have the same bits,
+    /// so `x == i` holds on the machine and not in the integers; inside that
+    /// range no such pair exists.
+    fn smt_operand_types(&self, left: &Expr, right: &Expr) -> Result<(SmtInt, bool), String> {
+        let (lt, rt) = (self.smt_integer_type(left)?, self.smt_integer_type(right)?);
+        if lt.signed && rt.signed {
+            return Ok((SmtInt { bits: lt.bits.max(rt.bits), signed: true }, false));
+        }
+        if lt == rt {
+            return Ok((lt, false));
+        }
+        for (literal, ty) in [(left, rt), (right, lt)] {
+            if let (Expr::IntLit(n, _), false) = (literal, ty.signed) {
+                if (*n as i128) < 0 || (*n as i128) > ty.max() {
+                    return Err(format!(
+                        "the literal {n} lies outside {}, the type of the unsigned operand beside it",
+                        ty.name()
+                    ));
+                }
+                return Ok((ty, false));
+            }
+        }
+        Ok((SmtInt { bits: lt.bits.min(rt.bits) - 1, signed: false }, true))
+    }
+
+    fn smt_in_range(value: &str, ty: SmtInt) -> String {
+        format!("(and (>= {value} {}) (<= {value} {}))", ty.min(), ty.max())
+    }
+
+    /// A `for` bound as the loop compares it. The variable is an I32 on every
+    /// backend and the test is a signed 32-bit comparison of the bound's bits
+    /// (`icmp slt i32`, `setp.ge.s32`, `as i32` in `--emit-cpu`), so a U32
+    /// bound of 2^31 or more reads as negative and the loop does not run -
+    /// modelled as exactly that. Any other bound must fit I32 for the
+    /// mathematical comparison to describe the emitted bits.
+    fn smt_loop_bound(&self, bound: &Expr, encoded: String, requirements: &mut Vec<String>) -> String {
+        if self.smt_integer_type(bound) == Ok(SmtInt::U32) {
+            return format!("(ite (>= {encoded} 2147483648) (- {encoded} 4294967296) {encoded})");
+        }
+        requirements.push(Self::smt_in_range(&encoded, SmtInt::I32));
+        encoded
+    }
+
+    /// The scalars a loop proof tracks: every integer type it models, and
+    /// `usize`, whose assignments it cannot model and so havocs. A variable
+    /// left out is not havocked - its old value would be assumed after the
+    /// body - which was harmless only because nothing about it could be
+    /// proved on entry either.
+    fn smt_tracked_variables(&self) -> std::collections::HashSet<String> {
+        let mut vars = std::collections::HashSet::new();
+        for frame in &self.scopes {
+            for (name, entry) in &frame.symbols {
+                if let SemanticType::Primitive(prim_name) = &entry.ty {
+                    if SmtInt::named(prim_name).is_some() || prim_name.eq_ignore_ascii_case("usize") {
+                        vars.insert(name.clone());
+                    }
+                }
+            }
+        }
+        vars
     }
 
     fn smt_all(requirements: &[String], value: &str) -> String {
@@ -3468,7 +3565,7 @@ range without checking it. Every proof using this range assumes it"
             Expr::IntLit(val, _) => Ok(val.to_string()),
             Expr::BoolLit(val, _) => Ok(val.to_string()),
             Expr::Ident(name, _) => {
-                self.smt_integer_width(expr)?;
+                self.smt_integer_type(expr)?;
                 if let Some(&ver) = versions.get(name) {
                     Ok(format!("{}_{}", name, ver))
                 } else {
@@ -3497,11 +3594,23 @@ range without checking it. Every proof using this range assumes it"
                 let lhs = self.expr_to_smt(left, versions, requirements)?;
                 let rhs = self.expr_to_smt(right, versions, requirements)?;
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {
-                    let bits = self.smt_integer_width(expr)?;
+                    let (ty, operands_too) = self.smt_operand_types(left, right)?;
+                    if operands_too {
+                        requirements.push(Self::smt_in_range(&lhs, ty));
+                        requirements.push(Self::smt_in_range(&rhs, ty));
+                    }
                     let result = match op {
+                        // Both operands are proved in range, so an unsigned
+                        // division has two non-negative ones, and there SMT
+                        // `div` and `mod` are the machine's quotient and
+                        // remainder.
+                        BinaryOp::Div | BinaryOp::Mod if !ty.signed => {
+                            requirements.push(format!("(distinct {rhs} 0)"));
+                            format!("({} {lhs} {rhs})", if *op == BinaryOp::Div { "div" } else { "mod" })
+                        }
                         BinaryOp::Div | BinaryOp::Mod => {
                             requirements.push(format!("(distinct {rhs} 0)"));
-                            requirements.push(format!("(not (and (= {lhs} {}) (= {rhs} (- 1))))", -(1i128 << (bits - 1))));
+                            requirements.push(format!("(not (and (= {lhs} {}) (= {rhs} (- 1))))", ty.min()));
                             let quotient = Self::smt_signed_quotient(&lhs, &rhs);
                             if *op == BinaryOp::Div { quotient }
                             else { format!("(- {lhs} (* {rhs} {quotient}))") }
@@ -3510,8 +3619,21 @@ range without checking it. Every proof using this range assumes it"
                             BinaryOp::Add => "+", BinaryOp::Sub => "-", _ => "*",
                         }),
                     };
-                    requirements.push(Self::smt_in_range(&result, bits));
+                    requirements.push(Self::smt_in_range(&result, ty));
                     return Ok(result);
+                }
+                // A comparison of integers follows the same rule as the
+                // arithmetic above. Operands without an integer type (the
+                // booleans of `&&` and `||`) are compared as before.
+                if matches!(op, BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge)
+                    && self.smt_integer_type(left).is_ok()
+                    && self.smt_integer_type(right).is_ok()
+                {
+                    let (ty, operands_too) = self.smt_operand_types(left, right)?;
+                    if operands_too {
+                        requirements.push(Self::smt_in_range(&lhs, ty));
+                        requirements.push(Self::smt_in_range(&rhs, ty));
+                    }
                 }
                 let op_str = match op {
                     BinaryOp::Eq => "=",
@@ -3541,7 +3663,7 @@ this verifier uses",
                 match op {
                     UnaryOp::Neg => {
                         let result = format!("(- {opnd})");
-                        requirements.push(Self::smt_in_range(&result, self.smt_integer_width(expr)?));
+                        requirements.push(Self::smt_in_range(&result, self.smt_integer_type(expr)?));
                         Ok(result)
                     }
                     UnaryOp::Not => Ok(format!("(not {})", opnd)),
@@ -3611,16 +3733,16 @@ own operand, so `*p` was proven as `p`)",
                 .and_then(|m| m.get(var))
                 .or_else(|| self.lookup_interval(var));
             if at_entry.is_none() || interval.is_none() {
-                // A stored signed variable is always representable. These are
+                // A stored variable is always representable. These are
                 // domain facts, unlike the operation-result bounds proved below.
                 // At initiation, a concrete interval is kept on its own:
                 // intersecting a bad initializer's interval with the machine
                 // range could make the entry state contradictory. An unknown
                 // runtime parameter has no such interval, and its declared
-                // signed type still guarantees its machine range on entry.
+                // type still guarantees its machine range on entry.
                 let expression = Expr::Ident(var.clone(), Span { line: 0, col: 0 });
-                if let Ok(bits) = self.smt_integer_width(&expression) {
-                    preconditions.push(format!("(assert {})", Self::smt_in_range(&format!("{var}_0"), bits)));
+                if let Ok(ty) = self.smt_integer_type(&expression) {
+                    preconditions.push(format!("(assert {})", Self::smt_in_range(&format!("{var}_0"), ty)));
                 }
             }
             if let Some(interval) = interval {
@@ -3818,11 +3940,11 @@ own operand, so `*p` was proven as `p`)",
                                 _ => value.clone(),
                             };
                             let mut local_requirements = Vec::new();
-                            let encoded = self.smt_integer_width(target).and_then(|bits| {
+                            let encoded = self.smt_integer_type(target).and_then(|ty| {
                                 self.expr_to_smt(&expression, versions, &mut local_requirements)
-                                    .map(|rhs| (bits, rhs))
+                                    .map(|rhs| (ty, rhs))
                             });
-                            let Ok((bits, rhs)) = encoded else {
+                            let Ok((ty, rhs)) = encoded else {
                                 let mut one = std::collections::HashSet::new();
                                 one.insert(name.clone());
                                 Self::havoc(&one, versions, declarations);
@@ -3833,11 +3955,11 @@ own operand, so `*p` was proven as `p`)",
                             // RHS is lossless before using a common arithmetic model.
                             if matches!(stmt, Stmt::CompoundAssign { .. }) {
                                 let operand = self.expr_to_smt(value, versions, &mut local_requirements)?;
-                                local_requirements.push(Self::smt_in_range(&operand, bits));
+                                local_requirements.push(Self::smt_in_range(&operand, ty));
                             }
                             // Conversions must also be lossless. Checking only the
                             // final expression's width misses narrowing stores.
-                            local_requirements.push(Self::smt_in_range(&rhs, bits));
+                            local_requirements.push(Self::smt_in_range(&rhs, ty));
                             requirements.extend(local_requirements);
                             let next = versions[name] + 1;
                             versions.insert(name.clone(), next);
@@ -3849,18 +3971,18 @@ own operand, so `*p` was proven as `p`)",
                 Stmt::Let { name, init, span, .. } => {
                     let target = Expr::Ident(name.clone(), span.clone());
                     let mut local_requirements = Vec::new();
-                    let encoded = self.smt_integer_width(&target).and_then(|bits| {
+                    let encoded = self.smt_integer_type(&target).and_then(|ty| {
                         let init = init.as_ref().ok_or("uninitialized integer binding")?;
                         self.expr_to_smt(init, versions, &mut local_requirements)
-                            .map(|rhs| (bits, rhs))
+                            .map(|rhs| (ty, rhs))
                     });
                     // Never reset a reused name to version zero: that can
                     // contradict entry facts and make the proof vacuous.
                     let next = versions.get(name).map_or(0, |v| v + 1);
                     versions.insert(name.clone(), next);
                     declarations.push(format!("(declare-const {name}_{next} Int)"));
-                    if let Ok((bits, rhs)) = encoded {
-                        local_requirements.push(Self::smt_in_range(&rhs, bits));
+                    if let Ok((ty, rhs)) = encoded {
+                        local_requirements.push(Self::smt_in_range(&rhs, ty));
                         requirements.extend(local_requirements);
                         body_assertions.push(format!("(assert (= {name}_{next} {rhs}))"));
                     }
@@ -4321,16 +4443,7 @@ tracked variable in a way this verifier cannot see",
             );
         }
 
-        let mut vars = std::collections::HashSet::new();
-        for frame in &self.scopes {
-            for (name, entry) in &frame.symbols {
-                if let SemanticType::Primitive(prim_name) = &entry.ty {
-                    if matches!(prim_name.to_ascii_lowercase().as_str(), "i32" | "u32" | "usize" | "i64") {
-                        vars.insert(name.clone());
-                    }
-                }
-            }
-        }
+        let vars = self.smt_tracked_variables();
 
         // --- 1. CHECK INITIATION ---
         let mut decls_init = Vec::new();
@@ -4487,16 +4600,7 @@ tracked variable in a way this verifier cannot see",
             }
         }
 
-        let mut vars = std::collections::HashSet::new();
-        for frame in &self.scopes {
-            for (name, entry) in &frame.symbols {
-                if let SemanticType::Primitive(prim_name) = &entry.ty {
-                    if matches!(prim_name.to_ascii_lowercase().as_str(), "i32" | "u32" | "usize" | "i64") {
-                        vars.insert(name.clone());
-                    }
-                }
-            }
-        }
+        let mut vars = self.smt_tracked_variables();
         vars.insert(loop_var.to_string());
 
         // --- 1. CHECK INITIATION ---
@@ -4521,7 +4625,7 @@ tracked variable in a way this verifier cannot see",
             Ok(v) => v,
             Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
         };
-        init_requirements.push(Self::smt_in_range(&start_smt, 32));
+        let start_smt = self.smt_loop_bound(start, start_smt, &mut init_requirements);
         preconditions_init.push(format!("(assert (= {}_{} {}))", loop_var, 0, start_smt));
 
         let mut versions_init = std::collections::HashMap::new();
@@ -4584,9 +4688,10 @@ tracked variable in a way this verifier cannot see",
         // comparisons are signed. A runtime negative endpoint therefore
         // describes an empty loop when start >= end; it is not an assumed
         // nonnegative extent. Wider header expressions still have to fit
-        // I32 so the mathematical comparison describes the emitted bits.
-        condition_requirements.push(Self::smt_in_range(&loop_var_start_smt, 32));
-        condition_requirements.push(Self::smt_in_range(&loop_var_end_smt, 32));
+        // I32 so the mathematical comparison describes the emitted bits; a
+        // U32 one is read as the I32 its bits spell (`smt_loop_bound`).
+        let loop_var_start_smt = self.smt_loop_bound(start, loop_var_start_smt, &mut condition_requirements);
+        let loop_var_end_smt = self.smt_loop_bound(end, loop_var_end_smt, &mut condition_requirements);
         let cond_start_smt = format!(
             "(and (>= {}_{} {}) (< {}_{} {}))",
             loop_var, 0, loop_var_start_smt, loop_var, 0, loop_var_end_smt
@@ -4625,8 +4730,8 @@ tracked variable in a way this verifier cannot see",
         // The inferred lower bound i >= start is valid only for ascending
         // loops. A negative dynamic step invalidates that induction premise.
         requirements.push(format!("(> {step_smt} 0)"));
-        requirements.push(Self::smt_in_range(&step_smt, 32));
-        requirements.push(Self::smt_in_range(&format!("(+ {loop_var}_{current_loop_var_ver} {step_smt})"), 32));
+        requirements.push(Self::smt_in_range(&step_smt, SmtInt::I32));
+        requirements.push(Self::smt_in_range(&format!("(+ {loop_var}_{current_loop_var_ver} {step_smt})"), SmtInt::I32));
         // Body writes to the induction variable must preserve the lower
         // bound used by the next iteration's proof, too.
         requirements.push(format!("(>= {loop_var}_{next_loop_var_ver} {loop_var_start_smt})"));
@@ -4668,6 +4773,47 @@ tracked variable in a way this verifier cannot see",
                 self.smt_unavailable(span.line, invariant, "preservation", &e);
             }
         }
+    }
+}
+
+/// A machine integer type as the invariant verifier models it: every value
+/// exactly, and every intermediate proved to lie in `min()..=max()`, which is
+/// what makes the integer model the machine's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SmtInt {
+    bits: u32,
+    signed: bool,
+}
+
+impl SmtInt {
+    const I32: SmtInt = SmtInt { bits: 32, signed: true };
+    const U32: SmtInt = SmtInt { bits: 32, signed: false };
+
+    fn named(name: &str) -> Option<SmtInt> {
+        let (bits, signed) = match name.to_ascii_lowercase().as_str() {
+            "i8" => (8, true),
+            "i16" => (16, true),
+            "i32" => (32, true),
+            "i64" => (64, true),
+            "u8" => (8, false),
+            "u16" => (16, false),
+            "u32" => (32, false),
+            "u64" => (64, false),
+            _ => return None,
+        };
+        Some(SmtInt { bits, signed })
+    }
+
+    fn min(self) -> i128 {
+        if self.signed { -(1i128 << (self.bits - 1)) } else { 0 }
+    }
+
+    fn max(self) -> i128 {
+        if self.signed { (1i128 << (self.bits - 1)) - 1 } else { (1i128 << self.bits) - 1 }
+    }
+
+    fn name(self) -> String {
+        format!("{}{}", if self.signed { "I" } else { "U" }, self.bits)
     }
 }
 
