@@ -820,19 +820,23 @@ fn a_pinned_directory_finds_the_solver_the_repository_finds() {
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let program = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            print_int(i);\n        }\n    }\n}\n";
+    // The compiler in `target/` would also find a repo-local `venv/bin/z3`
+    // beside itself; this copy has nothing beside it, so the working
+    // directory is the only place a solver can come from.
+    let detached = pinned::DetachedCompiler::new("solver_mirror");
     let compile = |dir: &Path| -> String {
         std::fs::write(dir.join(".ysu_hw_profile"), pinned::profile_text(pinned::SM_PINNED)).unwrap();
         let src = dir.join("inv.ysu");
         std::fs::write(&src, program).unwrap();
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_Y"))
-            .arg(&src)
-            .current_dir(dir)
-            .env_remove("Y_Z3_PATH")
-            .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
-            .env("PATH", "/nonexistent-path")
-            .env("HOME", "/nonexistent-home")
-            .output()
-            .expect("run Y");
+        let out = pinned::DetachedCompiler::output(
+            std::process::Command::new(&detached.exe)
+                .arg(&src)
+                .current_dir(dir)
+                .env_remove("Y_Z3_PATH")
+                .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+                .env("PATH", "/nonexistent-path")
+                .env("HOME", "/nonexistent-home"),
+        );
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
     };
 

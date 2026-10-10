@@ -32,6 +32,8 @@ use y::type_checker::z3_candidates;
 
 #[path = "common/verification.rs"]
 mod verification;
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn solver() -> Option<PathBuf> {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -101,7 +103,12 @@ fn write_source(name: &str, body: &str) -> PathBuf {
 /// used to be satisfied by a program the front end ACCEPTED and a backend then
 /// refused, which would have read as "the front end rejected it".
 fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_Y"));
+    // The compiler in `target/` finds a repo-local `venv/bin/z3` beside
+    // itself from any directory; where none may be found, run a copy that has
+    // nothing beside it.
+    let detached = (!solver_visible).then(|| pinned::DetachedCompiler::new("no_solver"));
+    let exe = detached.as_ref().map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_Y")), |d| d.exe.clone());
+    let mut cmd = Command::new(&exe);
     cmd.arg(src);
     cmd.env_remove("Y_Z3_PATH");
     cmd.env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS");
@@ -113,7 +120,7 @@ fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> Strin
     } else {
         // No `z3` on PATH, and no `$HOME/.local/bin/z3`. The relative
         // candidates resolve against the working directory, so run somewhere
-        // that has no `venv/` or `z3/` in it.
+        // that has no `venv/` or `z3/` in it - and the compiler is the copy.
         cmd.env("PATH", "/nonexistent-path");
         cmd.env("HOME", "/nonexistent-home");
         cmd.current_dir(src.parent().expect("temp dir"));
@@ -121,7 +128,7 @@ fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> Strin
     if allow_unverified {
         cmd.env("Y_ALLOW_UNVERIFIED_INVARIANTS", "1");
     }
-    let out = cmd.output().expect("run Y");
+    let out = pinned::DetachedCompiler::output(&mut cmd);
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -150,6 +157,63 @@ fn unverifiable_invariant_fails_the_build() {
         out.contains("Y_ALLOW_UNVERIFIED_INVARIANTS"),
         "error should name the opt-out:\n{}",
         out
+    );
+}
+
+/// A solver beside the compiler is found from any working directory.
+///
+/// The relative candidates resolve against the WORKING directory, so `Y` run
+/// anywhere but the repository refused every invariant as unverifiable while
+/// the repository's own `venv/bin/z3` sat next to `target/`. A copy of the
+/// compiler at `<root>/target/<triple>/release/Y` - the deepest layout Cargo
+/// writes - with a stub solver at `<root>/venv/bin/z3` runs from an empty
+/// directory with `PATH` and `HOME` stripped; the stub records that it ran and
+/// answers `unsat`. One level deeper the stub is out of reach and the
+/// invariant is refused, so it was found beside the compiler and not some
+/// other way.
+#[cfg(unix)]
+#[test]
+fn a_solver_beside_the_compiler_is_found_from_any_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let src = write_source("beside", TRUE_INVARIANT);
+    let run = |rel_dir: &str| -> (bool, String) {
+        let y = pinned::DetachedCompiler::at("beside", rel_dir);
+        let marker = y.root.join("stub_ran");
+        let stub = y.root.join("venv/bin/z3");
+        std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
+        // Shell builtins only: PATH is gone. The query is read to EOF so the
+        // compiler's write never meets a closed pipe.
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\n: > '{}'\nwhile read -r _q; do :; done\necho unsat\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = pinned::DetachedCompiler::output(
+            Command::new(&y.exe)
+                .arg(&src)
+                .current_dir(src.parent().expect("temp dir"))
+                .env_remove("Y_Z3_PATH")
+                .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+                .env("PATH", "/nonexistent-path")
+                .env("HOME", "/nonexistent-home"),
+        );
+        (
+            marker.exists(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+
+    let (ran, out) = run("target/x86_64-unknown-linux-gnu/release");
+    assert!(ran, "the solver beside the compiler was not run:\n{out}");
+    assert!(out.contains("Front-end analysis complete"), "the stub answered unsat and the front end still refused:\n{out}");
+
+    let (ran, out) = run("a/target/x86_64-unknown-linux-gnu/release");
+    assert!(!ran, "a solver five directories up was run:\n{out}");
+    assert!(
+        out.contains("Could not verify invariant") && !out.contains("Front-end analysis complete"),
+        "with the solver out of reach the invariant must be refused:\n{out}"
     );
 }
 

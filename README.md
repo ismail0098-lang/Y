@@ -1433,8 +1433,10 @@ used to print a warning and continue, so on any machine without z3 — the defau
 — every invariant was accepted unchecked, and `@invariant(i > 1000)` on a `0..10`
 loop compiled cleanly and printed "Compilation Successful!".
 `Y_ALLOW_UNVERIFIED_INVARIANTS=1` restores the old behaviour loudly. The solver
-is looked for at `Y_Z3_PATH`, on `PATH`, and at `venv/bin/z3`, `.venv/bin/z3`,
-`z3/build/z3`, `$HOME/.local/bin/z3`.
+is looked for at `Y_Z3_PATH`, on `PATH`, at `venv/bin/z3`, `.venv/bin/z3` and
+`z3/build/z3` in the working directory and then beside the compiler (the
+directory of `Y` or `liby.so` and up to three parents, so a repository's own venv
+is found from anywhere), and at `$HOME/.local/bin/z3`.
 
 The integer model also checks representability: every modeled arithmetic
 intermediate and stored result must fit its signed machine width. Division
@@ -2629,7 +2631,9 @@ a machine with a GPU times a probe kernel on the device and appends the result.
 It also links the repository's own z3 candidates (`venv/bin/z3`, `.venv/bin/z3`,
 `z3/build/z3`), which the compiler resolves against its working directory:
 without the links, a machine whose solver lives in a repo-local venv failed 21
-tests the moment their compiles left the repository.
+tests the moment their compiles left the repository. (The compiler now also
+finds that solver beside itself; a test that needs NO solver runs a copy of the
+compiler with nothing beside it.)
 `suite_is_machine_independent` refuses a test that compiles a committed fixture
 in place, or compiles PTX against the repository's profile - named as working
 directory or inherited by a `Command` that sets none. The tests that compile

@@ -9,7 +9,6 @@ exhaustive bug audit. No compiler behavior was changed by this documentation wor
 | Issue | Evidence and consequence | Historical project snapshot lines |
 | --- | --- | --- |
 | Unsigned SMT integer proofs remain refused | `src/type_checker.rs`, `smt_integer_width`: identifier types accepted are i8/i16/i32/i64; unsigned identifiers fail with a supported-signed-type error. LLVM's unsigned operators have since been implemented; lifting the proof restriction remains separate work. | 2437, 2453 |
-| Solver discovery depends on process working directory | `src/type_checker.rs`, `z3_candidates`: project-venv paths are relative. `Y_Z3_PATH`, PATH, and the home-local candidate can still provide a solver. Missing solvers fail invariant verification; do not assume all solver-dependent tests skip. | 2214 |
 
 ## Fixed since this review
 
@@ -22,6 +21,7 @@ exhaustive bug audit. No compiler behavior was changed by this documentation wor
 | A name defined twice was not refused | Two `fn f`, two `Type::m`, or a function colliding with an enum constructor: the type checker kept the second; the default build failed inside clang with no reason and `--emit-llvm`/`--emit-cpu` wrote output that does not compile. The front end refuses it by name on every backend. `tests/duplicate_definitions.rs`. |
 | `@cache_policy(..., reuse_count=N)` was silently dropped | No backend lowers a reuse count (`createpolicy` takes a fraction of the lines); it is refused by name now. `tests/ptx_cache_policy.rs`. |
 | PTX let-bound multiply/add contraction (archived report, project lines 2143/2151) | Confirmed live: `let p: F32 = a * b; p + c` emitted `mul.f32` + `add.f32`, which `ptxas` assembled to ONE `FFMA` under PTX stating two roundings. An unfused float multiply is `mul.rn` now, which `ptxas` does not contract. All 66 corpus kernels emit byte-identical PTX before and after (no shipped kernel takes that path). `tests/ptx_let_bound_rounding.rs` checks the PTX, the SASS and the value on the device (0 rounded twice, 2^-24 fused). |
+| Solver discovery depended on the working directory | The project-venv candidates (`venv/bin/z3`, `.venv/bin/z3`, `z3/build/z3`) resolved only against the working directory, so `Y` run elsewhere - or `liby.so` in a Python process started elsewhere - refused every invariant although the repository's own solver existed. They are also looked for beside the compiler's own file (found from the process's mappings, since `current_exe()` names the interpreter inside Python), in its directory and up to three parents. Missing solvers still fail invariant verification. `tests/safe_invariant_enforcement.rs` (a copy of `Y` at the deepest Cargo layout finds a stub solver; one level deeper it does not), `python/tests/test_solver_lookup.py`; tests that need no solver run a copy of the compiler with nothing beside it. |
 | Void `ysu_main` exit status | The CLI's AOT builds give a `main` with no return type an `i32` return of 0; at `-O0` it exited with the last callee's `eax` (43 in the test). Library and JIT callers keep the source's `void`. `tests/llvm_void_main_status.rs`. |
 
 ## Verification limits

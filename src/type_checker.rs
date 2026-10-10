@@ -4671,6 +4671,16 @@ tracked variable in a way this verifier cannot see",
 /// puts one in `venv/bin/z3`, which the old two-entry search missed - this
 /// repo had exactly that, while the type checker reported the solver as
 /// missing and waved every invariant through.
+///
+/// Those relative paths resolve against the WORKING directory, so `Y` run
+/// from outside the repository - or `liby.so` in a Python process started
+/// elsewhere - missed the repository's own `venv/bin/z3` and refused every
+/// invariant as unverifiable. The same three layouts are therefore also
+/// looked for beside the compiler's own file ([`own_object_path`]), in its
+/// directory and up to three parents: the repository root of the deepest
+/// layout Cargo writes, `target/<triple>/<profile>/Y`. Only those that exist
+/// are listed, after the working-directory ones, so a project's own solver
+/// still wins where both exist.
 pub fn z3_candidates() -> Vec<String> {
     let mut v = Vec::new();
     if let Ok(p) = std::env::var("Y_Z3_PATH") {
@@ -4689,10 +4699,57 @@ pub fn z3_candidates() -> Vec<String> {
     ] {
         v.push(p.to_string());
     }
+    if let Some(object) = own_object_path() {
+        for dir in object.ancestors().skip(1).take(4) {
+            for rel in ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"] {
+                let cand = dir.join(rel);
+                if cand.is_file() {
+                    v.push(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         v.push(format!("{}/.local/bin/z3", home));
     }
     v
+}
+
+/// The file this code was loaded from: the `Y` executable, or `liby.so` when
+/// the compiler runs inside another process. There `current_exe()` names the
+/// Python interpreter, so on Linux the mapping holding this function is
+/// looked up instead. Its path field is the rest of the line after five
+/// fields and may contain spaces (this repository's own path does).
+fn own_object_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let here = own_object_path as fn() -> Option<std::path::PathBuf> as usize;
+        if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+            for line in maps.lines() {
+                let mut rest = line;
+                let mut fields = Vec::with_capacity(5);
+                for _ in 0..5 {
+                    rest = rest.trim_start();
+                    let end = rest.find(' ').unwrap_or(rest.len());
+                    fields.push(&rest[..end]);
+                    rest = &rest[end..];
+                }
+                let Some((lo, hi)) = fields[0].split_once('-') else { continue };
+                let (Ok(lo), Ok(hi)) = (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16)) else {
+                    continue;
+                };
+                if (lo..hi).contains(&here) {
+                    let path = rest.trim_start();
+                    let path = path.strip_suffix(" (deleted)").unwrap_or(path);
+                    if path.starts_with('/') {
+                        return Some(std::path::PathBuf::from(path));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    std::env::current_exe().ok()
 }
 
 /// Declares any `name_version` symbol the query REFERENCES but never declares.

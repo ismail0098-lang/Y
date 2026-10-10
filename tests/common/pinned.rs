@@ -24,7 +24,9 @@
 //! * **Hide a solver the repository can see.** The compiler also looks for
 //!   z3 at RELATIVE paths (`venv/bin/z3`, ...), resolved against its working
 //!   directory. [`pin`] mirrors the ones the repository has - see
-//!   [`mirror_solver`].
+//!   [`mirror_solver`]. (The compiler now finds the repository's own from any
+//!   directory as well; a test that needs NO solver runs a
+//!   [`DetachedCompiler`].)
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -109,6 +111,11 @@ pub fn pin(dir: &Path, sm: &str) {
 /// name is a `PATH` lookup and an absolute path resolves the same from
 /// anywhere; only a relative path with a directory part depends on the
 /// working directory.
+///
+/// Since 2026-10-10 the compiler also finds a `venv/bin/z3` beside its own
+/// executable, so the repository's solver is found from a scratch directory
+/// without this. The mirror still keeps the ORDER the repository resolves in:
+/// the working-directory candidates come first.
 pub fn mirror_solver(root: &Path, dir: &Path) {
     for cand in y::type_checker::z3_candidates() {
         let rel = Path::new(&cand);
@@ -161,4 +168,55 @@ pub fn copy_fixture(dir: &Path, rel: &str) -> PathBuf {
     let to = dir.join(from.file_name().expect("fixture file name"));
     std::fs::copy(&from, &to).unwrap_or_else(|e| panic!("copy {rel}: {e}"));
     to
+}
+
+/// A copy of the compiler with nothing beside it, deleted on drop.
+///
+/// The compiler also looks for z3 beside its own executable
+/// (`type_checker::z3_candidates`), so `CARGO_BIN_EXE_Y` finds a repo-local
+/// `venv/bin/z3` from any working directory, with `PATH` and `HOME` stripped.
+/// A test of what happens where NO solver can be found runs this copy. A test
+/// of the lookup itself puts a solver at `rel_dir/..` relative to the copy.
+pub struct DetachedCompiler {
+    pub root: PathBuf,
+    pub exe: PathBuf,
+}
+
+impl DetachedCompiler {
+    /// The copy is `<scratch>/<rel_dir>/Y`.
+    pub fn at(tag: &str, rel_dir: &str) -> Self {
+        let root = scratch(tag);
+        let dir = root.join(rel_dir);
+        std::fs::create_dir_all(&dir).expect("detached compiler dir");
+        let exe = dir.join("Y");
+        std::fs::copy(env!("CARGO_BIN_EXE_Y"), &exe).expect("copy the compiler");
+        DetachedCompiler { root, exe }
+    }
+
+    pub fn new(tag: &str) -> Self {
+        Self::at(tag, "bin")
+    }
+
+    /// `cmd.output()`, retried while the copy is busy. A test thread that
+    /// forks while another is still writing a copy hands its child the write
+    /// descriptor, and until that child execs, running the copy fails with
+    /// ETXTBSY - 1 run in 8 of `safe_invariant_enforcement`, with three
+    /// copies made concurrently.
+    pub fn output(cmd: &mut std::process::Command) -> std::process::Output {
+        for _ in 0..200 {
+            match cmd.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                result => return result.expect("run the detached compiler"),
+            }
+        }
+        panic!("the detached compiler stayed busy (ETXTBSY) for a second");
+    }
+}
+
+impl Drop for DetachedCompiler {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }

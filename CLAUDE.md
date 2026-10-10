@@ -109,9 +109,10 @@ These notes were checked against source, not freshly reproduced. Read
   (`fixed.rs`); Q arrays, `match` and built-in arguments are refused.
   Enum payloads are scalar only (at most 8 fields); others are refused.
 - SMT integer-width checking still rejects unsigned variables in invariant proofs.
-- Z3's project-venv lookup depends on the working directory; invariant checks fail
-  without a solver. The PTX translation validator licenses sm89 only and does not
-  establish general unrolled-loop correspondence.
+- Invariant checks fail without a solver (`Y_Z3_PATH`, `PATH`, then repo-venv
+  paths in the working directory and beside the compiler). The PTX translation
+  validator licenses sm89 only and does not establish general unrolled-loop
+  correspondence.
 
 Other unresolved reports are indexed in
 [the reported-issue backlog](docs/claude-history/UNRESOLVED.md). Check relevant
