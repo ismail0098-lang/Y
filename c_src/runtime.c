@@ -101,7 +101,14 @@ static inline YStr* resolve_ystr(int32_t s) {
     return (YStr*)(uintptr_t)actual_ptr;
 }
 
-int32_t ystr_new(const char* s) {
+// Return and integer-argument widths match the LLVM backend's declarations
+// (`emit_prelude`) and the JIT's runtime (`src/cpu_jit/runtime.rs`). A handle
+// or a length comes back as 64 bits: the backend declares `ptr`/`i64` and reads
+// the whole register, and an `int32_t` return leaves its upper half unspecified.
+// An index or a value the backend passes as `i64` is taken as `int64_t`, not
+// truncated: `print_int(5000000000)` printed 705032704. Handle arguments stay
+// `int32_t`: the pool is mapped MAP_32BIT, so a handle fits and loses nothing.
+int64_t ystr_new(const char* s) {
     YStr* str = ymalloc(sizeof(YStr));
     str->len = s ? strlen(s) : 0;
     str->cap = str->len + 1;
@@ -113,10 +120,10 @@ int32_t ystr_new(const char* s) {
     }
     register_ystr(str);
     // printf("[runtime] ystr_new: registered=%p, len=%d, data='%s'\n", (void*)str, str->len, str->len < 100 ? str->data : "...long...");
-    return (int32_t)(uintptr_t)str;
+    return (int64_t)(uintptr_t)str;
 }
 
-int32_t ystr_clone(int32_t s) {
+int64_t ystr_clone(int32_t s) {
     YStr* src = resolve_ystr(s);
     if (!src) return ystr_new("");
     return ystr_new(src->data);
@@ -166,13 +173,13 @@ int32_t ystr_eq_cstr(int32_t a, int32_t b) {
     return strcmp(strA->data, cstr) == 0;
 }
 
-int32_t ystr_len(int32_t s) {
+int64_t ystr_len(int32_t s) {
     YStr* str = resolve_ystr(s);
     if (!str) return 0;
     return str->len;
 }
 
-int32_t ystr_char_at(int32_t s, int32_t idx) {
+int32_t ystr_char_at(int32_t s, int64_t idx) {
     YStr* str = resolve_ystr(s);
     if (!str || idx < 0 || idx >= str->len) return 0;
     return str->data[idx];
@@ -192,14 +199,14 @@ typedef struct {
     int32_t elem_size;
 } YVec;
 
-int32_t yvec_new(int32_t elem_size) {
+int64_t yvec_new(int64_t elem_size) {
     YVec* v = ymalloc(sizeof(YVec));
-    v->elem_size = elem_size;
+    v->elem_size = (int32_t)elem_size;
     v->len = 0;
     v->cap = 8;
     v->data = ymalloc(v->cap * elem_size);
     // printf("[runtime] yvec_new: elem_size=%d -> v=0x%x, data=0x%x\n", elem_size, (int32_t)(uintptr_t)v, (int32_t)(uintptr_t)v->data);
-    return (int32_t)(uintptr_t)v;
+    return (int64_t)(uintptr_t)v;
 }
 
 int32_t yvec_push(int32_t v, int32_t item) {
@@ -218,10 +225,10 @@ int32_t yvec_push(int32_t v, int32_t item) {
     return 0;
 }
 
-int32_t yvec_get(int32_t v, int32_t idx) {
+int64_t yvec_get(int32_t v, int64_t idx) {
     YVec* vec = (YVec*)(uintptr_t)v;
     if (!vec || idx < 0 || idx >= vec->len) return 0;
-    return (int32_t)(uintptr_t)((char*)vec->data + idx * vec->elem_size);
+    return (int64_t)(uintptr_t)((char*)vec->data + idx * vec->elem_size);
 }
 
 int32_t yvec_get_char(int32_t v, int32_t idx) {
@@ -236,7 +243,7 @@ int32_t yvec_get_char(int32_t v, int32_t idx) {
     return res;
 }
 
-int32_t yvec_len(int32_t v) {
+int64_t yvec_len(int32_t v) {
     YVec* vec = (YVec*)(uintptr_t)v;
     if (!vec) return 0;
     // printf("[runtime] yvec_len: v=0x%x, len=%d\n", v, vec->len);
@@ -250,7 +257,7 @@ int32_t yvec_free(int32_t v) {
 
 // ── File I/O ─────────────────────────────────────────────
 
-int32_t yfile_read_to_string(int32_t path) {
+int64_t yfile_read_to_string(int32_t path) {
     YStr* p = resolve_ystr(path);
     if (!p) {
         // printf("[runtime] yfile_read_to_string: p is NULL!\n");
@@ -270,7 +277,7 @@ int32_t yfile_read_to_string(int32_t path) {
     buf[read_bytes] = '\0';
     fclose(f);
     // printf("[runtime] yfile_read_to_string: read %ld bytes\n", (long)read_bytes);
-    int32_t res = ystr_new(buf);
+    int64_t res = ystr_new(buf);
     free(buf);
     return res;
 }
@@ -289,8 +296,8 @@ int32_t yfile_write(int32_t path, int32_t contents) {
 
 // ── Utilities / Builtins ────────────────────────────────────
 
-int32_t print_int(int32_t val) {
-    printf("%d", val);
+int32_t print_int(int64_t val) {
+    printf("%lld", (long long)val);
     fflush(stdout);
     return 0;
 }
@@ -385,7 +392,7 @@ int32_t MatchPattern_Ident(int32_t f0) { return make_enum(0, 1, f0); }
 int32_t MatchPattern_EnumVariant(int32_t f0, int32_t f1) { return make_enum(1, 2, f0, f1); }
 int32_t MatchPattern_Literal(int32_t f0) { return make_enum(2, 1, f0); }
 
-int32_t String_new(const char* s) {
+int64_t String_new(const char* s) {
     // A Y string literal reaches here as a string HANDLE - the LLVM backend
     // turns every literal into a YStr - not as text. Read as text, the
     // handle's own bytes came out: `String_new("hi")` printed `(`. A handle

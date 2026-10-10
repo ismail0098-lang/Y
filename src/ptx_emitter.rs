@@ -3566,6 +3566,18 @@ or `shared_alloc_u32` for a shared-memory array.",
         let Some(cp) = cache_policy else {
             return (".ca", None);
         };
+        // `reuse_count` was parsed and dropped: `createpolicy` takes a
+        // FRACTION of the lines, not a count of reuses, and nothing else
+        // could carry it. A directive that changes nothing is refused.
+        if let Some(count) = cp.reuse_count {
+            self.emit_errors.push(format!(
+                "Line {}: `@cache_policy({}, reuse_count={})`: `reuse_count` has no lowering \
+                 in this backend (`createpolicy` takes a fraction of the lines, not a count of \
+                 reuses), so it would be silently ignored. Drop it.",
+                cp.span.line, cp.policy, count
+            ));
+            return (".ca", None);
+        }
         let priority = match cp.policy.as_str() {
             "L2_STREAM" => return (".cs", None),
             "L2_EVICT_FIRST" => "evict_first",

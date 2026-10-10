@@ -761,12 +761,14 @@ kernel drift_demo() {
   the same `mov` as no policy, `L2_PERSIST` became a `prefetcht0` scheduled
   after the load of the same address, and the other two were dropped - all four
   compiled and exited 0.
-* `reuse_count=N` is parsed and not lowered by any backend.
+* `reuse_count=N` is refused by name. No backend lowers it (`createpolicy` takes a
+  fraction of the lines, not a count of reuses); until 2026-10-10 it was parsed
+  and silently dropped.
 * **Example** (a kernel, compiled with `--emit-ptx`):
 ```ysu
 // Keep weights in L2 for reuse
 kernel scale(global_weights: GlobalMemory<F32>, Out: GlobalMemory<F32>, i: I32) {
-    @cache_policy(L2_PERSIST, reuse_count=16)
+    @cache_policy(L2_PERSIST)
     let weight_val: F32 = global_weights[i];
     Out[i] = weight_val;
 }
@@ -1162,7 +1164,7 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
     let smem_B = SharedMemory::alloc<BTile>();
 
     // Load inputs with persisting L2 cache policy
-    @cache_policy(L2_PERSIST, reuse_count=8)
+    @cache_policy(L2_PERSIST)
     let weights: F16 = load(A);
 
     // Load dynamic inputs with evict first policy
@@ -3070,7 +3072,7 @@ After the Sentinel probe runs, `.ysu_hw_profile` contains cycle-accurate measure
 // Use L2_PERSIST for data accessed repeatedly across loop iterations
 // (e.g. weight matrices in attention, BVH node data in deep traversals).
 // W is a GlobalMemory<F16>: the load widens the half to F32 exactly.
-@cache_policy(L2_PERSIST, reuse_count=8)
+@cache_policy(L2_PERSIST)
 let weights: F32 = GlobalMemory::load(W[i]);      // createpolicy + ld.global.L2::cache_hint.b16 + cvt.f32.f16
 
 output[i] = weights;                              // no store takes a cache policy

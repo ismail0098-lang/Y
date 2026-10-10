@@ -1231,7 +1231,7 @@ fn main() {
             type ATile = SmemLayout<F16, rows=16, cols=64, swizzle=330>;
             let smem_A = SharedMemory::alloc<ATile>();
 
-            @cache_policy(L2_PERSIST, reuse_count=8)
+            @cache_policy(L2_PERSIST)
             let weights: F16 = load(A);
 
             @cache_policy(L2_EVICT_FIRST)

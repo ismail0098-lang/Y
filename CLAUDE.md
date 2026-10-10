@@ -108,9 +108,7 @@ These notes were checked against source, not freshly reproduced. Read
 - LLVM Q formats outside `@ZeroDrift` are scaled integers that trap on overflow
   (`fixed.rs`); Q arrays, `match` and built-in arguments are refused.
   Enum payloads are scalar only (at most 8 fields); others are refused.
-- LLVM `ystr_len` declares an i64 return; the C runtime returns int32_t.
 - SMT integer-width checking still rejects unsigned variables in invariant proofs.
-- `@cache_policy(reuse_count=...)` is parsed but has no lowering consumer.
 - Z3's project-venv lookup depends on the working directory; invariant checks fail
   without a solver. The PTX translation validator licenses sm89 only and does not
   establish general unrolled-loop correspondence.

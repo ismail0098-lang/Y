@@ -562,16 +562,30 @@ fn bool_still_compiles_and_runs() {
 }
 
 /// The symbol table keeps one address per name, so with two definitions
-/// every call reached whichever came LAST. The type checker keeps one
-/// signature per name and does not say so either.
+/// every call reached whichever came LAST. The front end refuses the program
+/// first now, on every backend (`tests/duplicate_definitions.rs`), so the
+/// CLI never reaches this backend's own refusal; that refusal stays, and is
+/// checked by calling the backend directly - a guard nothing reaches through
+/// the CLI is still the guard for any other caller.
 #[test]
 fn a_second_definition_of_a_function_is_refused() {
-    assert_native_refuses(
-        "dup_fn",
-        "fn f() -> I32 {\n    return 1;\n}\n\nfn f() -> I32 {\n    return 2;\n}\n\n\
-         fn main() -> I32 {\n    return f();\n}\n",
-        "`fn f` is defined twice",
+    let src = "fn f() -> I32 {\n    return 1;\n}\n\nfn f() -> I32 {\n    return 2;\n}\n\n\
+         fn main() -> I32 {\n    return f();\n}\n";
+    let program = y::parser::Parser::new(y::lexer::Lexer::new(src).tokenize())
+        .parse_program()
+        .expect("parse");
+    let mut emitter = y::native_emitter::NativeEmitter::new();
+    emitter.emit_program(&program);
+    assert!(
+        emitter.emit_errors.iter().any(|e| e.contains("[Native x86-64 Backend]")
+            && e.contains("`fn f` is defined twice")),
+        "the native backend no longer refuses a second definition itself: {:?}",
+        emitter.emit_errors
     );
+    match build_native("dup_fn", src) {
+        Ok(code) => panic!("`dup_fn` produced a RUNNABLE binary (exit {code})"),
+        Err(diag) => assert!(diag.contains("`fn f` is defined twice"), "{diag}"),
+    }
 }
 
 /// Under `@unsafe` the front end allows a `let` with no initializer, and this

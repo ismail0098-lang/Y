@@ -247,6 +247,18 @@ fn a_policy_nothing_would_honour_is_refused() {
     );
 }
 
+/// `reuse_count=N` was parsed and dropped by every backend, and the manual said
+/// so. A directive that changes nothing is refused by name, whichever policy
+/// carries it; the same policy without the count still compiles.
+#[test]
+fn a_reuse_count_nothing_lowers_is_refused() {
+    for (tag, policy) in [("reuse_persist", "L2_PERSIST, reuse_count=8"), ("reuse_stream", "L2_STREAM, reuse_count=2")] {
+        refused(tag, &loader(Some(policy), "A[1]"), &["reuse_count", "silently ignored"]);
+    }
+    let ptx = compiled_for("8.9", "reuse_control", &loader(Some("L2_PERSIST"), "A[1]"));
+    assert!(ptx.contains("createpolicy.fractional.L2::evict_last.b64"), "{}", ptx);
+}
+
 /// A cache hint changes where a line lives, never what a load returns: every
 /// policy reads back element 1 exactly.
 #[test]

@@ -1385,6 +1385,7 @@ not know its length",
             }
         }
         named_types(self, &prog.items);
+        self.refuse_duplicate_definitions(&prog.items);
         // Collect function signatures first
         for item in &prog.items {
             self.collect_signatures_item(item);
@@ -1394,6 +1395,54 @@ not know its length",
             self.check_item(item);
         }
         self.finish_index_facts();
+    }
+
+    /// One namespace holds every top-level `fn` and `kernel`, every `impl`
+    /// method (`Type_method`) and every enum constructor (`Enum_Variant`). A
+    /// name defined twice in it was not refused: this checker kept the second
+    /// signature, the LLVM module then failed inside clang with no reason
+    /// given, `--emit-llvm` and `--emit-cpu` wrote output that does not
+    /// compile, and only `--emit-native` said what was wrong.
+    fn refuse_duplicate_definitions(&mut self, items: &[Item]) {
+        let mut defs: Vec<(String, String, usize)> = Vec::new();
+        for item in items {
+            match item {
+                Item::Func(f) => defs.push((f.name.clone(), format!("fn {}", f.name), f.span.line)),
+                Item::Kernel(k) => defs.push((k.name.clone(), format!("kernel {}", k.name), k.span.line)),
+                Item::Impl(imp) => {
+                    for m in &imp.methods {
+                        defs.push((
+                            format!("{}_{}", imp.target_type, m.name),
+                            format!("fn {}::{}", imp.target_type, m.name),
+                            m.span.line,
+                        ));
+                    }
+                }
+                Item::Enum(e) => {
+                    for v in &e.variants {
+                        defs.push((
+                            format!("{}_{}", e.name, v.name),
+                            format!("{}::{}", e.name, v.name),
+                            v.span.line,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen: HashMap<String, (String, usize)> = HashMap::new();
+        for (key, shown, line) in defs {
+            match seen.get(&key) {
+                Some((first, first_line)) => self.errors.push(format!(
+                    "Line {}: `{}` is defined twice (`{}` at line {}, and again at line {}); \
+                     every call would reach only one of them.",
+                    line, shown, first, first_line, line
+                )),
+                None => {
+                    seen.insert(key, (shown, line));
+                }
+            }
+        }
     }
 
     fn collect_signatures_item(&mut self, item: &Item) {
