@@ -1,0 +1,19 @@
+{
+  "archived_on": "2026-10-10",
+  "files": [
+    {
+      "source": "Y/CLAUDE.md",
+      "archive": "project-before-2026-10-10.md",
+      "bytes": 1122171,
+      "lines": 2453,
+      "sha256": "039f8a6587844371f827f3c50f77168cf230546f7954b03413a25b302ca3ce60"
+    },
+    {
+      "source": "CLAUDE.md",
+      "archive": "parent-before-2026-10-10.md",
+      "bytes": 1027724,
+      "lines": 2239,
+      "sha256": "cf377f9f6f018a30748ca0917ece1d979f87cb091bcdacf96597f93be6dd2d43"
+    }
+  ]
+}

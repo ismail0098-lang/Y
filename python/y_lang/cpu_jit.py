@@ -32,6 +32,34 @@ class _Value(ctypes.Structure):
     ]
 
 
+class _Options(ctypes.Structure):
+    _fields_ = [
+        ("abi_version", ctypes.c_uint32),
+        ("struct_size", ctypes.c_uint32),
+        ("opt_level", ctypes.c_uint32),
+        ("training_opt_level", ctypes.c_int32),
+        ("codegen_opt_level", ctypes.c_int32),
+    ]
+
+
+_UNCHANGED = object()
+
+
+def _opt_level(value: Any, name: str, optional: bool = False) -> Optional[int]:
+    if optional and value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3:
+        suffix = ", or None to inherit" if optional else ""
+        raise ValueError("{} must be 0, 1, 2, or 3{}".format(name, suffix))
+    return value
+
+
+def _options(base: int, training: Optional[int], codegen: Optional[int]) -> _Options:
+    return _Options(1, ctypes.sizeof(_Options), base,
+                    -1 if training is None else training,
+                    -1 if codegen is None else codegen)
+
+
 _TAGS = {
     "void": 0,
     "I8": 1,
@@ -157,13 +185,15 @@ class CPUJit:
     """
 
     def __init__(self, source: str, opt_level: int = 3, library_path: Optional[str] = None,
-                 *, instrument: bool = False):
+                 *, instrument: bool = False, training_opt_level: Optional[int] = None,
+                 codegen_opt_level: Optional[int] = None):
         if not isinstance(source, str):
             raise TypeError("CPU JIT source must be a string")
         if "\0" in source:
             raise ValueError("CPU JIT source cannot contain NUL")
-        if isinstance(opt_level, bool) or not isinstance(opt_level, int) or not 0 <= opt_level <= 3:
-            raise ValueError("opt_level must be 0, 1, 2, or 3")
+        _opt_level(opt_level, "opt_level")
+        _opt_level(training_opt_level, "training_opt_level", optional=True)
+        _opt_level(codegen_opt_level, "codegen_opt_level", optional=True)
         if not isinstance(instrument, bool):
             raise TypeError("instrument must be bool")
         self._creator_thread = threading.get_ident()
@@ -171,13 +201,22 @@ class CPUJit:
         self._signatures = {}  # type: Dict[str, Dict[str, Any]]
         self._source = source
         self._opt_level = opt_level
+        self._training_opt_level = training_opt_level
+        self._codegen_opt_level = codegen_opt_level
         self.library_path = os.fspath(library_path) if library_path is not None else _find_liby()
         self._library = ctypes.CDLL(self.library_path)
         self._declare_api()
         error = ctypes.c_void_p()
-        compile_function = (self._library.y_cpu_jit_compile_instrumented if instrument
-                            else self._library.y_cpu_jit_compile)
-        handle = compile_function(source.encode("utf-8"), opt_level, ctypes.byref(error))
+        if training_opt_level is None and codegen_opt_level is None:
+            compile_function = (self._library.y_cpu_jit_compile_instrumented if instrument
+                                else self._library.y_cpu_jit_compile)
+            handle = compile_function(source.encode("utf-8"), opt_level, ctypes.byref(error))
+        else:
+            self._require_options_api()
+            options = _options(opt_level, training_opt_level, codegen_opt_level)
+            compile_function = (self._library.y_cpu_jit_compile_instrumented_with_options if instrument
+                                else self._library.y_cpu_jit_compile_with_options)
+            handle = compile_function(source.encode("utf-8"), ctypes.byref(options), ctypes.byref(error))
         if not handle:
             self._raise(error, "CPU compilation returned a null session")
         if error.value:
@@ -194,7 +233,8 @@ class CPUJit:
         self._handle = handle
 
     @classmethod
-    def _adopt_profiled(cls, owner: "CPUJit", handle: int) -> "CPUJit":
+    def _adopt_profiled(cls, owner: "CPUJit", handle: int, opt_level: int,
+                       training_opt_level: Optional[int], codegen_opt_level: Optional[int]) -> "CPUJit":
         """Take an already compiled handle without compiling or training again."""
         try:
             result = cls.__new__(cls)
@@ -202,9 +242,12 @@ class CPUJit:
             result._handle = None
             result._signatures = {}
             result._source = owner._source
-            result._opt_level = owner._opt_level
+            result._opt_level = opt_level
+            result._training_opt_level = training_opt_level
+            result._codegen_opt_level = codegen_opt_level
             result.library_path = owner.library_path
             result._library = owner._library
+            result._has_options_api = owner._has_options_api
         except BaseException:
             owner._library.y_cpu_jit_free(handle)
             raise
@@ -235,6 +278,30 @@ class CPUJit:
                 function.restype = result
         except AttributeError as error:
             raise CPUJitError("liby is missing CPU JIT APIs; rebuild it with cargo build --release") from error
+
+        # The existing default path also works with libraries predating options.
+        options_pointer = ctypes.POINTER(_Options)
+        option_declarations = {
+            "y_cpu_jit_options_init": ([options_pointer, ctypes.c_uint32, error_pointer], ctypes.c_int32),
+            "y_cpu_jit_compile_with_options": ([ctypes.c_char_p, options_pointer, error_pointer], ctypes.c_void_p),
+            "y_cpu_jit_compile_instrumented_with_options":
+                ([ctypes.c_char_p, options_pointer, error_pointer], ctypes.c_void_p),
+            "y_cpu_jit_compile_profiled_with_options":
+                ([ctypes.c_char_p, options_pointer, ctypes.c_void_p, error_pointer], ctypes.c_void_p),
+        }
+        self._has_options_api = False
+        try:
+            for name, (parameters, result) in option_declarations.items():
+                function = getattr(self._library, name)
+                function.argtypes = parameters
+                function.restype = result
+            self._has_options_api = True
+        except AttributeError:
+            pass
+
+    def _require_options_api(self) -> None:
+        if not self._has_options_api:
+            raise CPUJitError("liby is missing CPU JIT options APIs; rebuild it with cargo build --release")
 
     def _raise(self, error: ctypes.c_void_p, default: str) -> None:
         if error.value:
@@ -386,23 +453,39 @@ class CPUJit:
         finally:
             self._library.y_free_string(result)
 
-    def recompile_profiled(self) -> "CPUJit":
+    def recompile_profiled(self, *, opt_level: Optional[int] = None,
+                          training_opt_level: Any = _UNCHANGED,
+                          codegen_opt_level: Any = _UNCHANGED) -> "CPUJit":
         """Create an independent optimized session from this session's counts.
 
         This instrumented session and its callables remain live. The new
-        session uses the same source, optimization level and loaded library,
-        has no counters, and must be closed independently.
+        session preserves source, compilation policy and loaded library unless
+        keyword overrides are supplied. None resets a training/codegen override
+        to inheritance; opt_level=None preserves the base level. Training policy
+        does not alter final IR. The new session has no counters and must be
+        closed independently.
         """
         self._check()
+        base = self._opt_level if opt_level is None else _opt_level(opt_level, "opt_level")
+        training = (self._training_opt_level if training_opt_level is _UNCHANGED else
+                    _opt_level(training_opt_level, "training_opt_level", optional=True))
+        codegen = (self._codegen_opt_level if codegen_opt_level is _UNCHANGED else
+                   _opt_level(codegen_opt_level, "codegen_opt_level", optional=True))
         error = ctypes.c_void_p()
-        handle = self._library.y_cpu_jit_compile_profiled(
-            self._source.encode("utf-8"), self._opt_level, self._handle, ctypes.byref(error))
+        if training is None and codegen is None:
+            handle = self._library.y_cpu_jit_compile_profiled(
+                self._source.encode("utf-8"), base, self._handle, ctypes.byref(error))
+        else:
+            self._require_options_api()
+            options = _options(base, training, codegen)
+            handle = self._library.y_cpu_jit_compile_profiled_with_options(
+                self._source.encode("utf-8"), ctypes.byref(options), self._handle, ctypes.byref(error))
         if not handle:
             self._raise(error, "CPU profile-use compilation returned a null session")
         if error.value:
             self._library.y_cpu_jit_free(handle)
             self._raise(error, "CPU profile-use compilation failed")
-        return self._adopt_profiled(self, handle)
+        return self._adopt_profiled(self, handle, base, training, codegen)
 
     @property
     def closed(self) -> bool:

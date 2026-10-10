@@ -2,6 +2,7 @@ import ctypes
 import os
 import sys
 import json
+import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -47,13 +48,57 @@ def _find_liby() -> str:
         "or set Y_LIB_PATH environment variable."
     )
 
+def _library_signature(path: Path):
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _verify_loaded_library(lib, signature, path):
+    """Detect dlopen returning an older, already mapped inode after a rebuild.
+
+    The mapping is identified by its pathname and inode, never by its device
+    number: on btrfs (and overlayfs) `/proc/self/maps` shows the superblock's
+    device while `stat()` shows the subvolume's, so comparing devices refused
+    every freshly built library on such a filesystem.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    address = ctypes.cast(lib.y_compile_to_ptx, ctypes.c_void_p).value
+    expected = os.path.realpath(path)
+    with open("/proc/self/maps", encoding="utf-8") as mappings:
+        for line in mappings:
+            fields = line.rstrip("\n").split(None, 5)
+            start, end = (int(value, 16) for value in fields[0].split("-"))
+            if start <= address < end:
+                mapped_path = fields[5] if len(fields) > 5 else ""
+                if (mapped_path.endswith(" (deleted)") or mapped_path != expected
+                        or int(fields[4]) != signature[1]):
+                    raise RuntimeError(
+                        "Python has an older Y compiler library loaded. "
+                        "Restart Python after rebuilding liby.so."
+                    )
+                return
+    raise RuntimeError("Could not verify the loaded Y compiler library identity")
+
+
 class YCompilerLib:
     _instance = None
 
     def __init__(self):
-        lib_path = _find_liby()
-        self.lib_path = lib_path
-        self.lib = ctypes.CDLL(lib_path)
+        lib_path = Path(_find_liby()).resolve()
+        self.lib_path = str(lib_path)
+        self._signature = _library_signature(lib_path)
+        # Hash once at load, never on a warm cache lookup. Freeze the identity
+        # of these bytes: a subsequent rebuild must not relabel a stale handle.
+        digest = hashlib.sha256()
+        with lib_path.open("rb") as binary:
+            for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+                digest.update(chunk)
+        self.compiler_identity = digest.hexdigest()
+        self.lib = ctypes.CDLL(str(lib_path))
+        if _library_signature(lib_path) != self._signature:
+            raise RuntimeError("Y compiler library changed while loading; restart Python")
+        _verify_loaded_library(self.lib, self._signature, lib_path)
 
         # void* y_compile_to_ptx(const char* source, const char* target_sm, char** error_out)
         self.lib.y_compile_to_ptx.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
@@ -85,9 +130,25 @@ class YCompilerLib:
     def get_instance(cls):
         if cls._instance is None:
             cls._instance = cls()
+        else:
+            instance = cls._instance
+            try:
+                selected_path = Path(_find_liby()).resolve()
+                unchanged = (
+                    str(selected_path) == instance.lib_path
+                    and _library_signature(selected_path) == instance._signature
+                )
+            except (OSError, RuntimeError):
+                unchanged = False
+            if not unchanged:
+                # dlopen may reuse an old handle for the same pathname. Refuse
+                # cache hits and compilation until a fresh process loads it.
+                _JIT_CACHE.clear()
+                raise RuntimeError(
+                    "The selected Y compiler library changed after it was loaded. "
+                    "Restart Python to load the rebuilt library or new Y_LIB_PATH."
+                )
         return cls._instance
-
-import hashlib
 
 _JIT_CACHE: Dict[str, str] = {}
 _CACHE_STATS = {
@@ -133,28 +194,55 @@ def clear_disk_cache() -> int:
                 pass
     return count
 
-def compile_to_ptx(source: str, target_sm: str = "auto") -> str:
-    """Compiles Y-lang source string into NVIDIA PTX assembly string with disk caching."""
-    cache_key = f"{target_sm}:{source}"
-    if cache_key in _JIT_CACHE:
-        _CACHE_STATS["mem_hits"] += 1
-        return _JIT_CACHE[cache_key]
 
+def _ptx_cache_context():
+    # The C API reads this profile even for explicit SM targets: the remaining
+    # hardware/tuning fields still affect lowering. With no readable profile,
+    # a live probe may pick a different GPU, so caching cannot be safe yet.
+    profile = Path.cwd() / ".ysu_hw_profile"
+    try:
+        profile_identity = hashlib.sha256(profile.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    settings = sorted(
+        (name, value) for name, value in os.environ.items()
+        if name.startswith(("Y_", "YSU_"))
+        and name not in ("Y_LIB_PATH", "YSU_CACHE_DIR")
+    )
+    return [str(profile.resolve()), profile_identity, settings]
+
+
+def compile_to_ptx(source: str, target_sm: str = "auto") -> str:
+    """Compile PTX, caching by loaded compiler, target, and hardware profile.
+
+    Restart Python after rebuilding the loaded library or changing Y_LIB_PATH.
+    Compilations without a readable hardware profile bypass the cache until the
+    compiler's hardware probe has recorded one.
+    """
+    lib = YCompilerLib.get_instance()
+    context = _ptx_cache_context()
+    cache_key = json.dumps(
+        ["y-ptx-cache-v2", lib.compiler_identity, lib.lib_path, target_sm, context, source],
+        ensure_ascii=False, separators=(",", ":"),
+    )
     key_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+    if context is not None and key_hash in _JIT_CACHE:
+        _CACHE_STATS["mem_hits"] += 1
+        return _JIT_CACHE[key_hash]
+
     cache_dir = get_cache_dir()
     cache_file = cache_dir / f"{key_hash}.ptx"
 
-    if cache_file.exists():
+    if context is not None and cache_file.exists():
         try:
             ptx_str = cache_file.read_text(encoding="utf-8")
-            _JIT_CACHE[cache_key] = ptx_str
+            _JIT_CACHE[key_hash] = ptx_str
             _CACHE_STATS["disk_hits"] += 1
             return ptx_str
         except Exception:
             pass
 
     _CACHE_STATS["misses"] += 1
-    lib = YCompilerLib.get_instance()
     error_out = ctypes.c_char_p()
 
     ptx_ptr = lib.lib.y_compile_to_ptx(
@@ -174,6 +262,11 @@ def compile_to_ptx(source: str, target_sm: str = "auto") -> str:
     ptx_str = ctypes.cast(ptx_ptr, ctypes.c_char_p).value.decode("utf-8")
     lib.lib.y_free_string(ptx_ptr)
 
+    # A probe can create/update the profile during compilation. Such a result
+    # must not be stored under the hardware context observed before the probe.
+    if context is None or context != _ptx_cache_context():
+        return ptx_str
+
     # Persist to .ysu/cache disk cache
     try:
         tmp_file = cache_dir / f"{key_hash}.tmp"
@@ -182,7 +275,7 @@ def compile_to_ptx(source: str, target_sm: str = "auto") -> str:
     except Exception:
         pass
 
-    _JIT_CACHE[cache_key] = ptx_str
+    _JIT_CACHE[key_hash] = ptx_str
     return ptx_str
 
 def generate_autotune_search_space(m: int, n: int, k: int, is_fp8: bool = False) -> List[Dict[str, Any]]:

@@ -15,6 +15,7 @@ from unittest import mock
 import weakref
 
 from y_lang import CPUJit, CPUJitError
+from y_lang.cpu_jit import _Options
 
 
 SOURCE = """
@@ -230,6 +231,116 @@ class TestCPUJit(unittest.TestCase):
                 training.branch_profile()
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 training.recompile_profiled()
+
+    def test_training_and_codegen_options_preserve_counts_and_recompilation_policy(self):
+        for tier in range(4):
+            with self.subTest(tier=tier), CPUJit(
+                    PROFILE_SOURCE, instrument=True, training_opt_level=tier,
+                    codegen_opt_level=3 - tier) as training:
+                self.assertEqual(training.branch_profile()["total_observations"], 0)
+                for value in (-3, -1, 0, 2, 5):
+                    self.assertEqual(training("choose", value), value - 1 if value < 0 else value + 2)
+                measured = training.branch_profile()
+                self.assertEqual(measured["total_observations"], 5)
+                self.assertEqual((measured["sites"][0]["true_count"],
+                                  measured["sites"][0]["false_count"]), (2, 3))
+                compile_function = training._library.y_cpu_jit_compile_profiled_with_options
+                with mock.patch.object(training._library, "y_cpu_jit_compile_profiled_with_options",
+                                       wraps=compile_function) as compiled:
+                    optimized = training.recompile_profiled()
+                    supplied = compiled.call_args.args[1]._obj
+                    self.assertEqual((supplied.opt_level, supplied.training_opt_level,
+                                      supplied.codegen_opt_level), (3, tier, 3 - tier))
+                with optimized:
+                    self.assertEqual((optimized._opt_level, optimized._training_opt_level,
+                                      optimized._codegen_opt_level), (3, tier, 3 - tier))
+                    self.assertEqual(training.branch_profile(), measured)
+                    for value in (-100, -1, 0, 77):
+                        self.assertEqual(optimized("choose", value), value - 1 if value < 0 else value + 2)
+                    with self.assertRaisesRegex(CPUJitError, "instrumentation"):
+                        optimized.branch_profile()
+                with training.recompile_profiled(opt_level=0, codegen_opt_level=1) as overridden:
+                    self.assertEqual((overridden._opt_level, overridden._training_opt_level,
+                                      overridden._codegen_opt_level), (0, tier, 1))
+                    self.assertEqual(overridden("choose", -9), -10)
+                with training.recompile_profiled(training_opt_level=None,
+                                                 codegen_opt_level=None) as inherited:
+                    self.assertIsNone(inherited._training_opt_level)
+                    self.assertIsNone(inherited._codegen_opt_level)
+                    self.assertEqual(inherited("choose", 9), 11)
+                self.assertEqual(training.branch_profile(), measured)
+                self.assertEqual((training._training_opt_level, training._codegen_opt_level),
+                                 (tier, 3 - tier), "overrides do not mutate training policy")
+        # A valid training tier is accepted but unused for ordinary compilation.
+        with CPUJit(PROFILE_SOURCE, training_opt_level=0, codegen_opt_level=0) as ordinary:
+            self.assertEqual(ordinary("choose", -4), -5)
+
+    def test_options_validation_happens_before_loading_or_recompiling(self):
+        for name in ("training_opt_level", "codegen_opt_level"):
+            for invalid in (-1, 4, 256, True, 1.0, "1"):
+                with self.subTest(name=name, invalid=invalid):
+                    with mock.patch("y_lang.cpu_jit.ctypes.CDLL") as load:
+                        with self.assertRaisesRegex(ValueError, name):
+                            CPUJit(PROFILE_SOURCE, **{name: invalid})
+                        load.assert_not_called()
+        with CPUJit(PROFILE_SOURCE, instrument=True, training_opt_level=1) as training:
+            before = training.branch_profile()
+            for name in ("opt_level", "training_opt_level", "codegen_opt_level"):
+                for invalid in (-1, 4, True, 1.0):
+                    with self.subTest(name=name, invalid=invalid):
+                        with mock.patch.object(training._library,
+                                               "y_cpu_jit_compile_profiled_with_options") as compile_call:
+                            with self.assertRaisesRegex(ValueError, name):
+                                training.recompile_profiled(**{name: invalid})
+                            compile_call.assert_not_called()
+            self.assertEqual(training.branch_profile(), before)
+            self.assertEqual(training("choose", 3), 5)
+
+    def test_versioned_c_options_match_layout_and_reject_bad_fields(self):
+        library = self.jit._library
+        options = _Options()
+        error = ctypes.c_void_p()
+        self.assertEqual(ctypes.sizeof(options), 20)
+        self.assertEqual((_Options.opt_level.offset, _Options.training_opt_level.offset,
+                          _Options.codegen_opt_level.offset), (8, 12, 16))
+        self.assertEqual(library.y_cpu_jit_options_init(ctypes.byref(options),
+                                                       ctypes.sizeof(options), ctypes.byref(error)), 0)
+        self.assertFalse(error.value)
+        self.assertEqual((options.abi_version, options.struct_size, options.opt_level,
+                          options.training_opt_level, options.codegen_opt_level), (1, 20, 3, -1, -1))
+        for name, invalid, message in (("abi_version", 99, "version"),
+                                       ("struct_size", 8, "size"),
+                                       ("opt_level", 4, "opt_level"),
+                                       ("training_opt_level", -2, "training_opt_level"),
+                                       ("codegen_opt_level", 4, "codegen_opt_level")):
+            with self.subTest(field=name):
+                bad = _Options.from_buffer_copy(options)
+                setattr(bad, name, invalid)
+                handle = library.y_cpu_jit_compile_with_options(
+                    PROFILE_SOURCE.encode("utf-8"), ctypes.byref(bad), ctypes.byref(error))
+                self.assertFalse(handle)
+                with self.assertRaisesRegex(CPUJitError, message):
+                    self.jit._raise(error, "expected options refusal")
+
+    def test_default_policy_can_use_older_library_without_options_exports(self):
+        real_library = self.jit._library
+
+        class LegacyLibrary:
+            def __getattr__(self, name):
+                if name.endswith("_with_options") or name == "y_cpu_jit_options_init":
+                    raise AttributeError(name)
+                return getattr(real_library, name)
+
+        with mock.patch("y_lang.cpu_jit.ctypes.CDLL", return_value=LegacyLibrary()):
+            with CPUJit(PROFILE_SOURCE, instrument=True) as training:
+                self.assertFalse(training._has_options_api)
+                self.assertEqual(training("choose", -3), -4)
+                with training.recompile_profiled() as optimized:
+                    self.assertEqual(optimized("choose", 3), 5)
+                with self.assertRaisesRegex(CPUJitError, "missing CPU JIT options APIs"):
+                    training.recompile_profiled(codegen_opt_level=1)
+            with self.assertRaisesRegex(CPUJitError, "missing CPU JIT options APIs"):
+                CPUJit(PROFILE_SOURCE, training_opt_level=1)
 
     def test_profiled_local_runtime_queries_preserve_mutation_and_lifetimes(self):
         source = """

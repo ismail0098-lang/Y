@@ -2070,6 +2070,7 @@ fn main() {
     } else if emit_llvm {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
+        emitter.set_aot_entry_status(true);
         if debug_info {
             enable_debug_info(
                 &mut emitter,
@@ -2257,6 +2258,7 @@ fn main() {
     } else {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
+        emitter.set_aot_entry_status(true);
         if debug_info {
             enable_debug_info(
                 &mut emitter,

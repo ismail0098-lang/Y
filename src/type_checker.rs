@@ -1412,12 +1412,10 @@ not know its length",
             }
             Item::Enum(e) => {
                 for variant in &e.variants {
-                    if let Some(fields) = &variant.fields {
-                        let params = fields.iter().map(|t| self.resolve_type(t)).collect();
+                        let params = variant.fields.iter().flatten().map(|t| self.resolve_type(t)).collect();
                         self.functions.insert(format!("{}_{}", e.name, variant.name), FunctionSignature {
                             params, result: SemanticType::Primitive(e.name.clone()),
                         });
-                    }
                 }
             }
             Item::Impl(imp) => {
@@ -2363,12 +2361,25 @@ range without checking it. Every proof using this range assumes it"
                     self.push_scope();
                     match &arm.pattern {
                         MatchPattern::Ident(name, _) => self.insert_var(name.clone(), scrutinee_ty.clone()),
-                        MatchPattern::EnumVariant { path, variant, bindings, .. } => {
+                        MatchPattern::EnumVariant { path, variant, bindings, span } => {
                             let namespace = if path.is_empty() {
                                 match &scrutinee_ty { SemanticType::Primitive(t) => t.as_str(), _ => "" }
                             } else { path.as_str() };
                             let signature = self.functions.get(&format!("{}_{}", namespace, variant)).cloned();
+                            let valid_owner = matches!(&scrutinee_ty, SemanticType::Primitive(t) if t == namespace);
+                            let valid_variant = self.enums.get(namespace).is_some_and(|e| e.variants.iter().any(|v| v.name == *variant));
+                            if !valid_owner || !valid_variant {
+                                self.errors.push(format!("Line {}: enum match pattern `{}::{}` does not name a variant of the scrutinee type.", span.line, namespace, variant));
+                            }
+                            let arity = signature.as_ref().map_or(0, |s| s.params.len());
+                            if bindings.len() != arity {
+                                self.errors.push(format!("Line {}: enum match pattern `{}::{}` expects {} binding(s), got {}.", span.line, namespace, variant, arity, bindings.len()));
+                            }
+                            let mut names = std::collections::HashSet::new();
                             for (i, binding) in bindings.iter().enumerate() {
+                                if !names.insert(binding) {
+                                    self.errors.push(format!("Line {}: duplicate enum match binding `{}`.", span.line, binding));
+                                }
                                 let ty = signature.as_ref().and_then(|s| s.params.get(i)).cloned().unwrap_or(SemanticType::Unknown);
                                 self.insert_var(binding.clone(), ty);
                             }
@@ -2683,6 +2694,27 @@ range without checking it. Every proof using this range assumes it"
                 SemanticType::Unknown
             }
             Expr::MemberAccess { base, member, .. } => {
+                if let Expr::MemberAccess { base: data, member: variant, .. } = &**base {
+                    if let Expr::MemberAccess { base: owner, member: data_name, .. } = &**data {
+                        if data_name == "data" {
+                            let owner_ty = self.check_expr(owner);
+                            let owner_ty = match &owner_ty {
+                                SemanticType::Reference { inner, .. } => &**inner,
+                                other => other,
+                            };
+                            if let SemanticType::Primitive(name) = owner_ty {
+                                if let Some(e) = self.enums.get(name).cloned() {
+                                    let field = e.variants.iter().find(|v| v.name == *variant)
+                                        .and_then(|v| v.fields.as_ref())
+                                        .and_then(|fields| member.strip_prefix('_').and_then(|s| s.parse::<usize>().ok()).and_then(|i| fields.get(i)));
+                                    if let Some(field) = field { return self.resolve_type(field); }
+                                    self.errors.push(format!("Line {}: enum payload `{}::{}` has no field `{}`.", span.line, name, variant, member));
+                                    return SemanticType::Unknown;
+                                }
+                            }
+                        }
+                    }
+                }
                 let base_ty = self.check_expr(base);
                 if member == "wait" {
                     SemanticType::Unknown
@@ -2697,6 +2729,9 @@ range without checking it. Every proof using this range assumes it"
                         other => other,
                     };
                     if let SemanticType::Primitive(name) = owner {
+                        if self.enums.contains_key(name) && member == "tag" {
+                            return SemanticType::Primitive("I32".into());
+                        }
                         if let Some(fields) = self.structs.get(name) {
                             if let Some(ty) = fields.get(member) { return ty.clone(); }
                         }
@@ -2994,7 +3029,10 @@ range without checking it. Every proof using this range assumes it"
             Expr::SelfLit(..) => self.lookup_var("self").cloned().unwrap_or(SemanticType::Unknown),
             Expr::Path { namespace, member, .. } => {
                 if let Some(e) = self.enums.get(namespace) {
-                    if e.variants.iter().any(|v| v.name == *member) {
+                    if let Some(variant) = e.variants.iter().find(|v| v.name == *member) {
+                        if variant.fields.as_ref().is_some_and(|fields| !fields.is_empty()) {
+                            self.errors.push(format!("Line {}: enum variant `{}::{}` requires constructor arguments.", span.line, namespace, member));
+                        }
                         return SemanticType::Primitive(namespace.clone());
                     }
                 }

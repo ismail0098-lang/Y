@@ -46,6 +46,14 @@ enum RuntimeObjectKind {
     Vector,
 }
 
+/// Payload fields occupy independent, aligned eight-byte slots. Their source
+/// and LLVM types remain explicit; a slot is storage, not an i64 value.
+#[derive(Clone)]
+struct EnumVariantLayout {
+    enum_name: String,
+    fields: Vec<(String, String)>,
+}
+
 /// Symbols this module `declare`s in its own prelude, so a call to one needs no
 /// extra declaration.
 const PRELUDE_DECLARED: &[&str] = &[
@@ -197,6 +205,9 @@ pub struct LlvmEmitter {
     tmp_counter: usize,
     label_counter: usize,
     current_impl_target: Option<String>,
+    /// CLI/AOT executables return an integer status even for a source void main.
+    /// Embedding/JIT callers retain the source function's original ABI.
+    aot_entry_status: bool,
     /// Track local variables and their LLVM IR types
     locals: BTreeMap<String, String>,
     /// Map local variables to their AST type
@@ -261,6 +272,7 @@ pub struct LlvmEmitter {
     enums: BTreeMap<String, bool>,
     /// Track enum variant tags: EnumName_VariantName -> tag integer
     enum_variants: BTreeMap<String, i32>,
+    enum_variant_layouts: BTreeMap<String, EnumVariantLayout>,
     /// Track whether the current block already has a terminator
     block_terminated: bool,
     /// Accumulators declared `@ZeroDrift`: representation and whether the
@@ -544,6 +556,7 @@ impl LlvmEmitter {
             tmp_counter: 0,
             label_counter: 0,
             current_impl_target: None,
+            aot_entry_status: false,
             locals: BTreeMap::new(),
             locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
@@ -568,6 +581,7 @@ impl LlvmEmitter {
             struct_field_attrs: HashMap::new(),
             enums: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
+            enum_variant_layouts: BTreeMap::new(),
             block_terminated: false,
             zero_drift: BTreeMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
@@ -606,6 +620,10 @@ impl LlvmEmitter {
     /// What the front end checked, proved or assumed, for the program to
     /// carry under `-g` (`ydb verify` reads it). A no-op without `-g`.
     /// Permit calls to runtime entrypoints the embedding host actually owns.
+    pub fn set_aot_entry_status(&mut self, enabled: bool) {
+        self.aot_entry_status = enabled;
+    }
+
     pub fn register_host_runtime_symbols(&mut self, names: &[&str]) {
         self.host_runtime_symbols
             .extend(names.iter().map(|name| (*name).to_string()));
@@ -1458,6 +1476,55 @@ impl LlvmEmitter {
 
     // ── Type Mapping ────────────────────────────────────────
 
+    fn enum_value_type(&self, layout: &EnumVariantLayout) -> String {
+        if self.enums.get(&layout.enum_name) == Some(&true) {
+            format!("%{}", layout.enum_name)
+        } else {
+            "i32".into()
+        }
+    }
+
+    fn enum_payload_field(&self, expr: &Expr) -> Result<Option<(Expr, EnumVariantLayout, usize)>, String> {
+        let Expr::MemberAccess { base, member, .. } = expr else { return Ok(None) };
+        let Expr::MemberAccess { base: data, member: variant, .. } = &**base else { return Ok(None) };
+        let Expr::MemberAccess { base: owner, member: data_name, .. } = &**data else { return Ok(None) };
+        if data_name != "data" { return Ok(None); }
+        let owner_ty = self.infer_struct_type(owner);
+        let enum_name = owner_ty.trim_start_matches('%');
+        if !self.enums.contains_key(enum_name) { return Ok(None); }
+        let key = format!("{}_{}", enum_name, variant);
+        let layout = self.enum_variant_layouts.get(&key).ok_or_else(|| format!(
+            "[LLVM host backend] enum `{enum_name}` has no variant `{variant}`"))?;
+        let index = member.strip_prefix('_').and_then(|s| s.parse::<usize>().ok())
+            .filter(|index| *index < layout.fields.len()).ok_or_else(|| format!(
+                "[LLVM host backend] enum payload `{enum_name}::{variant}` has no field `{member}`"))?;
+        Ok(Some(((**owner).clone(), layout.clone(), index)))
+    }
+
+    fn emit_enum_constructor(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        let layout = self.enum_variant_layouts.get(name)?.clone();
+        let tag = self.enum_variants[name];
+        let ty = self.enum_value_type(&layout);
+        if args.len() != layout.fields.len() {
+            self.emit_errors.push(format!("[LLVM host backend] enum constructor `{name}` expects {} argument(s), got {}",
+                layout.fields.len(), args.len()));
+            return Some(if ty == "i32" { "0".into() } else { "zeroinitializer".into() });
+        }
+        if ty == "i32" { return Some(tag.to_string()); }
+        let storage = self.fresh_tmp();
+        writeln!(&mut self.output, "  {storage} = alloca {ty}, align 8\n  store {ty} zeroinitializer, ptr {storage}, align 8").unwrap();
+        let tag_pointer = self.fresh_tmp();
+        writeln!(&mut self.output, "  {tag_pointer} = getelementptr {ty}, ptr {storage}, i32 0, i32 0\n  store i32 {tag}, ptr {tag_pointer}").unwrap();
+        for (index, (arg, (field_ty, _))) in args.iter().zip(&layout.fields).enumerate() {
+            let value = self.emit_expr(arg, None, Some(field_ty.clone()));
+            let source_ty = self.infer_type(arg);
+            let value = self.emit_coerce_from(&value, &source_ty, field_ty, self.expr_is_unsigned(arg));
+            let pointer = self.fresh_tmp();
+            writeln!(&mut self.output, "  {pointer} = getelementptr {ty}, ptr {storage}, i32 0, i32 1, i32 {index}\n  store {field_ty} {value}, ptr {pointer}, align 8").unwrap();
+        }
+        Some(self.emit_load(&storage, &ty))
+    }
+
     fn emit_type(&mut self, ty: &Type) -> String {
         let res: String = match ty {
             // `U64`/`u64` were absent from this table and fell to the
@@ -1831,6 +1898,42 @@ impl LlvmEmitter {
             }
         }
         for item in &prog.items {
+            if let Item::Enum(e) = item {
+                if !e.generic_params.is_empty() {
+                    self.emit_errors.push(format!("[LLVM host backend] generic enum `{}` needs monomorphization and has no host payload layout", e.name));
+                }
+                for variant in &e.variants {
+                    let mut fields = Vec::new();
+                    for field in variant.fields.iter().flatten() {
+                        let llvm_ty = match field {
+                            Type::Primitive(name, _) | Type::Ident(name, _) => {
+                                primitive_llvm_type(name).map(str::to_string).or_else(|| {
+                                    (self.enums.get(name) == Some(&false)).then(|| "i32".into())
+                                })
+                            }
+                            Type::Reference { .. } => Some("ptr".into()),
+                            _ => None,
+                        };
+                        if llvm_ty.is_none() {
+                            self.emit_errors.push(format!("[LLVM host backend] enum payload `{}::{}` type `{}` has no supported scalar layout; aggregate, generic and fixed-point payloads are unsupported",
+                                e.name, variant.name, ast_type_to_string(field)));
+                        }
+                        fields.push((llvm_ty.unwrap_or_else(|| "i32".into()), ast_type_to_string(field)));
+                    }
+                    if fields.len() > 8 {
+                        self.emit_errors.push(format!("[LLVM host backend] enum payload `{}::{}` has {} fields; this backend supports at most 8 scalar payload fields",
+                            e.name, variant.name, fields.len()));
+                    }
+                    let key = format!("{}_{}", e.name, variant.name);
+                    if self.enum_variant_layouts.insert(key.clone(), EnumVariantLayout {
+                        enum_name: e.name.clone(), fields,
+                    }).is_some() {
+                        self.emit_errors.push(format!("[LLVM host backend] enum constructor name `{key}` is ambiguous"));
+                    }
+                }
+            }
+        }
+        for item in &prog.items {
             match item {
                 Item::Struct(s) => {
                     let mut fields = Vec::new();
@@ -1859,7 +1962,11 @@ impl LlvmEmitter {
                         .ret_ty
                         .as_ref()
                         .map(|t| self.emit_type(t))
-                        .unwrap_or_else(|| "void".into());
+                        .unwrap_or_else(|| if self.aot_entry_status && f.name == "main" {
+                            "i32".into()
+                        } else {
+                            "void".into()
+                        });
                     let param_tys: Vec<String> =
                         f.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions.insert(f.name.clone(), (param_tys, ret_ty));
@@ -3397,6 +3504,7 @@ impl LlvmEmitter {
 
         let ret_type = match &f.ret_ty {
             Some(ty) => self.emit_type(ty),
+            None if self.aot_entry_status && f.name == "main" && self.current_impl_target.is_none() => "i32".into(),
             None => "void".into(),
         };
         // An array evaluates to its storage's address, and a local's storage
@@ -4821,7 +4929,14 @@ representation, and whether that is lossless depends on the expression.",
                     let coerced = self.emit_coerce_from(&val, &val_ty, ret_type, src_unsigned);
                     writeln!(&mut self.output, "  ret {} {}", ret_type, coerced).unwrap();
                 } else {
-                    self.wln("  ret void");
+                    if ret_type == "void" {
+                        self.wln("  ret void");
+                    } else if self.aot_entry_status && ret_type == "i32" {
+                        self.wln("  ret i32 0");
+                    } else {
+                        self.emit_errors.push("[LLVM host backend] a value-returning function requires a return value".into());
+                        writeln!(&mut self.output, "  ret {} zeroinitializer", ret_type).unwrap();
+                    }
                 }
                 self.block_terminated = true;
             }
@@ -5142,6 +5257,13 @@ representation, and whether that is lossless depends on the expression.",
             } => {
                 let scrut_val = self.emit_expr(scrutinee, None, None);
                 let scrut_ty = self.infer_type(scrutinee);
+                let scrut_ast = self.infer_ast_type(scrutinee);
+                let enum_name = if scrut_ty.starts_with('%') { scrut_ty.trim_start_matches('%') } else { scrut_ast.as_str() };
+                let scrut_tag = if self.enums.get(enum_name) == Some(&true) {
+                    let tag = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {tag} = extractvalue {scrut_ty} {scrut_val}, 0").unwrap();
+                    tag
+                } else { scrut_val.clone() };
                 let merge_lbl = self.fresh_label("match.end");
 
                 // Emit as cascading if-else (LLVM has switch but only for integer constants)
@@ -5157,6 +5279,7 @@ representation, and whether that is lossless depends on the expression.",
                 }
 
                 for (i, arm) in arms.iter().enumerate() {
+                    let mut payload_layout = None;
                     let (test_lbl, body_lbl) = &arm_labels[i];
                     let next_test = if i + 1 < arms.len() {
                         arm_labels[i + 1].0.clone()
@@ -5170,6 +5293,10 @@ representation, and whether that is lossless depends on the expression.",
                             writeln!(&mut self.output, "  br label %{}", body_lbl).unwrap();
                         }
                         MatchPattern::Literal(lit) => {
+                            if self.enums.contains_key(enum_name) {
+                                self.emit_errors.push("[LLVM host backend] enum matches require variant patterns, a binding or `_`".into());
+                                writeln!(&mut self.output, "  br label %{next_test}").unwrap();
+                            } else {
                             let lit_val = self.emit_expr(lit, None, None);
                             let cmp = self.fresh_tmp();
                             let cmp_instr = if scrut_ty == "float" || scrut_ty == "double" {
@@ -5189,52 +5316,61 @@ representation, and whether that is lossless depends on the expression.",
                                 cmp, body_lbl, next_test
                             )
                             .unwrap();
+                            }
                         }
-                        MatchPattern::Ident(name, _) => {
-                            // Bind variable then always match
-                            let cmp = self.fresh_tmp();
-                            writeln!(
-                                &mut self.output,
-                                "  {} = icmp eq {} {}, {}",
-                                cmp, scrut_ty, scrut_val, name
-                            )
-                            .unwrap();
-                            writeln!(
-                                &mut self.output,
-                                "  br i1 {}, label %{}, label %{}",
-                                cmp, body_lbl, next_test
-                            )
-                            .unwrap();
+                        MatchPattern::Ident(_, _) => {
+                            writeln!(&mut self.output, "  br label %{body_lbl}").unwrap();
                         }
-                        MatchPattern::EnumVariant { path, variant, .. } => {
-                            // Compare tag value (simple enum = i32)
-                            // Lookup variant index
-                            let tag_name = if path.is_empty() {
-                                variant.clone()
+                        MatchPattern::EnumVariant { path, variant, bindings, .. } => {
+                            let namespace = if path.is_empty() { enum_name } else { path.as_str() };
+                            let key = format!("{namespace}_{variant}");
+                            if let Some(layout) = self.enum_variant_layouts.get(&key).cloned().filter(|layout|
+                                layout.enum_name == enum_name && bindings.len() == layout.fields.len()) {
+                                let tag = self.enum_variants[&key];
+                                let cmp = self.fresh_tmp();
+                                writeln!(&mut self.output, "  {cmp} = icmp eq i32 {scrut_tag}, {tag}\n  br i1 {cmp}, label %{body_lbl}, label %{next_test}").unwrap();
+                                payload_layout = Some(layout);
                             } else {
-                                format!("{}_{}", path, variant)
-                            };
-                            let cmp = self.fresh_tmp();
-                            writeln!(
-                                &mut self.output,
-                                "  {} = icmp eq {} {}, {} ; enum {}",
-                                cmp, scrut_ty, scrut_val, tag_name, variant
-                            )
-                            .unwrap();
-                            writeln!(
-                                &mut self.output,
-                                "  br i1 {}, label %{}, label %{}",
-                                cmp, body_lbl, next_test
-                            )
-                            .unwrap();
+                                self.emit_errors.push(format!("[LLVM host backend] invalid enum match pattern `{namespace}::{variant}` for `{enum_name}` or incorrect binding count"));
+                                writeln!(&mut self.output, "  br label %{next_test}").unwrap();
+                            }
                         }
                     }
 
                     writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                     self.block_terminated = false;
+                    let saved_locals = self.locals.clone();
+                    let saved_ast_types = self.locals_ast_type.clone();
+                    let saved_pointees = self.pointee_types.clone();
+                    match &arm.pattern {
+                        MatchPattern::Ident(name, _) => {
+                            self.locals.insert(name.clone(), scrut_ty.clone());
+                            self.locals_ast_type.insert(name.clone(), scrut_ast.clone());
+                            if scrut_ty.starts_with('%') { self.pointee_types.insert(name.clone(), scrut_ty.clone()); }
+                            writeln!(&mut self.output, "  %{name} = alloca {scrut_ty}\n  store {scrut_ty} {scrut_val}, ptr %{name}").unwrap();
+                        }
+                        MatchPattern::EnumVariant { bindings, .. } => {
+                            if let Some(layout) = payload_layout {
+                                let storage = self.fresh_tmp();
+                                writeln!(&mut self.output, "  {storage} = alloca {scrut_ty}, align 8\n  store {scrut_ty} {scrut_val}, ptr {storage}, align 8").unwrap();
+                                for (index, (binding, (field_ty, ast_ty))) in bindings.iter().zip(&layout.fields).enumerate() {
+                                    let pointer = self.fresh_tmp();
+                                    writeln!(&mut self.output, "  {pointer} = getelementptr {scrut_ty}, ptr {storage}, i32 0, i32 1, i32 {index}").unwrap();
+                                    let value = self.emit_load(&pointer, field_ty);
+                                    self.locals.insert(binding.clone(), field_ty.clone());
+                                    self.locals_ast_type.insert(binding.clone(), ast_ty.clone());
+                                    writeln!(&mut self.output, "  %{binding} = alloca {field_ty}\n  store {field_ty} {value}, ptr %{binding}").unwrap();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     let outer = self.dbg_enter(&arm.span);
                     self.emit_expr(&arm.body, None, None);
                     self.dbg_leave(outer);
+                    self.locals = saved_locals;
+                    self.locals_ast_type = saved_ast_types;
+                    self.pointee_types = saved_pointees;
                     if !self.block_terminated {
                         writeln!(&mut self.output, "  br label %{}", merge_lbl).unwrap();
                     }
@@ -5274,6 +5410,25 @@ representation, and whether that is lossless depends on the expression.",
 
     /// Emit an lvalue (address) for assignment targets — returns ptr
     fn emit_lvalue(&mut self, expr: &Expr) -> String {
+        match self.enum_payload_field(expr) {
+            Ok(Some((owner, layout, index))) => {
+                let owner_ast = self.infer_ast_type(&owner);
+                let pointer = if owner_ast.starts_with('&') {
+                    self.emit_expr(&owner, None, None)
+                } else {
+                    self.emit_lvalue(&owner)
+                };
+                let result = self.fresh_tmp();
+                let ty = self.enum_value_type(&layout);
+                writeln!(&mut self.output, "  {result} = getelementptr {ty}, ptr {pointer}, i32 0, i32 1, i32 {index}").unwrap();
+                return result;
+            }
+            Err(message) => {
+                self.emit_errors.push(message);
+                return "null".into();
+            }
+            Ok(None) => {}
+        }
         match expr {
             Expr::Ident(name, _) => format!("%{}", name),
             Expr::MemberAccess { base, member, .. } => {
@@ -5329,15 +5484,8 @@ representation, and whether that is lossless depends on the expression.",
                 if base_ty == "[8 x i64]" {
                     writeln!(&mut self.output, "  ; lvalue payload overlay .{}", member).unwrap();
                     if member.starts_with('_') {
-                        // ._N -> index N into the [8 x i64] payload
-                        let idx: usize = member[1..].parse().unwrap_or(0);
-                        writeln!(
-                            &mut self.output,
-                            "  {} = getelementptr [8 x i64], ptr {}, i32 0, i32 {}",
-                            tmp, base_val, idx
-                        )
-                        .unwrap();
-                        return tmp;
+                        self.emit_errors.push("[LLVM host backend] enum payload fields require a declared variant overlay (`value.data.Variant._N`)".into());
+                        return "null".into();
                     } else {
                         // .VariantName -> pass-through (overlay on the data payload)
                         return base_val;
@@ -5790,6 +5938,9 @@ representation, and whether that is lossless depends on the expression.",
                     return v;
                 }
 
+                if let Some(value) = self.emit_enum_constructor(&func_name, args) {
+                    return value;
+                }
                 self.called_functions.push(func_name.clone());
 
                 if (func_name.starts_with("String_")
@@ -6116,51 +6267,6 @@ representation, and whether that is lossless depends on the expression.",
                     _ => {}
                 }
 
-                if let Some(&tag) = self.enum_variants.get(&func_name) {
-                    let enum_name = func_name.split('_').next().unwrap();
-                    let struct_name = format!("%{}", enum_name);
-
-                    let alloc_tmp = self.fresh_tmp();
-                    writeln!(&mut self.output, "  {} = alloca {}", alloc_tmp, struct_name).unwrap();
-
-                    let tag_tmp = self.fresh_tmp();
-                    writeln!(
-                        &mut self.output,
-                        "  {} = getelementptr {}, ptr {}, i32 0, i32 0",
-                        tag_tmp, struct_name, alloc_tmp
-                    )
-                    .unwrap();
-                    writeln!(&mut self.output, "  store i32 {}, ptr {}", tag, tag_tmp).unwrap();
-
-                    let data_tmp = self.fresh_tmp();
-                    writeln!(
-                        &mut self.output,
-                        "  {} = getelementptr {}, ptr {}, i32 0, i32 1",
-                        data_tmp, struct_name, alloc_tmp
-                    )
-                    .unwrap();
-
-                    if !args.is_empty() {
-                        let val_val = self.emit_expr(&args[0], None, None);
-                        let val_ty = self.infer_type(&args[0]);
-                        writeln!(
-                            &mut self.output,
-                            "  store {} {}, ptr {}",
-                            val_ty, val_val, data_tmp
-                        )
-                        .unwrap();
-                    }
-
-                    let res_tmp = self.fresh_tmp();
-                    writeln!(
-                        &mut self.output,
-                        "  {} = load {}, ptr {}",
-                        res_tmp, struct_name, alloc_tmp
-                    )
-                    .unwrap();
-                    return res_tmp;
-                }
-
                 let ret_ty = if self.fn_llvm_params.contains_key(&func_name) {
                     self.functions
                         .get(&func_name)
@@ -6223,16 +6329,7 @@ representation, and whether that is lossless depends on the expression.",
                 namespace, member, ..
             } => {
                 let full_name = format!("{}_{}", namespace, member);
-                if let Some(&tag) = self.enum_variants.get(&full_name) {
-                    if let Some(&has_data) = self.enums.get(namespace) {
-                        if has_data {
-                            return format!("{{ i32 {}, [8 x i64] zeroinitializer }}", tag);
-                        }
-                    }
-                    tag.to_string()
-                } else {
-                    full_name
-                }
+                self.emit_enum_constructor(&full_name, &[]).unwrap_or(full_name)
             }
             Expr::MemberAccess { .. } => {
                 let lval = self.emit_lvalue(expr);
@@ -6842,6 +6939,9 @@ representation, and whether that is lossless depends on the expression.",
                 .into()
             }
             Expr::MemberAccess { base, member, .. } => {
+                if let Ok(Some((_, layout, index))) = self.enum_payload_field(expr) {
+                    return layout.fields[index].1.clone();
+                }
                 // Approximate base ty
                 let base_ty = if let Expr::UnaryOp {
                     op: UnaryOp::Deref,
@@ -6870,6 +6970,9 @@ representation, and whether that is lossless depends on the expression.",
             }
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
+                if let Some(layout) = self.enum_variant_layouts.get(&func_name) {
+                    return layout.enum_name.clone();
+                }
                 if let Some(ret_ast_ty) = self.fn_ast_returns.get(&func_name) {
                     ret_ast_ty.clone()
                 } else if let Some((_, ret_ast_ty)) = self.functions.get(&func_name) {
@@ -6901,6 +7004,7 @@ representation, and whether that is lossless depends on the expression.",
             Expr::BoolLit(_, _) => "bool".into(),
             Expr::CharLit(_, _) => "char".into(),
             Expr::StructLit { name, .. } => name.clone(),
+            Expr::Path { namespace, .. } if self.enums.contains_key(namespace) => namespace.clone(),
             _ => "Unknown".into(),
         }
     }
@@ -6963,9 +7067,8 @@ representation, and whether that is lossless depends on the expression.",
                         .map(|(_, ret)| ret.clone())
                         .unwrap_or_else(|| "i32".into());
                 }
-                if self.enum_variants.contains_key(&func_name) {
-                    let enum_name = func_name.split('_').next().unwrap();
-                    return format!("%{}", enum_name);
+                if let Some(layout) = self.enum_variant_layouts.get(&func_name) {
+                    return self.enum_value_type(layout);
                 }
                 // A block-pointer load yields the buffer's element type. Falling
                 // through to the `i32` default here is what put a `sitofp` on
@@ -7037,6 +7140,9 @@ representation, and whether that is lossless depends on the expression.",
                 _ => Self::common_operand_type(&self.infer_type(left), &self.infer_type(right)),
             },
             Expr::MemberAccess { base, member, .. } => {
+                if let Ok(Some((_, layout, index))) = self.enum_payload_field(expr) {
+                    return layout.fields[index].0.clone();
+                }
                 let base_ty = if let Expr::UnaryOp {
                     op: UnaryOp::Deref,
                     operand,
@@ -7132,14 +7238,14 @@ representation, and whether that is lossless depends on the expression.",
         match ty {
             Type::Reference { inner, .. } => {
                 if let Type::Ident(name, _) = &**inner {
-                    if self.structs.contains_key(name.as_str()) {
+                    if self.structs.contains_key(name.as_str()) || self.enums.contains_key(name.as_str()) {
                         return Some(format!("%{}", name));
                     }
                 }
                 None
             }
             Type::Ident(name, _) => {
-                if self.structs.contains_key(name.as_str()) {
+                if self.structs.contains_key(name.as_str()) || self.enums.contains_key(name.as_str()) {
                     return Some(format!("%{}", name));
                 }
                 None
@@ -7244,14 +7350,14 @@ representation, and whether that is lossless depends on the expression.",
             Expr::Ident(name, _) => {
                 if let Some(t) = self.locals_ast_type.get(name) {
                     let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
-                    if self.ast_structs.contains_key(cleaned) {
+                    if self.ast_structs.contains_key(cleaned) || self.enums.contains_key(cleaned) {
                         return format!("%{}", cleaned);
                     }
                 }
                 self.pointee_types.get(name).cloned().unwrap_or_else(|| {
                     if let Some(t) = self.locals_ast_type.get(name) {
                         let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
-                        if self.ast_structs.contains_key(cleaned) {
+                        if self.ast_structs.contains_key(cleaned) || self.enums.contains_key(cleaned) {
                             format!("%{}", cleaned)
                         } else {
                             "i32".into()
@@ -7309,9 +7415,8 @@ representation, and whether that is lossless depends on the expression.",
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
                 // Enum constructor calls return the enum struct type
-                if self.enum_variants.contains_key(&func_name) {
-                    let enum_name = func_name.split('_').next().unwrap();
-                    return format!("%{}", enum_name);
+                if let Some(layout) = self.enum_variant_layouts.get(&func_name) {
+                    return self.enum_value_type(layout);
                 }
                 self.functions
                     .get(&func_name)

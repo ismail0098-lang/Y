@@ -60,8 +60,9 @@ stage with a level from 0 through 3, for example
 `JitOptions { opt_level: 3, codegen_opt_level: Some(2), ..Default::default() }`.
 The IR optimization pipeline and its independent analysis target still use
 `opt_level`; this override changes the ORC target builder only. Invalid levels
-are rejected. Compilation remains eager, and existing C/Python compile
-entrypoints retain inheritance without exposing the separate override.
+are rejected. Compilation remains eager. Python's `codegen_opt_level=` and
+the versioned C options API expose the same override; existing C entrypoints
+and default Python calls retain inheritance.
 
 `JitOptions.training_opt_level: Option<u8>` defaults to `None`, inheriting
 `opt_level` for instrumented training IR. A Rust caller can set `Some(1)` to
@@ -76,9 +77,10 @@ keeps final IR/native O3 and per-pass verification enabled while reducing the
 temporary training IR tier. Profiles remain tied to original lowered IR and
 site identities before optimization. Recompilation validates those identities;
 changing a lowering option may invalidate a profile. Atomic instrumentation and
-eager compilation are preserved. Existing C/Python entrypoints retain inherited
-training policy. Training and recompilation remain explicit and eager; both
-costs are charged to preparation.
+eager compilation are preserved. Python's `training_opt_level=` and the
+versioned C options API expose this policy. Existing C entrypoints and default
+Python calls retain inheritance. Training and recompilation remain explicit
+and eager; both costs are charged to preparation.
 
 `JitOptions.verify_each_pass` defaults to `true` and enables LLVM verification
 after individual optimization passes. Rust callers can explicitly select
@@ -346,7 +348,7 @@ session:
 
 ```python
 source = "fn choose(x: I64) -> I64 { if x < 0 { return -1; } return x; }"
-with CPUJit(source, instrument=True) as training:
+with CPUJit(source, instrument=True, training_opt_level=1) as training:
     for value in range(1000):
         training("choose", value)
     print(training.branch_profile())  # fingerprint and observed edge counts
@@ -358,8 +360,26 @@ Recompilation preserves the training session and its callables. Each session
 owns its executable memory and can be closed independently. Training calls have
 their ordinary program side effects; profile collection is an explicit choice.
 
+`training_opt_level=` selects instrumented IR only; `codegen_opt_level=` selects
+native code generation for every mode. Both accept 0..3 or `None` to inherit
+the base `opt_level`. The defaults remain inherited, with per-pass verification
+enabled. Choosing O1 training leaves final IR/native O3 when other settings are
+default. These controls expose existing policies; their availability does not
+establish a performance improvement for an application's workload.
+
+`recompile_profiled()` preserves all requested tiers. Keyword overrides select
+final settings independently, for example
+`training.recompile_profiled(opt_level=3, codegen_opt_level=2)`.
+Passing `codegen_opt_level=None` or `training_opt_level=None` resets that
+override to inheritance; omitting it preserves the training session's policy.
+`opt_level=None` preserves the base level. Training IR policy has no effect on
+final compilation. Overrides do not modify the original session, and invalid
+levels are refused before compilation. Libraries predating the options API can
+still use inherited settings; requesting an override requires a rebuilt library.
+
 ## Embed from C
 
+Include [`c_src/y_cpu_jit.h`](../c_src/y_cpu_jit.h) for the complete interface.
 The existing `liby.so` exports:
 
 ```c
@@ -386,6 +406,38 @@ error output is supplied. Release errors with `y_free_string`, and release the
 JIT once with `y_cpu_jit_free`. Keep handle operations on their creating thread.
 Native function addresses expire when the JIT is freed. The FFI contains Rust
 compiler panics instead of unwinding through C.
+
+The additive versioned options API exposes the training and codegen tiers:
+
+```c
+YCpuJitOptions options;
+char *error = NULL;
+if (y_cpu_jit_options_init(&options, sizeof(options), &error) != 0) {
+    /* Handle error, then y_free_string(error). */
+    return;
+}
+options.training_opt_level = 1;  /* Instrumented IR O1; final IR/native O3. */
+void *training = y_cpu_jit_compile_instrumented_with_options(source, &options, &error);
+/* Check training, explicitly call its functions, and collect observations. */
+void *optimized = y_cpu_jit_compile_profiled_with_options(source, &options, training, &error);
+/* Check optimized; close each independently with y_cpu_jit_free. */
+```
+
+`YCpuJitOptions` contains `abi_version`, `struct_size`, `opt_level` (u32), and
+`training_opt_level`/`codegen_opt_level` (i32). Initialization sets ABI version 1,
+the exact size, base O3, and both optional tiers to
+`Y_CPU_JIT_OPT_LEVEL_INHERIT` (-1). Base levels accept 0..3; optional tiers accept
+-1 or 0..3. The compiler checks version and exact size before reading remaining
+fields, and validates every tier in every mode, including inactive training
+overrides. Initialization failure preserves the destination storage.
+
+`y_cpu_jit_compile_with_options`,
+`y_cpu_jit_compile_instrumented_with_options`, and
+`y_cpu_jit_compile_profiled_with_options` accept a null options pointer for
+unchanged defaults. Options are copied during the call. C callers supply final
+options explicitly; the library does not recover them from the training handle.
+All legacy compile entrypoints retain their original signatures and inherited
+tiers. Verification, atomic counter semantics and eager compilation are unchanged.
 
 `y_cpu_jit_signature` returns JSON freed with `y_free_string`.
 `y_cpu_jit_compile_timings` returns the phase measurements described above as

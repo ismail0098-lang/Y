@@ -5,6 +5,71 @@ use std::fmt::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
+pub const CPU_JIT_OPTIONS_ABI_VERSION: u32 = 1;
+pub const CPU_JIT_OPT_LEVEL_INHERIT: i32 = -1;
+
+/// Versioned C compilation options. See `c_src/y_cpu_jit.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct YCpuJitOptions {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub opt_level: u32,
+    /// -1 inherits opt_level; otherwise an explicit level from 0 through 3.
+    pub training_opt_level: i32,
+    /// -1 inherits opt_level; otherwise an explicit level from 0 through 3.
+    pub codegen_opt_level: i32,
+}
+
+impl Default for YCpuJitOptions {
+    fn default() -> Self {
+        Self {
+            abi_version: CPU_JIT_OPTIONS_ABI_VERSION,
+            struct_size: std::mem::size_of::<Self>() as u32,
+            opt_level: JitOptions::default().opt_level as u32,
+            training_opt_level: CPU_JIT_OPT_LEVEL_INHERIT,
+            codegen_opt_level: CPU_JIT_OPT_LEVEL_INHERIT,
+        }
+    }
+}
+
+fn decode_level(level: u32) -> Result<u8, String> {
+    if level > 3 {
+        Err("opt_level must be 0, 1, 2, or 3".into())
+    } else {
+        Ok(level as u8)
+    }
+}
+
+fn decode_override(level: i32, name: &str) -> Result<Option<u8>, String> {
+    match level {
+        CPU_JIT_OPT_LEVEL_INHERIT => Ok(None),
+        0..=3 => Ok(Some(level as u8)),
+        _ => Err(format!("{name} must be -1 (inherit), 0, 1, 2, or 3")),
+    }
+}
+
+unsafe fn decode_options(options: *const YCpuJitOptions) -> Result<JitOptions, String> {
+    if options.is_null() {
+        return Ok(JitOptions::default());
+    }
+    // Only read the common prefix until the version and exact size are checked.
+    let header = options.cast::<u32>();
+    if *header != CPU_JIT_OPTIONS_ABI_VERSION {
+        return Err("unsupported CPU JIT options ABI version".into());
+    }
+    if *header.add(1) != std::mem::size_of::<YCpuJitOptions>() as u32 {
+        return Err("CPU JIT options size does not match this library".into());
+    }
+    let options = &*options;
+    Ok(JitOptions {
+        opt_level: decode_level(options.opt_level)?,
+        training_opt_level: decode_override(options.training_opt_level, "training_opt_level")?,
+        codegen_opt_level: decode_override(options.codegen_opt_level, "codegen_opt_level")?,
+        ..JitOptions::default()
+    })
+}
+
 unsafe fn set_error(out: *mut *mut c_char, message: &str) {
     if !out.is_null() {
         // Returned errors use the existing y_free_string allocator contract.
@@ -27,7 +92,17 @@ pub unsafe extern "C" fn y_cpu_jit_compile(
     opt_level: u32,
     error_out: *mut *mut c_char,
 ) -> *mut c_void {
-    compile(source, opt_level, error_out, CompileMode::Normal)
+    compile(
+        source,
+        OptionsInput::Legacy(opt_level),
+        error_out,
+        CompileMode::Normal,
+    )
+}
+
+enum OptionsInput {
+    Legacy(u32),
+    Versioned(*const YCpuJitOptions),
 }
 
 enum CompileMode {
@@ -38,7 +113,7 @@ enum CompileMode {
 
 unsafe fn compile(
     source: *const c_char,
-    opt_level: u32,
+    options: OptionsInput,
     error_out: *mut *mut c_char,
     mode: CompileMode,
 ) -> *mut c_void {
@@ -49,16 +124,16 @@ unsafe fn compile(
         if source.is_null() {
             return Err("CPU JIT source pointer is null".to_string());
         }
-        if opt_level > 3 {
-            return Err("opt_level must be 0, 1, 2, or 3".to_string());
-        }
+        let options = match options {
+            OptionsInput::Legacy(level) => JitOptions {
+                opt_level: decode_level(level)?,
+                ..JitOptions::default()
+            },
+            OptionsInput::Versioned(options) => decode_options(options)?,
+        };
         let source = CStr::from_ptr(source)
             .to_str()
             .map_err(|_| "CPU JIT source is not UTF-8".to_string())?;
-        let options = JitOptions {
-            opt_level: opt_level as u8,
-            ..JitOptions::default()
-        };
         match mode {
             CompileMode::Normal => CpuJit::compile_with_options(source, options),
             CompileMode::Instrument => CpuJit::compile_instrumented(source, options),
@@ -98,7 +173,12 @@ pub unsafe extern "C" fn y_cpu_jit_compile_instrumented(
     opt_level: u32,
     error_out: *mut *mut c_char,
 ) -> *mut c_void {
-    compile(source, opt_level, error_out, CompileMode::Instrument)
+    compile(
+        source,
+        OptionsInput::Legacy(opt_level),
+        error_out,
+        CompileMode::Instrument,
+    )
 }
 
 /// Snapshot a training session and compile a new, independently owned session.
@@ -117,7 +197,105 @@ pub unsafe extern "C" fn y_cpu_jit_compile_profiled(
 ) -> *mut c_void {
     compile(
         source,
-        opt_level,
+        OptionsInput::Legacy(opt_level),
+        error_out,
+        CompileMode::Profile(training_handle),
+    )
+}
+
+/// Initialize options with inherited training/codegen policy and final O3.
+/// On error, the options storage is unchanged.
+///
+/// # Safety
+/// `options` must be writable for `options_size` bytes; `error_out`, if nonnull,
+/// must be writable and disjoint from the options storage.
+#[no_mangle]
+pub unsafe extern "C" fn y_cpu_jit_options_init(
+    options: *mut YCpuJitOptions,
+    options_size: u32,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    if !error_out.is_null() {
+        *error_out = ptr::null_mut();
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if options.is_null() {
+            return Err("CPU JIT options pointer is null".to_string());
+        }
+        if options_size != std::mem::size_of::<YCpuJitOptions>() as u32 {
+            return Err("CPU JIT options size does not match this library".to_string());
+        }
+        ptr::write(options, YCpuJitOptions::default());
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            set_error(error_out, &error);
+            -1
+        }
+        Err(_) => {
+            set_error(error_out, "CPU JIT options initialization panicked");
+            -1
+        }
+    }
+}
+
+/// Compile with versioned options. Null options select unchanged defaults.
+///
+/// # Safety
+/// Same source/error/thread requirements as `y_cpu_jit_compile`. Nonnull
+/// options must have a readable two-u32 header, and the full declared object
+/// when its ABI version and size match. Compilation copies the options.
+#[no_mangle]
+pub unsafe extern "C" fn y_cpu_jit_compile_with_options(
+    source: *const c_char,
+    options: *const YCpuJitOptions,
+    error_out: *mut *mut c_char,
+) -> *mut c_void {
+    compile(
+        source,
+        OptionsInput::Versioned(options),
+        error_out,
+        CompileMode::Normal,
+    )
+}
+
+/// Compile atomic branch instrumentation with versioned options.
+///
+/// # Safety
+/// Same requirements as `y_cpu_jit_compile_with_options`.
+#[no_mangle]
+pub unsafe extern "C" fn y_cpu_jit_compile_instrumented_with_options(
+    source: *const c_char,
+    options: *const YCpuJitOptions,
+    error_out: *mut *mut c_char,
+) -> *mut c_void {
+    compile(
+        source,
+        OptionsInput::Versioned(options),
+        error_out,
+        CompileMode::Instrument,
+    )
+}
+
+/// Snapshot training counters and compile an independent session with options.
+/// Training IR policy is ignored for this final compilation. The caller selects
+/// final options explicitly; they are not recovered from the training handle.
+///
+/// # Safety
+/// Same requirements as `y_cpu_jit_compile_with_options`; `training_handle`
+/// must be a live instrumented handle on its creating thread.
+#[no_mangle]
+pub unsafe extern "C" fn y_cpu_jit_compile_profiled_with_options(
+    source: *const c_char,
+    options: *const YCpuJitOptions,
+    training_handle: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_void {
+    compile(
+        source,
+        OptionsInput::Versioned(options),
         error_out,
         CompileMode::Profile(training_handle),
     )
@@ -494,6 +672,242 @@ mod tests {
         let text = CStr::from_ptr(value).to_string_lossy().into_owned();
         y_free_string(value);
         text
+    }
+
+    #[test]
+    fn options_ffi_initializes_defaults_and_checks_header_before_fields() {
+        unsafe {
+            let mut error = ptr::null_mut();
+            let mut options = YCpuJitOptions {
+                abi_version: 91,
+                struct_size: 0,
+                opt_level: 99,
+                training_opt_level: 99,
+                codegen_opt_level: 99,
+            };
+            let before = options;
+            assert_eq!(y_cpu_jit_options_init(&mut options, 8, &mut error), -1);
+            assert!(owned_string(error).contains("size"));
+            assert_eq!(options, before);
+            assert_eq!(y_cpu_jit_options_init(ptr::null_mut(), 20, &mut error), -1);
+            assert!(owned_string(error).contains("pointer is null"));
+            error = std::ptr::dangling_mut::<c_char>();
+            assert_eq!(
+                y_cpu_jit_options_init(
+                    &mut options,
+                    std::mem::size_of::<YCpuJitOptions>() as u32,
+                    &mut error,
+                ),
+                0
+            );
+            assert!(error.is_null());
+            assert_eq!(options, YCpuJitOptions::default());
+            assert_eq!(std::mem::size_of::<YCpuJitOptions>(), 20);
+            assert_eq!(std::mem::offset_of!(YCpuJitOptions, opt_level), 8);
+            assert_eq!(std::mem::offset_of!(YCpuJitOptions, training_opt_level), 12);
+            assert_eq!(std::mem::offset_of!(YCpuJitOptions, codegen_opt_level), 16);
+            for (prefix, expected) in [([99_u32, 8], "version"), ([1, 8], "size")] {
+                assert!(y_cpu_jit_compile_with_options(
+                    c"fn broken(".as_ptr(),
+                    prefix.as_ptr().cast(),
+                    &mut error,
+                )
+                .is_null());
+                assert!(owned_string(error).contains(expected));
+            }
+            let decoded = decode_options(ptr::null()).unwrap();
+            assert_eq!(decoded.opt_level, 3);
+            assert_eq!(decoded.training_opt_level, None);
+            assert_eq!(decoded.codegen_opt_level, None);
+            assert!(decoded.verify_each_pass);
+        }
+    }
+
+    #[test]
+    fn options_ffi_rejects_invalid_levels_in_every_compilation_mode() {
+        unsafe {
+            let mut cases = Vec::new();
+            for level in [4, 256, u32::MAX] {
+                cases.push((
+                    YCpuJitOptions {
+                        opt_level: level,
+                        ..Default::default()
+                    },
+                    "opt_level",
+                ));
+            }
+            for level in [-2, 4, 256, i32::MIN, i32::MAX] {
+                cases.push((
+                    YCpuJitOptions {
+                        training_opt_level: level,
+                        ..Default::default()
+                    },
+                    "training_opt_level",
+                ));
+                cases.push((
+                    YCpuJitOptions {
+                        codegen_opt_level: level,
+                        ..Default::default()
+                    },
+                    "codegen_opt_level",
+                ));
+            }
+            for (options, expected) in cases {
+                for mode in 0..3 {
+                    let mut error = ptr::null_mut();
+                    let source = c"fn broken(".as_ptr();
+                    let handle = match mode {
+                        0 => y_cpu_jit_compile_with_options(source, &options, &mut error),
+                        1 => y_cpu_jit_compile_instrumented_with_options(
+                            source, &options, &mut error,
+                        ),
+                        _ => y_cpu_jit_compile_profiled_with_options(
+                            source,
+                            &options,
+                            ptr::null_mut(),
+                            &mut error,
+                        ),
+                    };
+                    assert!(handle.is_null());
+                    assert!(
+                        owned_string(error).contains(expected),
+                        "mode {mode}: {expected}"
+                    );
+                }
+            }
+            let options = YCpuJitOptions {
+                training_opt_level: 4,
+                ..Default::default()
+            };
+            assert!(y_cpu_jit_compile_with_options(
+                c"fn value() {}".as_ptr(),
+                &options,
+                ptr::null_mut()
+            )
+            .is_null());
+        }
+    }
+
+    #[test]
+    fn options_ffi_matches_rust_training_and_final_ir_and_native_outputs() {
+        const SOURCE: &CStr = c"fn choose(x: I64) -> I64 { let mut y: I64 = x + 2; if x < 0 { y = x - 1; } return y; }";
+        unsafe {
+            let mut error = ptr::null_mut();
+            let inherited =
+                y_cpu_jit_compile_with_options(SOURCE.as_ptr(), ptr::null(), &mut error);
+            assert!(!inherited.is_null());
+            assert!(error.is_null());
+            let ordinary_reference = CpuJit::compile(SOURCE.to_str().unwrap()).unwrap();
+            assert_eq!(
+                (&*inherited.cast::<CpuJit>()).optimized_ir(),
+                ordinary_reference.optimized_ir()
+            );
+            y_cpu_jit_free(inherited);
+
+            for tier in 0..=3 {
+                let options = YCpuJitOptions {
+                    training_opt_level: tier,
+                    codegen_opt_level: 3 - tier,
+                    ..Default::default()
+                };
+                let rust_options = decode_options(&options).unwrap();
+                assert_eq!(rust_options.training_opt_level, Some(tier as u8));
+                assert_eq!(rust_options.codegen_opt_level, Some((3 - tier) as u8));
+                assert!(rust_options.verify_each_pass);
+                let ordinary =
+                    y_cpu_jit_compile_with_options(SOURCE.as_ptr(), &options, &mut error);
+                assert!(!ordinary.is_null());
+                assert!(error.is_null());
+                assert_eq!(
+                    (&*ordinary.cast::<CpuJit>()).optimized_ir(),
+                    ordinary_reference.optimized_ir(),
+                    "training override cannot change ordinary IR"
+                );
+                y_cpu_jit_free(ordinary);
+
+                let training = y_cpu_jit_compile_instrumented_with_options(
+                    SOURCE.as_ptr(),
+                    &options,
+                    &mut error,
+                );
+                assert!(!training.is_null());
+                assert!(error.is_null());
+                let reference =
+                    CpuJit::compile_instrumented(SOURCE.to_str().unwrap(), rust_options).unwrap();
+                let training_jit = &*training.cast::<CpuJit>();
+                assert_eq!(
+                    training_jit.optimized_ir(),
+                    reference.optimized_ir(),
+                    "actual training IR O{tier}"
+                );
+                assert_eq!(training_jit.compile_timings().verification_checks, 2);
+                assert_eq!(
+                    training_jit.branch_profile().unwrap().total_observations(),
+                    0
+                );
+                let choose: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(
+                    y_cpu_jit_function(training, c"choose".as_ptr(), &mut error),
+                );
+                for x in [-3, -1, 0, 2, 5] {
+                    assert_eq!(choose(x), if x < 0 { x - 1 } else { x + 2 });
+                }
+                let profile = training_jit.branch_profile().unwrap();
+                assert_eq!(profile.total_observations(), 5);
+                assert_eq!(
+                    (
+                        profile.sites()[0].true_count,
+                        profile.sites()[0].false_count
+                    ),
+                    (2, 3)
+                );
+
+                // Final codegen can be selected independently of the trainer.
+                let final_options = YCpuJitOptions {
+                    codegen_opt_level: 2,
+                    ..options
+                };
+                let optimized = y_cpu_jit_compile_profiled_with_options(
+                    SOURCE.as_ptr(),
+                    &final_options,
+                    training,
+                    &mut error,
+                );
+                assert!(!optimized.is_null());
+                assert!(error.is_null());
+                let final_reference = CpuJit::compile_with_profile(
+                    SOURCE.to_str().unwrap(),
+                    decode_options(&final_options).unwrap(),
+                    &profile,
+                )
+                .unwrap();
+                let final_jit = &*optimized.cast::<CpuJit>();
+                assert_eq!(
+                    final_jit.optimized_ir(),
+                    final_reference.optimized_ir(),
+                    "final IR uses base O3, not training O{tier}"
+                );
+                assert!(!final_jit.optimized_ir().contains("atomicrmw"));
+                assert_eq!(
+                    training_jit.branch_profile().unwrap(),
+                    profile,
+                    "compilation does not execute source"
+                );
+                let final_choose: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(
+                    y_cpu_jit_function(optimized, c"choose".as_ptr(), &mut error),
+                );
+                for x in [-50, -1, 0, 17] {
+                    assert_eq!(final_choose(x), if x < 0 { x - 1 } else { x + 2 });
+                }
+                assert_eq!(choose(-9), -10, "original native address stays live");
+                y_cpu_jit_free(training);
+                assert_eq!(
+                    final_choose(9),
+                    11,
+                    "final session owns its code independently"
+                );
+                y_cpu_jit_free(optimized);
+            }
+        }
     }
 
     #[test]
