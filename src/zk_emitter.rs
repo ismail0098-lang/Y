@@ -1323,6 +1323,16 @@ fn expr_references_var(expr: &Expr, name: &str) -> bool {
     }
 }
 
+
+/// An integer constant spelled in the source (`7`, `-8`), for `@bounds`.
+fn zk_const_int(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::IntLit(v, _) => Some(*v as i128),
+        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => zk_const_int(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
 impl ZkEmitter {
     pub fn new() -> Self {
         init_cse_from_env();
@@ -2377,68 +2387,40 @@ impl ZkEmitter {
                 };
 
                 if let Some(bounds_attr) = bounds {
-                    // Let's get the max value as a constant u64 or BigUint
-                    let max_lc = self.emit_expr(&bounds_attr.max, items)?;
-                    if let Some(max_fr) = max_lc.is_constant() {
-                        let bit_len = max_fr.bit_len();
-                        
-                        // We decompose lc into bit_len bits:
-                        // lc = sum_{i=0}^{bit_len-1} b_i * 2^i
-                        // and for each b_i, b_i * b_i = b_i
-                        let mut sum_lc = LinearCombination::zero();
-                        let mut pow2 = Fr::one();
-                        for i in 0..bit_len {
-                            let bit_var = self.new_wire(&format!("{}_bit_{}", name, i));
-                            let bit_lc = LinearCombination::variable(bit_var);
-                            // constraint: bit_var * bit_var = bit_var
-                            self.constraints.push(Constraint {
-                                a: bit_lc.clone(),
-                                b: bit_lc.clone(),
-                                c: bit_lc.clone(),
-                                span: Some(bounds_attr.span.clone()),
-                            });
-                            
-                            sum_lc.add_term(bit_var, pow2);
-                            pow2 = pow2.double();
-                        }
-                        
-                        // Constrain: sum_lc = lc
-                        self.constraints.push(Constraint {
-                            a: sum_lc,
-                            b: LinearCombination::constant(Fr::one()),
-                            c: lc.clone(),
-                            span: Some(bounds_attr.span.clone()),
-                        });
-
-                        // Also decompose (max_val - lc) into bit_len bits to ensure lc <= max_val!
-                        let mut diff_lc = LinearCombination::constant(max_fr);
-                        diff_lc.add_linear(&lc, Fr::from_u64(0).sub(&Fr::one()));
-                        
-                        let mut diff_sum_lc = LinearCombination::zero();
-                        let mut pow2 = Fr::one();
-                        for i in 0..bit_len {
-                            let bit_var = self.new_wire(&format!("{}_diff_bit_{}", name, i));
-                            let bit_lc = LinearCombination::variable(bit_var);
-                            // constraint: bit_var * bit_var = bit_var
-                            self.constraints.push(Constraint {
-                                a: bit_lc.clone(),
-                                b: bit_lc.clone(),
-                                c: bit_lc.clone(),
-                                span: Some(bounds_attr.span.clone()),
-                            });
-                            
-                            diff_sum_lc.add_term(bit_var, pow2);
-                            pow2 = pow2.double();
-                        }
-                        
-                        // Constrain: diff_sum_lc = diff_lc
-                        self.constraints.push(Constraint {
-                            a: diff_sum_lc,
-                            b: LinearCombination::constant(Fr::one()),
-                            c: diff_lc,
-                            span: Some(bounds_attr.span.clone()),
-                        });
+                    // `min <= value <= max` as two range proofs: `value - min`
+                    // and `max - value` each decompose into `k` bits, `k` the
+                    // width of `max - min`; a value below `min` or above `max`
+                    // makes one of them a field element near the modulus, which
+                    // `k` bits cannot hold. This decomposed `value` alone into
+                    // the width of `max`, so `min` was ignored - `@bounds(10,
+                    // 20)` admitted 0..9 and `@bounds(-8, 7)` refused every
+                    // negative value - a bound that was not a constant was
+                    // skipped without a word, and its bit wires had no witness
+                    // recipe. `emit_num2bits` records one per bit.
+                    let (Some(lo), Some(hi)) = (zk_const_int(&bounds_attr.min), zk_const_int(&bounds_attr.max)) else {
+                        return Err(format!(
+                            "Line {}: @bounds on `{}` needs integer constants in a circuit: a bound \
+                             the circuit cannot constrain would be ignored.",
+                            bounds_attr.span.line, name
+                        ));
+                    };
+                    if hi < lo {
+                        return Err(format!(
+                            "Line {}: @bounds({}, {}) on `{}` admits no value.",
+                            bounds_attr.span.line, lo, hi, name
+                        ));
                     }
+                    let k = 128 - ((hi - lo) as u128).leading_zeros();
+                    let field = |v: i128| {
+                        let magnitude = Fr::from_u64(v.unsigned_abs() as u64);
+                        if v >= 0 { magnitude } else { Fr::zero().sub(&magnitude) }
+                    };
+                    let mut above_min = lc.clone();
+                    above_min.add_constant(Fr::zero().sub(&field(lo)));
+                    let mut below_max = LinearCombination::constant(field(hi));
+                    below_max.add_linear(&lc, Fr::zero().sub(&Fr::one()));
+                    self.emit_num2bits(&above_min, k, &bounds_attr.span);
+                    self.emit_num2bits(&below_max, k, &bounds_attr.span);
                 }
             }
             Stmt::Assign { target, value, span } => {

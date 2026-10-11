@@ -4061,12 +4061,21 @@ $$x^5 = x^4 \cdot x$$
 
 ### 24.4 Automatic Bounds Validation
 
-When a variable is annotated with `@bounds(min=..., max=...)`, the compiler generates binary bit-decomposition constraints for range enforcement:
+When a variable is annotated with `@bounds(min=..., max=...)`, the compiler generates binary bit-decomposition constraints for range enforcement, with $N = \text{bit-len}(\text{max} - \text{min})$:
 
-1. Decompose the variable $x$ into $N$ bits:
-   $$x = \sum_{i=0}^{N-1} b_i \cdot 2^i \quad \text{where } b_i \cdot (b_i - 1) = 0$$
-   where $N = \text{bit-len}(\text{max})$.
-2. Also decompose the difference $(\text{max} - x)$ into $N$ bits to enforce $x \leq \text{max}$.
+1. Decompose $(x - \text{min})$ into $N$ bits, enforcing $x \geq \text{min}$:
+   $$x - \text{min} = \sum_{i=0}^{N-1} b_i \cdot 2^i \quad \text{where } b_i \cdot (b_i - 1) = 0$$
+2. Decompose $(\text{max} - x)$ into $N$ bits, enforcing $x \leq \text{max}$.
+
+A value outside the range makes one difference a field element near the
+modulus, which $N$ bits cannot hold, so no witness satisfies the circuit. Each
+bit carries a witness recipe. `min` and `max` must be integer constants; any
+other bound is refused, since the circuit could not constrain it. Until
+2026-10-11 the value itself was decomposed into $\text{bit-len}(\text{max})$
+bits, so `min` was ignored (`@bounds(10, 20)` admitted 0..9, and every
+negative value of `@bounds(-8, 7)` was refused), a non-constant bound was
+skipped without a word, and the bits had no witness recipe, which made every
+circuit carrying `@bounds` unprovable. `tests/zk_bounds_constraint.rs`.
 
 ---
 
