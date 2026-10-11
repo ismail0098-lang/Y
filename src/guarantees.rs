@@ -97,17 +97,6 @@ pub struct Guarantees {
 }
 
 impl Guarantees {
-    /// The `@bounds` taken on trust in `item` between `first` and `last`: what
-    /// a claim about that code rests on when it uses their ranges.
-    pub fn trusted_bounds(&self, item: &str, first: usize, last: usize) -> Vec<Assumption> {
-        self.facts
-            .iter()
-            .filter(|f| f.kind == "bounds" && f.status == Status::Trusted && f.item == item)
-            .filter(|f| f.line >= first && f.line <= last)
-            .map(|f| Assumption { item: f.item.clone(), line: f.line, what: f.what.clone() })
-            .collect()
-    }
-
     /// The facts as JSON: `{"version": 1, "items": [...], "facts": [...]}`.
     /// `file_of` names the file an item was parsed from.
     ///

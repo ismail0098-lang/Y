@@ -999,7 +999,7 @@ alloc.done:
 ///
 /// LLVM takes printable ASCII literally and everything else as `\XX`. `"` and
 /// `\` must be escaped even though they are printable.
-fn llvm_escape(s: &str) -> String {
+pub(crate) fn llvm_escape(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b == b'"' || b == b'\\' || !(0x20..0x7f).contains(&b) {

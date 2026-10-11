@@ -470,6 +470,13 @@ impl NativeEmitter {
                 if let Some(t) = ty {
                     self.check_declared_type(t, "a `let`", span);
                 }
+                if crate::type_checker::RUNTIME_BOUNDS.with(|m| m.borrow().contains_key(&(span.line, span.col))) {
+                    self.unsupported(
+                        "a `@bounds` checked when the program runs (the test needs a branch, \
+                         and this backend emits none)",
+                        span,
+                    );
+                }
                 match init {
                     Some(expr) => self.emit_expr(expr),
                     // The store below would write whatever the previous

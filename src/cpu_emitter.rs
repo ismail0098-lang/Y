@@ -41,7 +41,38 @@ pub struct CpuEmitter {
     /// Every name this blob will define, so a call to anything else can be
     /// refused instead of transcribed.
     known_fns: std::collections::HashSet<String>,
+    /// A `let` whose `@bounds` is checked when the program runs was written,
+    /// so the blob ends with [`Y_WITHIN`].
+    needs_y_within: bool,
 }
+
+/// What a `@bounds` checked when the program runs calls: the LLVM and PTX
+/// backends stop the program outside the range, and so does the blob - with
+/// a panic, as its index checks do. Generic, because the blob's `let`s are
+/// untyped and Rust picks each one's type.
+const Y_WITHIN: &str = "
+/// `@bounds(lo, hi)` checked when the program runs.
+trait YWithin: Copy + std::fmt::Display {
+    fn y_within(self, lo: i128, hi: i128) -> bool;
+}
+macro_rules! y_within_int {
+    ($($t:ty),*) => { $(impl YWithin for $t {
+        fn y_within(self, lo: i128, hi: i128) -> bool { (self as i128) >= lo && (self as i128) <= hi }
+    })* };
+}
+y_within_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+impl YWithin for f32 {
+    fn y_within(self, lo: i128, hi: i128) -> bool { (self as f64) >= lo as f64 && (self as f64) <= hi as f64 }
+}
+impl YWithin for f64 {
+    fn y_within(self, lo: i128, hi: i128) -> bool { self >= lo as f64 && self <= hi as f64 }
+}
+fn y_within<T: YWithin>(v: T, lo: i128, hi: i128, line: u32) {
+    if !v.y_within(lo, hi) {
+        panic!(\"Y: line {}: {} lies outside @bounds({}, {}); stopping\", line, v, lo, hi);
+    }
+}
+";
 
 /// The Rust type of a Y scalar: every one the LLVM backend lowers
 /// (`primitive_llvm_type`). Only I32 and F32 had one, so a `U8`, `U32`, `I64`,
@@ -136,6 +167,7 @@ impl CpuEmitter {
         Self {
             unsafe_fns: std::collections::HashSet::new(),
             known_fns: PRELUDE_FNS.iter().map(|s| s.to_string()).collect(),
+            needs_y_within: false,
             host_buffer: buffer,
             indent_level: 0,
             emit_errors: Vec::new(),
@@ -187,6 +219,9 @@ impl CpuEmitter {
                 Item::Func(f) => self.emit_func(f),
                 _ => {} // Import, StaticAssert — handled elsewhere
             }
+        }
+        if self.needs_y_within {
+            self.host_buffer.push_str(Y_WITHIN);
         }
         self.host_buffer.clone()
     }
@@ -395,7 +430,7 @@ impl CpuEmitter {
                         span,
                     );
                 }
-                Stmt::Let { name, init, .. } => {
+                Stmt::Let { name, init, span, .. } => {
                     self.indent();
                     write!(&mut self.host_buffer, "let mut {} = ", name).unwrap();
                     // The two placeholder arms below wrote their own `;` and the
@@ -413,6 +448,15 @@ impl CpuEmitter {
                         write!(&mut self.host_buffer, "Default::default()").unwrap();
                     }
                     writeln!(&mut self.host_buffer, ";").unwrap();
+                    // A `@bounds` the type checker could not prove is checked
+                    // here, as every backend checks it.
+                    let checked = crate::type_checker::RUNTIME_BOUNDS
+                        .with(|m| m.borrow().get(&(span.line, span.col)).copied());
+                    if let Some((lo, hi)) = checked {
+                        self.indent();
+                        writeln!(&mut self.host_buffer, "y_within({}, {}, {}, {});", name, lo, hi, span.line).unwrap();
+                        self.needs_y_within = true;
+                    }
                 }
                 Stmt::For {
                     loop_var,

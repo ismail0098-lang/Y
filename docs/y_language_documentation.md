@@ -924,10 +924,22 @@ let index: I32 = raw & 255;
 let element: I32 = my_array[index];    // my_array: [I32; 256]
 ```
 
-**The compiler takes the range on trust.** It is not checked against the value:
-`@bounds(0, 255) let index: I32 = raw;` compiles for any `raw`, and with
-`--emit-llvm` the load it feeds is unguarded (checked 2026-09-28). A wrong
-annotation is therefore an out-of-bounds access in code the checker calls safe.
+**A range the compiler cannot prove is checked when the program runs.** When
+the initializer's range is known and lies inside, the bound is proved and costs
+nothing. Otherwise - `@bounds(0, 255) let index: I32 = raw;` for an unknown
+`raw` - the value is tested as the `let` stores it, and a value outside the
+range stops the program: `Y: line N: <value> lies outside @bounds(min, max);
+stopping` and exit code 1 on the LLVM backend and the JIT, a `trap` on the GPU
+(the launch fails), a panic in `--emit-cpu`'s Rust. Unsigned values compare
+unsigned, a float compares unordered (a NaN is outside), and a fixed-point
+local compares at its scale. `--emit-native`, which emits no branches, refuses
+such a `let` by name. A matmul substituted by the exact GEMM never runs its
+operand `let`s, so it scans both operands against their bounds first and stops
+before computing anything. Every proof that uses the range then holds for each
+execution that continues, so `ydb verify` reports the bound as `run-time` and
+nothing rests on it. Until 2026-10-11 the range was taken on trust: a proof
+from it let `arr[i]` skip its own check, and `arr[i] = 42` with `i` a million
+wrote past a four-element array under `@safe`.
 `max` is inclusive: `@bounds(0, 256)` on an index into a 256-element array is
 refused. The condition form this section used to show, `@bounds(0 <= index <
 256)`, does not parse (`Expected ',' in @bounds but found RParen`).
@@ -2796,7 +2808,7 @@ The Y version enforces at compile time that `pipe.wait(tx)` is called before `sm
 | :--- | :--- | :--- |
 | No equivalent | `@safe { }` | Enforces initialization, bounds, invariants at compile time |
 | No equivalent | `@unsafe fn` | Explicit opt-out of safety checks, required for raw pointer math. A function annotation: `@unsafe { }` as a block does not parse (§9.9) |
-| `assert(cond)` (runtime) | `@bounds(min, max)` | Asserts a range the compiler takes on trust, without checking it against the value (§9.10) |
+| `assert(cond)` (runtime) | `@bounds(min, max)` | Declares a range: proved when the program is compiled where it can be, otherwise checked when it runs (§9.10) |
 | No equivalent | `@invariant(expr)` | Loop invariant verified at every iteration by type checker |
 
 ### 13.6 Cache Policies

@@ -245,11 +245,6 @@ impl DebugInfo {
         }
     }
 
-    /// The `@bounds` the front end took on trust in `item` between two lines.
-    pub fn trusted_bounds(&self, item: &str, first: usize, last: usize) -> Vec<crate::guarantees::Assumption> {
-        self.guarantees.as_ref().map(|g| g.trusted_bounds(item, first, last)).unwrap_or_default()
-    }
-
     /// The path of the file `item` was parsed from.
     fn file_path(&self, item: &str) -> String {
         let (name, dir) = &self.files[self.file_of(item)];

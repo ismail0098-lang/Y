@@ -3893,7 +3893,77 @@ or `shared_alloc_u32` for a shared-memory array.",
     fn emit_stmt(&mut self, stmt: &Stmt, hw_profile: &HardwareProfile) {
         self.loc_enter(&stmt.span());
         self.emit_stmt_inner(stmt, hw_profile);
+        if let Stmt::Let { name, span, .. } = stmt {
+            let checked = crate::type_checker::RUNTIME_BOUNDS
+                .with(|m| m.borrow().get(&(span.line, span.col)).copied());
+            if let Some((lo, hi)) = checked {
+                self.emit_let_bounds_check(name, span.line, lo, hi);
+            }
+        }
         self.loc_leave();
+    }
+
+    /// A `@bounds(lo, hi)` the type checker could not prove
+    /// (`type_checker::RUNTIME_BOUNDS`) is tested as soon as its `let` has
+    /// bound the value, and a value outside traps, as an index outside its
+    /// array does. It used to be taken on trust. An integer compares in its
+    /// own type, with the bounds clamped to it (a bound beyond the type's
+    /// range needs no test; a range outside it traps unconditionally); a
+    /// float compares unordered, so a NaN is outside; a `@ZeroDrift`
+    /// accumulator compares its fixed-point register at its scale.
+    fn emit_let_bounds_check(&mut self, name: &str, line: usize, lo: i64, hi: i64) {
+        let (reg, ty, frac) = if let Some((acc, repr, _, _)) = self.zero_drift.get(name) {
+            (acc.clone(), ScalarTy::I64, repr.frac_bits())
+        } else if let Some(reg) = self.variables.get(name) {
+            (reg.clone(), self.ty_of(reg), 0)
+        } else {
+            self.emit_errors.push(format!(
+                "Line {line}: `@bounds` on `{}` must be checked when the program runs, and it has \
+                 no register of its own here to test.",
+                crate::lexical_scope::source_name(name)
+            ));
+            return;
+        };
+        writeln!(&mut self.ptx_buffer, "    // @bounds({lo}, {hi}), checked when the program runs").unwrap();
+        let suffix = ty.arith();
+        if ty.is_float() {
+            // Compared as an f64, which holds every f32 and every bound up to
+            // 2^53 exactly; an f32 immediate would round a bound like 2^24 + 1.
+            let wide = if ty == ScalarTy::F64 {
+                reg.clone()
+            } else {
+                let wide = self.alloc_ty(ScalarTy::F64);
+                writeln!(&mut self.ptx_buffer, "    cvt.f64.f32 {wide}, {reg};").unwrap();
+                wide
+            };
+            for (cmp, imm) in [("ltu", Self::ptx_f64(lo as f64)), ("gtu", Self::ptx_f64(hi as f64))] {
+                let pred = self.alloc_pred();
+                writeln!(&mut self.ptx_buffer, "    setp.{cmp}.f64 {pred}, {wide}, {imm};").unwrap();
+                writeln!(&mut self.ptx_buffer, "    @{pred} trap;").unwrap();
+            }
+            return;
+        }
+        let bits = if ty.is_64() { 64 } else { 32 };
+        let (tmin, tmax): (i128, i128) = if ty.is_signed() || frac > 0 {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        } else {
+            (0, (1i128 << bits) - 1)
+        };
+        let (lo_s, hi_s) = ((lo as i128) << frac, (hi as i128) << frac);
+        if lo_s > tmax || hi_s < tmin || lo_s > hi_s {
+            writeln!(&mut self.ptx_buffer, "    trap;").unwrap();
+            return;
+        }
+        if lo_s > tmin {
+            let pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.lt.{suffix} {pred}, {reg}, {lo_s};").unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{pred} trap;").unwrap();
+        }
+        if hi_s < tmax {
+            let pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.gt.{suffix} {pred}, {reg}, {hi_s};").unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{pred} trap;").unwrap();
+        }
     }
 
     fn emit_stmt_inner(&mut self, stmt: &Stmt, hw_profile: &HardwareProfile) {

@@ -436,7 +436,7 @@ uncomposed header or cross-thread effects. See the
 over a model of the emitter, and its range, bit-decomposition, comparison and
 division gadgets are proved sound with Z3; Groth16 proofs are compared element
 for element with arkworks. `@invariant` is discharged by Z3 and refuses what it
-cannot model; a `@bounds` range is taken on trust. The rest — the general LLVM backend, `--emit-native`,
+cannot model; a `@bounds` range it cannot prove is checked when the program runs. The rest — the general LLVM backend, `--emit-native`,
 `--emit-cpu`, the type checker, the ZK optimisation passes — is tested, not
 verified.
 
@@ -1410,9 +1410,11 @@ bounds it can prove; under `@unsafe` an index it cannot prove is checked when
 the program runs instead. Until October 2026 an array reached through a
 reference (`a: &mut [I16; 4]`) was neither proved nor checked: `a[9] = 1`
 compiled in strict mode and wrote past the array. `@bounds(min, max)` on a `let` is how a value the checker
-cannot bound gets a range, and **that range is taken on trust**: nothing checks
-it against the value, so a wrong annotation is an unguarded out-of-bounds access
-in code the checker calls safe.
+cannot bound gets a range. A range the checker cannot prove **is checked when the
+program runs**: the value is tested as the `let` stores it, and one outside the
+range stops the program (a message and exit code 1; a trap on the GPU; a panic
+in `--emit-cpu`'s Rust). Until October 2026 it was taken on trust, so a wrong
+annotation was an unguarded out-of-bounds access in code the checker calls safe.
 
 ```
 fn main() {

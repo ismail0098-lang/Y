@@ -316,6 +316,12 @@ pub struct LlvmEmitter {
     needs_gemm_module: bool,
     /// The flush interval of the exact VNNI GEMM, when one was substituted.
     needs_exact_gemm_module: Option<u32>,
+    /// A `let` whose `@bounds` is checked when the program runs was emitted,
+    /// so the messages its checks print are defined at the end of the module.
+    needs_bounds_messages: bool,
+    /// The exact GEMM scans its operands against their `@bounds` before it
+    /// reads them, through one helper defined at the end of the module.
+    needs_operand_scan: bool,
     /// DWARF debug information (`-g`), when requested. `None` leaves every
     /// emitted module byte-for-byte as it was; see `crate::debug_info`.
     debug: Option<crate::debug_info::DebugInfo>,
@@ -415,6 +421,49 @@ fn ast_type_to_string(ty: &Type) -> String {
         }
     }
 }
+
+
+/// The exact GEMM's operand scan: every `rows x cols` element of a row-major
+/// `i16` operand with leading dimension `ld` against `[lo, hi]`, stopping the
+/// program at the first one outside. `which` is the operand's letter.
+const OPERAND_SCAN: &str = "
+define internal void @__y_operand_bounds(ptr %p, i64 %rows, i64 %cols, i64 %ld, i64 %lo, i64 %hi, i32 %which) {
+entry:
+  br label %row
+row:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %row.next ]
+  %row.more = icmp slt i64 %i, %rows
+  br i1 %row.more, label %col.pre, label %done
+col.pre:
+  %base = mul i64 %i, %ld
+  br label %col
+col:
+  %j = phi i64 [ 0, %col.pre ], [ %j.next, %col.next ]
+  %col.more = icmp slt i64 %j, %cols
+  br i1 %col.more, label %check, label %row.next
+check:
+  %off = add i64 %base, %j
+  %addr = getelementptr i16, ptr %p, i64 %off
+  %e = load i16, ptr %addr, align 2
+  %v = sext i16 %e to i64
+  %low = icmp slt i64 %v, %lo
+  %high = icmp sgt i64 %v, %hi
+  %outside = or i1 %low, %high
+  br i1 %outside, label %stop, label %col.next
+col.next:
+  %j.next = add i64 %j, 1
+  br label %col
+row.next:
+  %i.next = add i64 %i, 1
+  br label %row
+stop:
+  %printed = call i32 (ptr, ...) @printf(ptr @.y_operand_bounds, i32 %which, i64 %i, i64 %j, i64 %v, i64 %lo, i64 %hi)
+  call void @exit(i32 1)
+  unreachable
+done:
+  ret void
+}
+";
 
 impl LlvmEmitter {
     pub fn new() -> Self {
@@ -602,6 +651,8 @@ impl LlvmEmitter {
             loop_exit_stack: Vec::new(),
             needs_gemm_module: false,
             needs_exact_gemm_module: None,
+            needs_bounds_messages: false,
+            needs_operand_scan: false,
             debug: None,
         }
     }
@@ -2255,6 +2306,31 @@ impl LlvmEmitter {
             // when that module is absent.
             let t = crate::cpu_gemm::emit_vnni_threaded_module(!self.needs_gemm_module);
             self.output.push_str(&t);
+        }
+
+        if self.needs_bounds_messages || self.needs_operand_scan {
+            self.wln("");
+            for (global, text) in [
+                ("@.y_bounds_int", "Y: line %ld: %lld lies outside @bounds(%lld, %lld); stopping\n"),
+                ("@.y_bounds_uint", "Y: line %ld: %llu lies outside @bounds(%lld, %lld); stopping\n"),
+                ("@.y_bounds_real", "Y: line %ld: %g lies outside @bounds(%lld, %lld); stopping\n"),
+                (
+                    "@.y_operand_bounds",
+                    "Y: the exact GEMM's operand %c[%lld][%lld] is %lld, outside its @bounds(%lld, %lld); \
+                     stopping before computing anything\n",
+                ),
+            ] {
+                writeln!(
+                    &mut self.output,
+                    "{global} = private unnamed_addr constant [{} x i8] c\"{}\\00\"",
+                    text.len() + 1,
+                    crate::cpu_gemm::llvm_escape(text)
+                )
+                .unwrap();
+            }
+        }
+        if self.needs_operand_scan {
+            self.output.push_str(OPERAND_SCAN);
         }
 
         // Metadata node `!0`, referenced by `!uniform_branch` on loop branches.
@@ -4034,8 +4110,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         "this kernel runs Y's exact vpdpwssd GEMM in place of its body when its \
 three buffers do not overlap and their extents fit in 64 bits - checked when the program runs; \
 otherwise the body runs as written. proofs/ExactGemmWhole.v proves the substituted kernel holds this nest's \
-dot products exactly, for every shape - provided every operand lies within the @bounds on \
-its operand `let`, which nothing checks when the program runs. `Y --emit-llvm` writes the \
+dot products exactly, for every shape and every operand within the @bounds on its operand \
+`let` - checked when the program runs: the kernel scans both operands first, and an element \
+outside its range stops the program before anything is computed. `Y --emit-llvm` writes the \
 certificate that instantiates the proof for this nest. Everything below the LLVM IR - clang, \
 the assembler, the processor - is trusted"
                             .to_string(),
@@ -4053,15 +4130,11 @@ nest as written"
                     )
                 };
                 let end_line = crate::ast::last_line(&k.body).max(k.span.line);
-                // The licence is granted from the operands' `@bounds`, which
-                // nothing checks: the exactness claim rests on them. Every
-                // trusted range in the kernel is named - a superset, which is
-                // the safe direction for a list of assumptions.
-                let rests_on = if exact {
-                    d.trusted_bounds(&k.name, k.span.line, end_line)
-                } else {
-                    Vec::new()
-                };
+                // The licence is granted from the operands' `@bounds`, and
+                // those are checked when the program runs (the scan above, or
+                // the `let`s on the body's path), so the claim rests on no
+                // assumption of the program's.
+                let rests_on = Vec::new();
                 d.add_fact(crate::guarantees::Fact {
                     item: k.name.clone(),
                     line: k.span.line,
@@ -4322,6 +4395,30 @@ nest as written"
             ptrs.push(tmp);
         }
         let (m, n, k) = (ext[0].clone(), ext[1].clone(), ext[2].clone());
+
+        // The licence was granted from both operands' `@bounds`, and the
+        // substituted kernel never runs their `let`s, so it scans both first:
+        // an element outside its range stops the program before anything is
+        // computed, exactly where the nest as written would have stopped at its
+        // `let` (the `@bounds` of a `let` is checked when the program runs).
+        // Without the scan an operand of 5000 under `@bounds(-1024, 1024)`
+        // overflowed the int32 accumulator into a wrong answer under a
+        // certificate claiming exactness.
+        let drift = shape.drift.as_ref()?;
+        for (operand, rows, cols, ld, (lo, hi), ptr) in [
+            ('A', &m, &k, &ext[3], drift.a_bounds?, &ptrs[0]),
+            ('B', &k, &n, &ext[4], drift.b_bounds?, &ptrs[1]),
+        ] {
+            writeln!(
+                &mut self.output,
+                "  call void @__y_operand_bounds(ptr {ptr}, i64 {rows}, i64 {cols}, i64 {ld}, i64 {}, i64 {}, i32 {})",
+                lo.ceil() as i64,
+                hi.floor() as i64,
+                operand as u32
+            )
+            .unwrap();
+        }
+        self.needs_operand_scan = true;
 
         let mut bin = |op: &str, a: &str, b: &str, out: &mut String| {
             let t = format!("%_t{}", {
@@ -4716,9 +4813,122 @@ nest as written"
         // The binding exists once its initialiser has been stored, not before:
         // the `let`'s own code runs in the enclosing scope.
         if let Stmt::Let { name, span, .. } = stmt {
+            let checked = crate::type_checker::RUNTIME_BOUNDS
+                .with(|m| m.borrow().get(&(span.line, span.col)).copied());
+            if let (Some((lo, hi)), false) = (checked, self.block_terminated) {
+                self.emit_let_bounds_check(name, span.line, lo, hi);
+            }
             self.dbg_bind(name, span, true);
         }
         self.dbg_leave(outer);
+    }
+
+    /// A `@bounds(lo, hi)` the type checker could not prove
+    /// (`type_checker::RUNTIME_BOUNDS`) is tested as soon as its `let` has
+    /// stored the value, and a value outside stops the program the way an
+    /// index outside its array does: a message, then `exit(1)`. It used to be
+    /// taken on trust, and a proof resting on it let `arr[i]` skip its own
+    /// check. A fixed-point local (`@ZeroDrift`, a Q format) is compared at
+    /// its scale; a float compares unordered, so a NaN is outside.
+    fn emit_let_bounds_check(&mut self, name: &str, line: usize, lo: i64, hi: i64) {
+        let shown = crate::lexical_scope::source_name(name).to_string();
+        let Some(ty) = self.locals.get(name).cloned() else {
+            self.emit_errors.push(format!(
+                "Line {line}: `@bounds` on `{shown}` must be checked when the program runs, and \
+                 `{shown}` has no storage of its own here to test."
+            ));
+            return;
+        };
+        let unsigned = matches!(
+            self.locals_ast_type.get(name).map(String::as_str),
+            Some("U8" | "U16" | "U32" | "U64" | "u8" | "u16" | "u32" | "u64" | "usize")
+        );
+        // (storage type, signed, fraction bits), or a float.
+        let fixed = if let Some(&(repr, _)) = self.zero_drift.get(name) {
+            Some((repr.llvm_type().to_string(), true, repr.frac_bits()))
+        } else if let Some(fmt) = self.local_q_format(name) {
+            Some((fmt.llvm(), true, fmt.frac))
+        } else if matches!(ty.as_str(), "i8" | "i16" | "i32" | "i64") {
+            Some((ty.clone(), !unsigned, 0))
+        } else {
+            None
+        };
+        let float = matches!(ty.as_str(), "half" | "float" | "double");
+        if fixed.is_none() && !float {
+            self.emit_errors.push(format!(
+                "Line {line}: `@bounds` on `{shown}` must be checked when the program runs, and a \
+                 value of LLVM type `{ty}` has no ordering to test."
+            ));
+            return;
+        }
+        let value = self.emit_load(&format!("%{name}"), fixed.as_ref().map_or(&ty, |f| &f.0));
+        let (low, high) = (self.fresh_tmp(), self.fresh_tmp());
+        let shown_value;
+        let message;
+        match &fixed {
+            Some((storage, signed, frac)) => {
+                let (Some(lo_s), Some(hi_s)) = (
+                    (lo as i128).checked_mul(1i128 << frac),
+                    (hi as i128).checked_mul(1i128 << frac),
+                ) else {
+                    self.emit_errors.push(format!(
+                        "Line {line}: `@bounds({lo}, {hi})` on `{shown}` does not fit its scale."
+                    ));
+                    return;
+                };
+                let wide = self.fresh_tmp();
+                let ext = if *signed { "sext" } else { "zext" };
+                writeln!(&mut self.output, "  {wide} = {ext} {storage} {value} to i128").unwrap();
+                writeln!(&mut self.output, "  {low} = icmp slt i128 {wide}, {lo_s}").unwrap();
+                writeln!(&mut self.output, "  {high} = icmp sgt i128 {wide}, {hi_s}").unwrap();
+                if *frac == 0 {
+                    let v = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {v} = trunc i128 {wide} to i64").unwrap();
+                    shown_value = format!("i64 {v}");
+                    message = if *signed { "@.y_bounds_int" } else { "@.y_bounds_uint" };
+                } else {
+                    let (f, d) = (self.fresh_tmp(), self.fresh_tmp());
+                    writeln!(&mut self.output, "  {f} = sitofp i128 {wide} to double").unwrap();
+                    writeln!(
+                        &mut self.output,
+                        "  {d} = fdiv double {f}, 0x{:016X}",
+                        2f64.powi(*frac as i32).to_bits()
+                    )
+                    .unwrap();
+                    shown_value = format!("double {d}");
+                    message = "@.y_bounds_real";
+                }
+            }
+            None => {
+                let d = if ty == "double" {
+                    value
+                } else {
+                    let d = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {d} = fpext {ty} {value} to double").unwrap();
+                    d
+                };
+                writeln!(&mut self.output, "  {low} = fcmp ult double {d}, 0x{:016X}", (lo as f64).to_bits()).unwrap();
+                writeln!(&mut self.output, "  {high} = fcmp ugt double {d}, 0x{:016X}", (hi as f64).to_bits()).unwrap();
+                shown_value = format!("double {d}");
+                message = "@.y_bounds_real";
+            }
+        }
+        let outside = self.fresh_tmp();
+        writeln!(&mut self.output, "  {outside} = or i1 {low}, {high}").unwrap();
+        let (stop, ok) = (self.fresh_label("bounds.stop"), self.fresh_label("bounds.ok"));
+        writeln!(&mut self.output, "  br i1 {outside}, label %{stop}, label %{ok}").unwrap();
+        writeln!(&mut self.output, "{stop}:").unwrap();
+        let printed = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {printed} = call i32 (ptr, ...) @printf(ptr {message}, i64 {line}, {shown_value}, i64 {lo}, i64 {hi})"
+        )
+        .unwrap();
+        writeln!(&mut self.output, "  call void @exit(i32 1)").unwrap();
+        writeln!(&mut self.output, "  unreachable").unwrap();
+        writeln!(&mut self.output, "{ok}:").unwrap();
+        self.block_terminated = false;
+        self.needs_bounds_messages = true;
     }
 
     /// The jump out of the end of a block - an `if` branch to its merge block,

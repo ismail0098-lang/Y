@@ -324,7 +324,10 @@ pub fn render(cert: &Certificate, source: &str, stem: &str) -> String {
     Operands    : |x| <= {mag} as declared by `@bounds`, certified at the
                   integer bound {m} (rounded UP: see
                   `exact_gemm_certificate::integer_bound`, where the direction
-                  is argued for both roles `m` plays)
+                  is argued for both roles `m` plays). Checked when the program
+                  runs: the kernel scans both operands first, and an element
+                  outside its declared range stops the program before anything
+                  is computed, so the hypotheses below hold whenever it runs
     Flush       : {fl} k-pairs accumulated in int32 between widenings into int64
     Schedule    : `ExactGemmSchedule.v`, generated from `src/cpu_gemm.rs`
 

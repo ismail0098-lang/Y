@@ -21,6 +21,10 @@ thread_local! {
     pub static SAFE_INDICES: std::cell::RefCell<std::collections::HashSet<(usize, usize)>> = std::cell::RefCell::new(std::collections::HashSet::new());
     pub static INDEX_ARRAY_SIZES: std::cell::RefCell<std::collections::HashMap<(usize, usize), usize>> = std::cell::RefCell::new(std::collections::HashMap::new());
     pub static INDEX_SWIZZLES: std::cell::RefCell<std::collections::HashMap<(usize, usize), SwizzlePattern>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// `let`s whose `@bounds(min, max)` the checker could not prove, by the
+    /// `let`'s (line, col): every backend that lowers one tests the stored
+    /// value against `(min, max)` and stops the program outside it.
+    pub static RUNTIME_BOUNDS: std::cell::RefCell<std::collections::HashMap<(usize, usize), (i64, i64)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,11 +32,11 @@ pub struct Interval {
     pub min: i64,
     pub max: i64,
     /// The assumptions this range rests on, as bits of
-    /// `TypeChecker::assumptions` (bit 63 stands for the 64th and later). A
-    /// `@bounds` the checker cannot check is taken on trust, and a proof that
-    /// used a range resting on one is a proof from that assumption - which
-    /// `ydb verify` has to be able to say. Every construction site states it,
-    /// so none can drop it.
+    /// `TypeChecker::assumptions` (bit 63 stands for the 64th and later), and
+    /// a proof that used such a range is a proof from those assumptions -
+    /// which `ydb verify` has to be able to say. Every construction site
+    /// states it, so none can drop it. (A `@bounds` the checker cannot prove
+    /// was one; it is checked when the program runs now - `RUNTIME_BOUNDS`.)
     pub trust: u64,
 }
 
@@ -252,6 +256,7 @@ fn reset_thread_locals() {
     SAFE_INDICES.with(|s| s.borrow_mut().clear());
     INDEX_ARRAY_SIZES.with(|s| s.borrow_mut().clear());
     INDEX_SWIZZLES.with(|s| s.borrow_mut().clear());
+    RUNTIME_BOUNDS.with(|s| s.borrow_mut().clear());
 }
 
 impl TypeChecker {
@@ -283,13 +288,6 @@ blockIdx.y and .z < 65535)"
             unverified: None,
             index_sites: std::collections::BTreeMap::new(),
         }
-    }
-
-    /// A new assumption, at `line` of the item being checked; its bit.
-    fn new_assumption(&mut self, line: usize, what: String) -> u64 {
-        let id = self.assumptions.len();
-        self.assumptions.push(Assumption { item: self.current_item.clone(), line, what });
-        1u64 << id.min(63)
     }
 
     /// The assumptions `trust` names.
@@ -1930,8 +1928,8 @@ representation the backend selects, and anything else is refused"
                         }
                         // CHECKED when the initializer's range is known and lies
                         // inside: the declared range then rests on whatever the
-                        // initializer's did. Otherwise it is TAKEN ON TRUST, and
-                        // every proof that uses it says so.
+                        // initializer's did. Otherwise it is checked when the
+                        // program runs (`RUNTIME_BOUNDS`).
                         let what = format!("@bounds({}, {}) on `{}`", mn, mx, name);
                         let from_bounds = min_iv.trust | max_iv.trust;
                         let trust = match init_interval {
@@ -1947,20 +1945,28 @@ representation the backend selects, and anything else is refused"
                                 );
                                 iv.trust | from_bounds
                             }
+                            // It used to be TAKEN ON TRUST: an assumption every
+                            // proof using the range rested on, so a proved index
+                            // skipped its own check, and `arr[i]` with `i` a
+                            // million wrote past a four-element array under
+                            // `@safe`. Every backend that lowers this `let` now
+                            // tests the stored value and stops the program
+                            // outside the range, so a proof from it holds for
+                            // every execution that continues.
                             other => {
+                                RUNTIME_BOUNDS.with(|m| m.borrow_mut().insert((span.line, span.col), (mn, mx)));
                                 let why = match other {
                                     Some(iv) => format!(
-                                        "TRUSTED, and contradicted: the initializer's range [{}, {}] exceeds it, \
-which @unsafe lets through. Every proof using this range assumes it",
+                                        "checked when the program runs, and the initializer's range [{}, {}] \
+exceeds it, which @unsafe lets through: a value outside the range stops the program",
                                         iv.min, iv.max
                                     ),
-                                    None => "TRUSTED: nothing bounds the initializer, so the compiler assumes the \
-range without checking it. Every proof using this range assumes it"
+                                    None => "checked when the program runs: nothing bounds the initializer here, \
+so the stored value is tested and a value outside the range stops the program"
                                         .to_string(),
                                 };
-                                let bit = self.new_assumption(span.line, what.clone());
-                                self.fact("bounds", Status::Trusted, span, span.line, what, why, from_bounds);
-                                bit | from_bounds
+                                self.fact("bounds", Status::RunTime, span, span.line, what, why, from_bounds);
+                                from_bounds
                             }
                         };
                         self.insert_interval(name.clone(), Interval { min: mn, max: mx, trust });

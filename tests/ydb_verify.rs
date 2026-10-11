@@ -11,8 +11,9 @@
 //!
 //! The controls are what make these claims worth anything: a kernel with the
 //! committed one's NAME and one instruction changed must not be credited, a
-//! proof from a trusted range must say so, and a proof whose solver did not
-//! run must not read as proved.
+//! range checked when the program runs must say so (and no proof may rest on
+//! it as an assumption), and a proof whose solver did not run must not read as
+//! proved.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,7 +41,7 @@ fn line_of(src: &str, tag: &str) -> usize {
 
 const PROG: &str = "\
 fn total(n: I32) -> I32 {
-    @bounds(0, 6) let m: I32 = n; // L:trusted
+    @bounds(0, 6) let m: I32 = n; // L:runtime
     let v: [I32; 8] = {};
     let s: I32 = 0;
     @invariant(i >= 0)
@@ -154,21 +155,25 @@ fn the_table_says_how_each_fact_is_established() {
     let vi = fact(&table, "index", l("vi"), "v[i]");
     assert_eq!(status(&vi), "proved", "{}", vi);
     assert!(vi.contains("the index lies in [0, 5] and there are 8 elements"), "{}", vi);
-    assert!(vi.contains("@bounds(0, 6) on `m`"), "the proof rests on m's trusted range and must say so:\n{}", vi);
+    // m's range is checked when the program runs, so the proof from it holds
+    // for every execution that reaches `v[i]` and rests on no assumption.
+    // (It rested on the annotation as one while the range was trusted.)
+    assert!(vi.contains("\"rests_on\": []"), "{}", vi);
     // `v[2]` needs no assumption, and must not borrow one.
     let v2 = fact(&table, "index", l("v2"), "v[2]");
     assert_eq!(status(&v2), "proved");
     assert!(v2.contains("\"rests_on\": []"), "{}", v2);
 
-    let trusted = fact(&table, "bounds", l("trusted"), "@bounds(0, 6) on `m`");
-    assert_eq!(status(&trusted), "trusted", "nothing bounds `n`: {}", trusted);
+    let runtime = fact(&table, "bounds", l("runtime"), "@bounds(0, 6) on `m`");
+    assert_eq!(status(&runtime), "run-time", "nothing bounds `n` here: {}", runtime);
+    assert!(runtime.contains("checked when the program runs"), "{}", runtime);
     let checked = fact(&table, "bounds", l("checked"), "@bounds(0, 3) on `c`");
     assert_eq!(status(&checked), "checked", "{}", checked);
     assert!(checked.contains("[2, 2]"), "{}", checked);
 
     let inv = fact(&table, "invariant", l("loop"), "@invariant(i >= 0)");
     assert_eq!(status(&inv), "proved");
-    assert!(inv.contains("@bounds(0, 6) on `m`"), "z3 was given m's trusted range:\n{}", inv);
+    assert!(inv.contains("\"rests_on\": []"), "z3 was given m's range, which is checked when the program runs:\n{}", inv);
     assert!(inv.contains(&format!("\"end\": {},", l("vi"))), "the invariant covers its body:\n{}", inv);
     let kinv = fact(&table, "invariant", l("kloop"), "@invariant(i >= 0)");
     assert!(kinv.contains("\"rests_on\": []"), "{}", kinv);
@@ -262,7 +267,9 @@ fn verify_reports_proofs_and_what_they_assume() {
     let here = flat(text.split("@@here").nth(1).and_then(|s| s.split("@@kernel").next()).unwrap_or(""));
     assert!(here.contains("(the facts this binary carries)"), "{}", text);
     assert!(here.contains("PROVED v[i]: in bounds: the index lies in [0, 5]"), "{}", text);
-    assert!(here.contains("assumes, without checking: @bounds(0, 6) on `m` (prog.ysu:"), "{}", text);
+    // m's range is checked when the program runs, so the proof assumes nothing
+    // unchecked; while the range was trusted it listed it here.
+    assert!(!here.contains("assumes, without checking"), "{}", text);
     assert!(here.contains("The code this process runs (clang -O0, from the LLVM IR):"), "{}", text);
     assert!(!here.contains("The code the GPU runs"), "a host function has no GPU section:\n{}", text);
     let kernel = flat(text.split("@@kernel").nth(1).unwrap_or(""));
@@ -440,8 +447,9 @@ fn emit_guarantees_refuses_what_it_would_ignore() {
 }
 
 /// The host backend's GEMM substitution is a fact about what RUNS: the exact
-/// kernel is proved (and rests on the operands' trusted `@bounds`), the f32
-/// one is tested. Each fact appears exactly when the backend substituted.
+/// kernel is proved for operands within their `@bounds`, which it scans for
+/// when the program runs (so nothing rests on them); the f32 one is tested.
+/// Each fact appears exactly when the backend substituted.
 #[test]
 fn a_substituted_kernel_is_a_fact_about_the_code() {
     let exact = "\
@@ -523,8 +531,8 @@ fn main() {
     if substituted {
         assert_eq!(gemm.len(), 1, "{}", table);
         assert_eq!(status(&gemm[0]), "proved", "{}", gemm[0]);
-        assert!(gemm[0].contains("@bounds(-1024, 1024) on `a_val`") && gemm[0].contains("@bounds(-1024, 1024) on `b_val`"),
-                "the exactness claim rests on the operands' trusted ranges:\n{}", gemm[0]);
+        assert!(gemm[0].contains("the kernel scans both operands first") && gemm[0].contains("\"rests_on\": []"),
+                "the operands' ranges are checked when the program runs, not assumed:\n{}", gemm[0]);
     } else {
         eprintln!("NOTE: the exact kernel was not substituted on this machine (no AVX-512 VNNI), so only its absence is checked");
         assert!(gemm.is_empty(), "a substitution that did not happen is reported:\n{}", table);
